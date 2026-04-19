@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebQQ</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#1a1a2e;--bg2:#16213e;--bg3:#0f3460;--fg:#e0e0e0;--fg2:#a0a0a0;--accent:#e94560;--accent2:#533483;--border:#2a2a4a;--msg-self:#0f3460;--msg-other:#16213e}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.login-overlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100}
+.login-box{background:var(--bg2);padding:40px;border-radius:12px;text-align:center;min-width:320px}
+.login-box h1{margin-bottom:20px;font-size:24px}
+.login-box input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;outline:none}
+.login-box input:focus{border-color:var(--accent)}
+.login-box button{margin-top:16px;padding:10px 32px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
+.login-box button:hover{opacity:.85}
+.login-box .error{color:var(--accent);margin-top:10px;font-size:13px}
+.status-bar{height:32px;display:flex;align-items:center;padding:0 16px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:12px;color:var(--fg2)}
+.status-bar .dot{width:8px;height:8px;border-radius:50%;margin-right:8px}
+.status-bar .dot.ok{background:#4caf50}
+.status-bar .dot.err{background:var(--accent)}
+.main{flex:1;display:flex;overflow:hidden}
+.sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.sidebar-header{padding:12px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600}
+.chat-list{flex:1;overflow-y:auto}
+.chat-item{padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .15s}
+.chat-item:hover{background:var(--bg3)}
+.chat-item.active{background:var(--bg3)}
+.chat-item .name{font-size:14px;margin-bottom:2px}
+.chat-item .preview{font-size:12px;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-item .time{font-size:11px;color:var(--fg2);float:right;margin-top:2px}
+.messages-area{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.messages-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600}
+.messages-scroll{flex:1;overflow-y:auto;padding:12px 16px}
+.msg{margin-bottom:8px;max-width:70%}
+.msg.self{margin-left:auto}
+.msg .sender{font-size:12px;color:var(--fg2);margin-bottom:2px}
+.msg .bubble{padding:8px 12px;border-radius:8px;background:var(--msg-other);word-break:break-word;font-size:14px;line-height:1.5}
+.msg.self .bubble{background:var(--msg-self)}
+.msg .ts{font-size:11px;color:var(--fg2);margin-top:2px}
+.at-mention{color:var(--accent);cursor:pointer;border-radius:3px;padding:0 2px}
+.at-mention:hover{text-decoration:underline}
+.send-bar{display:flex;padding:8px 12px;border-top:1px solid var(--border);background:var(--bg2);position:relative}
+.send-bar input{flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;outline:none}
+.send-bar input:focus{border-color:var(--accent)}
+.send-bar button{margin-left:8px;padding:10px 20px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
+.send-bar button:hover{opacity:.85}
+.empty-state{flex:1;display:flex;align-items:center;justify-content:center;color:var(--fg2);font-size:15px}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
+.modal-box{background:var(--bg2);padding:28px 32px;border-radius:10px;max-width:400px;width:90%;text-align:center}
+.modal-box p{margin-bottom:18px;font-size:14px;line-height:1.5}
+.modal-box button{padding:8px 28px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
+.modal-box button:hover{opacity:.85}
+.at-dropdown{position:absolute;bottom:100%;left:12px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:50;min-width:220px}
+.at-dropdown.show{display:block}
+.at-item{padding:6px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)}
+.at-item:hover{background:var(--bg3)}
+.at-item .uid{color:var(--fg2);margin-left:8px;font-size:11px}
+.toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:var(--bg3);color:var(--fg);padding:8px 18px;border-radius:6px;font-size:13px;z-index:300;animation:toastIn .2s,toastOut .3s 1.5s forwards}
+@keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+@keyframes toastOut{to{opacity:0;transform:translateX(-50%) translateY(10px)}}
+</style>
+</head>
+<body>
+
+<div class="login-overlay" id="loginOverlay" style="display:none">
+  <div class="login-box">
+    <h1>WebQQ</h1>
+    <form onsubmit="doLogin();return false">
+      <input type="password" id="tokenInput" placeholder="Enter token..." autocomplete="off">
+      <button type="submit">Login</button>
+    </form>
+    <div class="error" id="loginError"></div>
+  </div>
+</div>
+
+<div class="status-bar">
+  <span class="dot" id="statusDot"></span>
+  <span id="statusText">Connecting...</span>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="sidebar-header">Chats</div>
+    <div class="chat-list" id="chatList"></div>
+  </div>
+  <div class="messages-area" id="messagesArea" style="display:none">
+    <div class="messages-header" id="chatTitle">-</div>
+    <div class="messages-scroll" id="messagesScroll"></div>
+    <div class="send-bar">
+      <div class="at-dropdown" id="atDropdown"></div>
+      <input type="text" id="sendInput" placeholder="Type a message... (@ to mention)" autocomplete="off">
+      <button onclick="doSend()">Send</button>
+    </div>
+  </div>
+  <div class="empty-state" id="emptyState">Select a chat</div>
+</div>
+
+<script>
+let currentChat = null;
+let ws = null;
+let authed = false;
+let nicknames = {};
+let atSearch = null;
+
+const $ = id => document.getElementById(id);
+
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2000);
+}
+
+function showModal(msg) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `<div class="modal-box"><p>${esc(msg)}</p><button onclick="this.closest('.modal-overlay').remove()">OK</button></div>`;
+  document.body.appendChild(overlay);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  return r;
+}
+
+async function doLogin() {
+  const token = $('tokenInput').value.trim();
+  const r = await api('/api/login', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({token})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    authed = true;
+    $('loginOverlay').style.display = 'none';
+    init();
+  } else {
+    $('loginError').textContent = d.error || 'Login failed';
+  }
+}
+
+$('tokenInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doLogin();
+});
+
+async function checkAuth() {
+  const r = await api('/api/chats');
+  if (r.status === 401) return false;
+  return true;
+}
+
+async function loadNicknames() {
+  try {
+    const r = await api('/api/nicknames');
+    nicknames = await r.json();
+  } catch {}
+}
+
+async function init() {
+  await loadNicknames();
+  updateStatus();
+  loadChats();
+  connectWS();
+  setInterval(updateStatus, 15000);
+  setInterval(loadChats, 10000);
+  setInterval(loadNicknames, 60000);
+}
+
+async function updateStatus() {
+  try {
+    const r = await api('/api/status');
+    const d = await r.json();
+    $('statusDot').className = 'dot ' + (d.napcat_connected ? 'ok' : 'err');
+    $('statusText').textContent = d.napcat_connected
+      ? `Connected · ${d.chats_count} chats`
+      : 'NapCat disconnected';
+  } catch {
+    $('statusDot').className = 'dot err';
+    $('statusText').textContent = 'Server unreachable';
+  }
+}
+
+async function loadChats() {
+  try {
+    const r = await api('/api/chats');
+    const d = await r.json();
+    renderChats(d.chats || []);
+  } catch {}
+}
+
+function renderChats(chats) {
+  const el = $('chatList');
+  el.innerHTML = '';
+  for (const c of chats) {
+    const div = document.createElement('div');
+    div.className = 'chat-item' + (c.chat_id === currentChat ? ' active' : '');
+    const t = c.last_time ? new Date(c.last_time * 1000) : null;
+    const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    div.innerHTML = `<span class="time">${ts}</span><div class="name">${esc(c.name || c.chat_id)}</div><div class="preview">${esc(c.last_text || '')}</div>`;
+    div.onclick = () => selectChat(c.chat_id, c.name);
+    el.appendChild(div);
+  }
+}
+
+async function selectChat(chatId, name) {
+  currentChat = chatId;
+  $('emptyState').style.display = 'none';
+  $('messagesArea').style.display = 'flex';
+  $('chatTitle').textContent = name || chatId;
+  $('messagesScroll').innerHTML = '';
+  await loadMessages(chatId);
+  renderChats((await (await api('/api/chats')).json()).chats || []);
+}
+
+async function loadMessages(chatId, before = null) {
+  let url = `/api/messages?chat_id=${encodeURIComponent(chatId)}&limit=50`;
+  if (before) url += `&before=${before}`;
+  const r = await api(url);
+  const d = await r.json();
+  const msgs = d.messages || [];
+  const prepend = before !== null;
+  if (prepend) msgs.reverse();
+  const scroll = $('messagesScroll');
+  const wasAtBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 50;
+  const oldHeight = scroll.scrollHeight;
+  for (const m of msgs) {
+    appendMessage(m, prepend);
+  }
+  if (before) {
+    scroll.scrollTop = scroll.scrollHeight - oldHeight;
+  } else if (wasAtBottom) {
+    scroll.scrollTop = scroll.scrollHeight;
+  }
+}
+
+function renderContent(text, mentions) {
+  let html = esc(text);
+  html = html.replace(/@\[(\d+)\]/g, (match, uid) => {
+    const name = (mentions && mentions[uid]) || nicknames[uid] || uid;
+    return `<span class="at-mention" onclick="copyUid('${uid}')" title="Click to copy UID: ${uid}">@${esc(name)}</span>`;
+  });
+  return html;
+}
+
+function copyUid(uid) {
+  navigator.clipboard.writeText(uid).then(() => showToast(`Copied: ${uid}`));
+}
+
+function appendMessage(m, prepend = false) {
+  const scroll = $('messagesScroll');
+  const div = document.createElement('div');
+  div.className = 'msg' + (m.self ? ' self' : '');
+  const t = m.time ? new Date(m.time * 1000) : null;
+  const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+  div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(m.content || '', m.mentions)}</div><div class="ts">${ts}</div>`;
+  if (prepend) {
+    scroll.prepend(div);
+  } else {
+    scroll.appendChild(div);
+    if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150) {
+      scroll.scrollTop = scroll.scrollHeight;
+    }
+  }
+}
+
+async function doSend() {
+  if (!currentChat) return;
+  const input = $('sendInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  hideAtDropdown();
+  try {
+    const r = await api('/api/send', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_id: currentChat, text})
+    });
+    const d = await r.json();
+    if (!d.ok) { input.value = text; showModal(d.error || 'Send failed'); }
+  } catch (e) { input.value = text; showModal('Send failed: ' + e); }
+}
+
+// @ autocomplete
+function showAtDropdown(query) {
+  const dd = $('atDropdown');
+  const entries = Object.entries(nicknames).filter(([uid, name]) =>
+    name.toLowerCase().includes(query.toLowerCase()) || uid.includes(query)
+  ).slice(0, 8);
+  if (!entries.length) { dd.classList.remove('show'); return; }
+  dd.innerHTML = entries.map(([uid, name]) =>
+    `<div class="at-item" data-uid="${uid}" data-name="${esc(name)}" onmousedown="insertAt('${uid}','${esc(name)}')">${esc(name)}<span class="uid">${uid}</span></div>`
+  ).join('');
+  dd.classList.add('show');
+}
+
+function hideAtDropdown() {
+  $('atDropdown').classList.remove('show');
+  atSearch = null;
+}
+
+function insertAt(uid, name) {
+  const input = $('sendInput');
+  const val = input.value;
+  const atIdx = val.lastIndexOf('@');
+  if (atIdx >= 0) {
+    input.value = val.substring(0, atIdx) + `@[${uid}]` + val.substring(input.selectionStart);
+  }
+  hideAtDropdown();
+  input.focus();
+}
+
+$('sendInput').addEventListener('input', function() {
+  const val = this.value;
+  const cursor = this.selectionStart;
+  const before = val.substring(0, cursor);
+  const atMatch = before.match(/@([^@\s]*)$/);
+  if (atMatch) {
+    atSearch = atMatch[1];
+    showAtDropdown(atSearch);
+  } else {
+    hideAtDropdown();
+  }
+});
+
+$('sendInput').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    if ($('atDropdown').classList.contains('show')) {
+      const first = $('atDropdown').querySelector('.at-item');
+      if (first) {
+        e.preventDefault();
+        insertAt(first.dataset.uid, first.dataset.name);
+        return;
+      }
+    }
+    doSend();
+  } else if (e.key === 'Escape') {
+    hideAtDropdown();
+  }
+});
+
+$('sendInput').addEventListener('blur', () => {
+  setTimeout(hideAtDropdown, 200);
+});
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const token = document.cookie.match(/(?:^|;\s*)token=([^;]*)/)?.[1] || '';
+  ws = new WebSocket(`${proto}//${location.host}/ws${token ? '?token=' + encodeURIComponent(token) : ''}`);
+  ws.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.type === 'new_message' && d.data) {
+        if (d.data.chat_id === currentChat) {
+          appendMessage(d.data);
+        }
+        loadChats();
+      }
+    } catch {}
+  };
+  ws.onclose = () => setTimeout(connectWS, 3000);
+  ws.onerror = () => {};
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Scroll up to load more
+$('messagesScroll').addEventListener('scroll', function() {
+  if (this.scrollTop < 30 && currentChat) {
+    const first = this.querySelector('.msg');
+    if (first) {
+      const t = first.querySelector('.ts');
+      if (t) {
+        const d = new Date(t.textContent);
+        if (!isNaN(d)) loadMessages(currentChat, d.getTime() / 1000);
+      }
+    }
+  }
+});
+
+// Boot
+(async () => {
+  const ok = await checkAuth();
+  if (ok) {
+    authed = true;
+    $('loginOverlay').style.display = 'none';
+    init();
+  } else {
+    $('loginOverlay').style.display = 'flex';
+  }
+})();
+</script>
+</body>
+</html>

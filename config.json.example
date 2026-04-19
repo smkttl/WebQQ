@@ -1,0 +1,7 @@
+{
+  "ws_url": "ws://localhost:{port}/?message_post_format=array",
+  "napcat_token": "",
+  "web_port": 8080,
+  "web_token": "",
+  "flush_interval": 15
+}
