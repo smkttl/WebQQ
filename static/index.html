@@ -171,7 +171,8 @@ async function checkAuth() {
 
 async function loadNicknames() {
   try {
-    const r = await api('/api/nicknames');
+    const suffix = currentChat ? `?chat_id=${encodeURIComponent(currentChat)}` : '';
+    const r = await api('/api/nicknames' + suffix);
     nicknames = await r.json();
   } catch {}
 }
@@ -224,6 +225,7 @@ function renderChats(chats) {
 
 async function selectChat(chatId, name) {
   currentChat = chatId;
+  await loadNicknames();
   $('emptyState').style.display = 'none';
   $('messagesArea').style.display = 'flex';
   $('chatTitle').textContent = name || chatId;
@@ -305,6 +307,10 @@ async function doSend() {
 // @ autocomplete
 function showAtDropdown(query) {
   const dd = $('atDropdown');
+  if (!currentChat || !currentChat.startsWith('group_')) {
+    dd.classList.remove('show');
+    return;
+  }
   const entries = Object.entries(nicknames).filter(([uid, name]) =>
     String(name).toLowerCase().includes(query.toLowerCase()) || uid.includes(query)
   ).slice(0, 8);

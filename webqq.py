@@ -45,6 +45,7 @@ class MessageStore:
         self._data_dir = data_dir
         self._dirty = set()
         self._nicknames = {}  # uid -> nickname
+        self._group_members = defaultdict(dict)  # chat_id -> {uid: nickname}
         data_dir.mkdir(exist_ok=True)
 
     def _chat_path(self, chat_id):
@@ -251,11 +252,15 @@ class NapCatConnection:
         try:
             resp = await self._request("get_group_member_list", {"group_id": group_id})
             if resp and resp.get("status") == "ok":
+                members = {}
                 for m in (resp.get("data") or []):
                     uid = m.get("user_id")
                     if uid:
+                        uid = str(uid)
                         nick = m.get("card") or m.get("nickname") or str(uid)
-                        self.store._nicknames[str(uid)] = nick
+                        members[uid] = nick
+                        self.store._nicknames[uid] = nick
+                self.store._group_members[f"group_{group_id}"] = members
         except Exception:
             pass
 
@@ -448,7 +453,14 @@ async def handle_status(request):
 async def handle_nicknames(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    return web.json_response(request.app["store"]._nicknames)
+    store = request.app["store"]
+    chat_id = request.query.get("chat_id", "")
+    if chat_id.startswith("group_"):
+        group_id = chat_id.split("_", 1)[1]
+        if chat_id not in store._group_members and group_id.isdigit():
+            await request.app["napcat"]._fetch_group_members(int(group_id))
+        return web.json_response(store._group_members.get(chat_id, {}))
+    return web.json_response(store._nicknames)
 
 
 async def handle_ws_browser(request):
