@@ -2,12 +2,14 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>WebQQ</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#1a1a2e;--bg2:#16213e;--bg3:#0f3460;--fg:#e0e0e0;--fg2:#a0a0a0;--accent:#e94560;--accent2:#533483;--border:#2a2a4a;--msg-self:#0f3460;--msg-other:#16213e}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column;overflow:hidden}
+:root{--app-height:100vh;--bg:#1a1a2e;--bg2:#16213e;--bg3:#0f3460;--fg:#e0e0e0;--fg2:#a0a0a0;--accent:#e94560;--accent2:#533483;--border:#2a2a4a;--msg-self:#0f3460;--msg-other:#16213e}
+html,body{width:100%;height:100%;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--fg);height:var(--app-height);display:flex;flex-direction:column;overflow:hidden}
+@supports (height:100dvh){:root{--app-height:100dvh}}
 .login-overlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100}
 .login-box{background:var(--bg2);padding:40px;border-radius:12px;text-align:center;min-width:320px}
 .login-box h1{margin-bottom:20px;font-size:24px}
@@ -16,23 +18,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .login-box button{margin-top:16px;padding:10px 32px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
 .login-box button:hover{opacity:.85}
 .login-box .error{color:var(--accent);margin-top:10px;font-size:13px}
-.status-bar{height:32px;display:flex;align-items:center;padding:0 16px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:12px;color:var(--fg2)}
+.status-bar{height:32px;flex:0 0 32px;display:flex;align-items:center;padding:0 16px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:12px;color:var(--fg2)}
 .status-bar .dot{width:8px;height:8px;border-radius:50%;margin-right:8px}
 .status-bar .dot.ok{background:#4caf50}
 .status-bar .dot.err{background:var(--accent)}
-.main{flex:1;display:flex;overflow:hidden}
-.sidebar{width:260px;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
+.main{flex:1 1 auto;min-height:0;display:flex;overflow:hidden}
+.sidebar{width:260px;min-height:0;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 .sidebar-header{padding:12px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600}
-.chat-list{flex:1;overflow-y:auto}
+.chat-list{flex:1 1 auto;min-height:0;overflow-y:auto}
 .chat-item{padding:10px 12px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .15s}
 .chat-item:hover{background:var(--bg3)}
 .chat-item.active{background:var(--bg3)}
 .chat-item .name{font-size:14px;margin-bottom:2px}
 .chat-item .preview{font-size:12px;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-item .time{font-size:11px;color:var(--fg2);float:right;margin-top:2px}
-.messages-area{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.messages-area{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 .messages-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600}
-.messages-scroll{flex:1;overflow-y:auto;padding:12px 16px}
+.messages-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px 16px}
 .msg{margin-bottom:8px;max-width:70%}
 .msg.self{margin-left:auto}
 .msg .sender{font-size:12px;color:var(--fg2);margin-bottom:2px}
@@ -41,12 +43,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg .ts{font-size:11px;color:var(--fg2);margin-top:2px}
 .at-mention{color:var(--accent);cursor:pointer;border-radius:3px;padding:0 2px}
 .at-mention:hover{text-decoration:underline}
-.send-bar{display:flex;padding:8px 12px;border-top:1px solid var(--border);background:var(--bg2);position:relative}
+.send-bar{flex:0 0 auto;display:flex;padding:8px 12px calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--bg2);position:relative}
 .send-bar input{flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;outline:none}
 .send-bar input:focus{border-color:var(--accent)}
 .send-bar button{margin-left:8px;padding:10px 20px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
 .send-bar button:hover{opacity:.85}
-.empty-state{flex:1;display:flex;align-items:center;justify-content:center;color:var(--fg2);font-size:15px}
+.empty-state{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;color:var(--fg2);font-size:15px}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
 .modal-box{background:var(--bg2);padding:28px 32px;border-radius:10px;max-width:400px;width:90%;text-align:center}
 .modal-box p{margin-bottom:18px;font-size:14px;line-height:1.5}
@@ -105,6 +107,20 @@ let nicknames = {};
 let atSearch = null;
 
 const $ = id => document.getElementById(id);
+
+function updateAppHeight() {
+  const viewport = window.visualViewport;
+  const height = viewport ? viewport.height : window.innerHeight;
+  document.documentElement.style.setProperty('--app-height', `${height}px`);
+}
+
+updateAppHeight();
+window.addEventListener('resize', updateAppHeight);
+window.addEventListener('orientationchange', updateAppHeight);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', updateAppHeight);
+  window.visualViewport.addEventListener('scroll', updateAppHeight);
+}
 
 function showToast(msg) {
   const t = document.createElement('div');
