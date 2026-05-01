@@ -254,6 +254,7 @@ function appendMessage(m, prepend = false) {
   const scroll = $('messagesScroll');
   const div = document.createElement('div');
   div.className = 'msg' + (m.self ? ' self' : '');
+  if (m.time) div.dataset.time = String(m.time);
   const t = m.time ? new Date(m.time * 1000) : null;
   const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
   div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(m.content || '', m.mentions)}</div><div class="ts">${ts}</div>`;
@@ -289,12 +290,27 @@ async function doSend() {
 function showAtDropdown(query) {
   const dd = $('atDropdown');
   const entries = Object.entries(nicknames).filter(([uid, name]) =>
-    name.toLowerCase().includes(query.toLowerCase()) || uid.includes(query)
+    String(name).toLowerCase().includes(query.toLowerCase()) || uid.includes(query)
   ).slice(0, 8);
   if (!entries.length) { dd.classList.remove('show'); return; }
-  dd.innerHTML = entries.map(([uid, name]) =>
-    `<div class="at-item" data-uid="${uid}" data-name="${esc(name)}" onmousedown="insertAt('${uid}','${esc(name)}')">${esc(name)}<span class="uid">${uid}</span></div>`
-  ).join('');
+  dd.replaceChildren();
+  for (const [uid, name] of entries) {
+    const item = document.createElement('div');
+    item.className = 'at-item';
+    item.dataset.uid = uid;
+    item.dataset.name = String(name);
+    item.addEventListener('mousedown', e => {
+      e.preventDefault();
+      insertAt(uid);
+    });
+
+    item.append(document.createTextNode(String(name)));
+    const uidEl = document.createElement('span');
+    uidEl.className = 'uid';
+    uidEl.textContent = uid;
+    item.appendChild(uidEl);
+    dd.appendChild(item);
+  }
   dd.classList.add('show');
 }
 
@@ -303,7 +319,7 @@ function hideAtDropdown() {
   atSearch = null;
 }
 
-function insertAt(uid, name) {
+function insertAt(uid) {
   const input = $('sendInput');
   const val = input.value;
   const atIdx = val.lastIndexOf('@');
@@ -333,7 +349,7 @@ $('sendInput').addEventListener('keydown', function(e) {
       const first = $('atDropdown').querySelector('.at-item');
       if (first) {
         e.preventDefault();
-        insertAt(first.dataset.uid, first.dataset.name);
+        insertAt(first.dataset.uid);
         return;
       }
     }
@@ -376,12 +392,8 @@ function esc(s) {
 $('messagesScroll').addEventListener('scroll', function() {
   if (this.scrollTop < 30 && currentChat) {
     const first = this.querySelector('.msg');
-    if (first) {
-      const t = first.querySelector('.ts');
-      if (t) {
-        const d = new Date(t.textContent);
-        if (!isNaN(d)) loadMessages(currentChat, d.getTime() / 1000);
-      }
+    if (first && first.dataset.time) {
+      loadMessages(currentChat, Number(first.dataset.time));
     }
   }
 });

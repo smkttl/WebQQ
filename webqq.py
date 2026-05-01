@@ -340,13 +340,26 @@ def check_auth(request):
     return hmac.compare_digest(req_token, auth_token)
 
 
+async def read_json_body(request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text='{"error":"invalid JSON"}', content_type="application/json")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text='{"error":"JSON body must be an object"}', content_type="application/json")
+    return body
+
+
 async def handle_login(request):
     cfg = request.app["config"]
     auth_token = cfg.get("web_token", "")
     if not auth_token:
         return web.json_response({"ok": True})
-    body = await request.json()
-    if hmac.compare_digest(body.get("token", ""), auth_token):
+    body = await read_json_body(request)
+    token = body.get("token", "")
+    if not isinstance(token, str):
+        return web.json_response({"ok": False, "error": "token must be a string"}, status=400)
+    if hmac.compare_digest(token, auth_token):
         resp = web.json_response({"ok": True})
         resp.set_cookie("token", auth_token, max_age=86400 * 30, httponly=True)
         return resp
@@ -364,18 +377,36 @@ async def handle_messages(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     store = request.app["store"]
     chat_id = request.query.get("chat_id", "")
-    limit = min(int(request.query.get("limit", "50")), 200)
-    before = request.query.get("before")
-    before = float(before) if before else None
+    try:
+        limit = max(1, min(int(request.query.get("limit", "50")), 200))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "limit must be an integer"}, status=400)
+    before_raw = request.query.get("before")
+    try:
+        before = float(before_raw) if before_raw else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "before must be a timestamp"}, status=400)
     return web.json_response({"messages": store.get_messages(chat_id, limit=limit, before=before)})
 
 
 async def handle_send(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    body = await request.json()
-    chat_id = body["chat_id"]
-    text = body["text"]
+    body = await read_json_body(request)
+    chat_id = body.get("chat_id")
+    text = body.get("text")
+    if not isinstance(chat_id, str) or not chat_id:
+        return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+    if not isinstance(text, str):
+        return web.json_response({"ok": False, "error": "text is required"}, status=400)
+    if chat_id.startswith("group_"):
+        chat_num = chat_id.split("_", 1)[1]
+    elif chat_id.startswith("private_"):
+        chat_num = chat_id.split("_", 1)[1]
+    else:
+        return web.json_response({"ok": False, "error": "unknown chat_id"}, status=400)
+    if not chat_num.isdigit():
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
     napcat = request.app["napcat"]
     store = request.app["store"]
     try:
