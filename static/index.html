@@ -110,6 +110,7 @@ let nicknames = {};
 let atSearch = null;
 let loadingOlder = false;
 let noMoreMessages = false;
+let lastLoadTime = 0;
 
 const $ = id => document.getElementById(id);
 
@@ -267,7 +268,10 @@ async function loadMessages(chatId, before = null) {
       scroll.scrollTop = scroll.scrollHeight;
     }
   } finally {
-    if (before !== null) loadingOlder = false;
+    if (before !== null) {
+      loadingOlder = false;
+      lastLoadTime = Date.now();
+    }
   }
 }
 
@@ -469,7 +473,7 @@ function esc(s) {
 
 // Scroll up to load more
 $('messagesScroll').addEventListener('scroll', function() {
-  if (this.scrollTop < 30 && currentChat) {
+  if (this.scrollTop < 30 && currentChat && Date.now() - lastLoadTime > 500) {
     const first = this.querySelector('.msg');
     if (first && first.dataset.time) {
       loadMessages(currentChat, Number(first.dataset.time));

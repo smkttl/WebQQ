@@ -486,6 +486,7 @@ def image_url_allowed(url):
         "gchat.qpic.cn",
         "c2cpicdw.qpic.cn",
         "thirdqq.qlogo.cn",
+        "gxh.vip.qq.com",
     )
     return parsed.scheme in ("http", "https") and host in allowed_hosts
 
