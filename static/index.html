@@ -40,6 +40,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg .sender{font-size:12px;color:var(--fg2);margin-bottom:2px}
 .msg .bubble{padding:8px 12px;border-radius:8px;background:var(--msg-other);word-break:break-word;font-size:14px;line-height:1.5}
 .msg.self .bubble{background:var(--msg-self)}
+.msg-images{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.msg-image{display:block;max-width:240px;max-height:320px;border-radius:6px;object-fit:contain;cursor:pointer;background:var(--bg)}
+.msg-image-fallback{color:var(--fg2);font-size:13px}
 .msg .ts{font-size:11px;color:var(--fg2);margin-top:2px}
 .at-mention{color:var(--accent);cursor:pointer;border-radius:3px;padding:0 2px}
 .at-mention:hover{text-decoration:underline}
@@ -105,6 +108,8 @@ let ws = null;
 let authed = false;
 let nicknames = {};
 let atSearch = null;
+let loadingOlder = false;
+let noMoreMessages = false;
 
 const $ = id => document.getElementById(id);
 
@@ -225,6 +230,8 @@ function renderChats(chats) {
 
 async function selectChat(chatId, name) {
   currentChat = chatId;
+  loadingOlder = false;
+  noMoreMessages = false;
   await loadNicknames();
   $('emptyState').style.display = 'none';
   $('messagesArea').style.display = 'flex';
@@ -235,23 +242,32 @@ async function selectChat(chatId, name) {
 }
 
 async function loadMessages(chatId, before = null) {
-  let url = `/api/messages?chat_id=${encodeURIComponent(chatId)}&limit=50`;
-  if (before) url += `&before=${before}`;
-  const r = await api(url);
-  const d = await r.json();
-  const msgs = d.messages || [];
-  const prepend = before !== null;
-  if (prepend) msgs.reverse();
-  const scroll = $('messagesScroll');
-  const wasAtBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 50;
-  const oldHeight = scroll.scrollHeight;
-  for (const m of msgs) {
-    appendMessage(m, prepend);
+  if (before !== null) {
+    if (loadingOlder || noMoreMessages) return;
+    loadingOlder = true;
   }
-  if (before) {
-    scroll.scrollTop = scroll.scrollHeight - oldHeight;
-  } else if (wasAtBottom) {
-    scroll.scrollTop = scroll.scrollHeight;
+  try {
+    let url = `/api/messages?chat_id=${encodeURIComponent(chatId)}&limit=50`;
+    if (before) url += `&before=${before}`;
+    const r = await api(url);
+    const d = await r.json();
+    const msgs = d.messages || [];
+    if (before !== null && msgs.length < 50) noMoreMessages = true;
+    const prepend = before !== null;
+    if (prepend) msgs.reverse();
+    const scroll = $('messagesScroll');
+    const wasAtBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 50;
+    const oldHeight = scroll.scrollHeight;
+    for (const m of msgs) {
+      appendMessage(m, prepend);
+    }
+    if (before) {
+      scroll.scrollTop = scroll.scrollHeight - oldHeight;
+    } else if (wasAtBottom) {
+      scroll.scrollTop = scroll.scrollHeight;
+    }
+  } finally {
+    if (before !== null) loadingOlder = false;
   }
 }
 
@@ -262,6 +278,45 @@ function renderContent(text, mentions) {
     return `<span class="at-mention" onclick="copyUid('${uid}')" title="Click to copy UID: ${uid}">@${esc(name)}</span>`;
   });
   return html;
+}
+
+function appendImages(bubble, images) {
+  if (!Array.isArray(images) || !images.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-images';
+  for (const image of images) {
+    const url = image && image.url;
+    const thumbnailUrl = (image && image.thumbnail) || url;
+    if (!thumbnailUrl) {
+      const fallback = document.createElement('div');
+      fallback.className = 'msg-image-fallback';
+      fallback.textContent = '[image unavailable]';
+      wrap.appendChild(fallback);
+      continue;
+    }
+    const file = image && image.file;
+    const thumbProxyUrl = `/api/image?url=${encodeURIComponent(thumbnailUrl)}`;
+    const fullProxyUrl = `/api/image/full?url=${encodeURIComponent(url || thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
+    const img = document.createElement('img');
+    img.className = 'msg-image';
+    img.src = thumbnailUrl;
+    img.alt = image.summary || image.file || 'image';
+    img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    img.addEventListener('click', () => window.open(fullProxyUrl, '_blank', 'noopener'));
+    img.addEventListener('error', () => {
+      if (img.src !== thumbProxyUrl) {
+        img.src = thumbProxyUrl;
+        return;
+      }
+      const fallback = document.createElement('div');
+      fallback.className = 'msg-image-fallback';
+      fallback.textContent = '[image unavailable]';
+      img.replaceWith(fallback);
+    });
+    wrap.appendChild(img);
+  }
+  bubble.appendChild(wrap);
 }
 
 function copyUid(uid) {
@@ -275,7 +330,9 @@ function appendMessage(m, prepend = false) {
   if (m.time) div.dataset.time = String(m.time);
   const t = m.time ? new Date(m.time * 1000) : null;
   const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
-  div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(m.content || '', m.mentions)}</div><div class="ts">${ts}</div>`;
+  const visibleText = Array.isArray(m.images) && m.images.length ? (m.content || '').replace(/\[image\]/g, '').trim() : (m.content || '');
+  div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(visibleText, m.mentions)}</div><div class="ts">${ts}</div>`;
+  appendImages(div.querySelector('.bubble'), m.images);
   if (prepend) {
     scroll.prepend(div);
   } else {

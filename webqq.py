@@ -5,6 +5,7 @@ import os
 import time
 import uuid
 import hmac
+from urllib.parse import urlparse
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -123,7 +124,7 @@ class MessageStore:
             nick = sender.get("card") or sender.get("nickname") or ""
             if nick:
                 self._nicknames[str(sender["user_id"])] = nick
-        content, mentions = self._extract_text(msg)
+        content, mentions, images = self._extract_text(msg)
         return {
             "message_id": msg.get("message_id"),
             "time": msg.get("time", int(time.time())),
@@ -131,6 +132,7 @@ class MessageStore:
             "sender_name": sender.get("nickname", "") or sender.get("card", "") or str(msg.get("user_id", "")),
             "content": content,
             "mentions": mentions,
+            "images": images,
             "chat_id": self.chat_key(msg),
             "type": mt,
             "chat_name": chat_name,
@@ -140,6 +142,7 @@ class MessageStore:
     def _extract_text(self, msg):
         segments = msg.get("message", [])
         mentions = {}
+        images = []
         if isinstance(segments, list):
             parts = []
             for seg in segments:
@@ -148,6 +151,18 @@ class MessageStore:
                 if t == "text":
                     parts.append(d.get("text", ""))
                 elif t == "image":
+                    url = d.get("url", "")
+                    file = d.get("file", "")
+                    if not url and isinstance(file, str) and file.startswith(("http://", "https://", "data:")):
+                        url = file
+                    image = {
+                        "url": url,
+                        "thumbnail": d.get("thumbnail") or d.get("preview") or d.get("thumb") or d.get("url", ""),
+                        "file": file,
+                        "summary": d.get("summary", ""),
+                        "sub_type": d.get("sub_type", ""),
+                    }
+                    images.append({k: v for k, v in image.items() if v})
                     parts.append("[image]")
                 elif t == "face":
                     parts.append(f"[face:{d.get('id', '')}]")
@@ -160,8 +175,8 @@ class MessageStore:
                     parts.append(f"[reply:{d.get('id', '')}]")
                 else:
                     parts.append(f"[{t}]")
-            return "".join(parts), mentions
-        return str(msg.get("raw_message", "")), mentions
+            return "".join(parts), mentions, images
+        return str(msg.get("raw_message", "")), mentions, images
 
     def get_messages(self, chat_id, limit=50, before=None):
         msgs = list(self._data.get(chat_id, []))
@@ -463,6 +478,74 @@ async def handle_nicknames(request):
     return web.json_response(store._nicknames)
 
 
+def image_url_allowed(url):
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    allowed_hosts = (
+        "multimedia.nt.qq.com.cn",
+        "gchat.qpic.cn",
+        "c2cpicdw.qpic.cn",
+        "thirdqq.qlogo.cn",
+    )
+    return parsed.scheme in ("http", "https") and host in allowed_hosts
+
+
+async def resolve_image_urls(request, url, file, refresh=False):
+    urls = []
+    if image_url_allowed(url):
+        urls.append(url)
+    if refresh and file:
+        image_info = await request.app["napcat"]._request("get_image", {"file": file}, timeout=10)
+        data = image_info.get("data") if image_info and image_info.get("status") == "ok" else {}
+        for candidate in (data.get("url"), data.get("file")):
+            if image_url_allowed(candidate or ""):
+                urls.append(candidate)
+    return list(dict.fromkeys(urls))
+
+
+async def fetch_first_image(urls):
+    async with aiohttp.ClientSession() as session:
+        last_status = 502
+        for image_url in urls:
+            try:
+                async with session.get(image_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                    last_status = resp.status
+                    if resp.status != 200:
+                        continue
+                    content_type = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0]
+                    if not (content_type.startswith("image/") or content_type == "application/octet-stream"):
+                        continue
+                    return web.Response(
+                        body=await resp.read(),
+                        content_type=content_type,
+                        headers={"Cache-Control": "private, max-age=300"},
+                    )
+            except Exception:
+                continue
+        return web.json_response({"error": "image fetch failed"}, status=last_status)
+
+
+async def handle_image_proxy(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    url = request.query.get("url", "")
+    urls = await resolve_image_urls(request, url, "", refresh=False)
+    if not urls:
+        return web.json_response({"error": "invalid image url"}, status=400)
+    return await fetch_first_image(urls)
+
+
+async def handle_image_full(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    url = request.query.get("url", "")
+    file = request.query.get("file", "")
+    urls = await resolve_image_urls(request, url, file, refresh=True)
+    if not urls:
+        return web.json_response({"error": "invalid image url"}, status=400)
+    return await fetch_first_image(urls)
+
+
 async def handle_ws_browser(request):
     if not check_auth(request):
         await request.writer.drain()
@@ -502,6 +585,8 @@ async def main():
     app.router.add_post("/api/send", handle_send)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nicknames", handle_nicknames)
+    app.router.add_get("/api/image", handle_image_proxy)
+    app.router.add_get("/api/image/full", handle_image_full)
     app.router.add_get("/ws", handle_ws_browser)
     app.router.add_get("/", lambda r: web.FileResponse(STATIC_DIR / "index.html"))
     app.router.add_static("/", path=str(STATIC_DIR), name="static")
