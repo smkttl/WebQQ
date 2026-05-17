@@ -46,6 +46,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg .ts{font-size:11px;color:var(--fg2);margin-top:2px}
 .at-mention{color:var(--accent);cursor:pointer;border-radius:3px;padding:0 2px}
 .at-mention:hover{text-decoration:underline}
+.forward-card{margin-top:6px;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:rgba(0,0,0,.12)}
+.forward-head{width:100%;display:flex;align-items:center;gap:8px;padding:8px 10px;border:0;background:transparent;color:var(--fg);font:inherit;text-align:left;cursor:pointer}
+.forward-head:hover{background:rgba(255,255,255,.04)}
+.forward-icon{color:var(--accent);font-size:12px;line-height:1}
+.forward-title{flex:1;min-width:0;font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.forward-count{color:var(--fg2);font-size:12px;white-space:nowrap}
+.forward-summary{padding:0 10px 8px;color:var(--fg2);font-size:12px;line-height:1.4}
+.forward-body{display:none;border-top:1px solid var(--border);padding:6px 10px}
+.forward-card.open .forward-body{display:block}
+.forward-node{padding:6px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+.forward-node:last-child{border-bottom:0}
+.forward-node-meta{display:flex;gap:8px;align-items:center;color:var(--fg2);font-size:11px;margin-bottom:2px}
+.forward-node-name{color:var(--fg);font-size:12px;font-weight:600}
+.forward-node-content{font-size:13px;line-height:1.45;white-space:pre-wrap}
 .send-bar{flex:0 0 auto;display:flex;padding:8px 12px calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--bg2);position:relative}
 .send-bar input{flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;outline:none}
 .send-bar input:focus{border-color:var(--accent)}
@@ -323,6 +337,89 @@ function appendImages(bubble, images) {
   bubble.appendChild(wrap);
 }
 
+function appendForwards(bubble, forwards) {
+  if (!Array.isArray(forwards) || !forwards.length) return;
+  for (const forward of forwards) {
+    const nodes = Array.isArray(forward && forward.nodes) ? forward.nodes : [];
+    const card = document.createElement('div');
+    card.className = 'forward-card';
+
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'forward-head';
+    head.setAttribute('aria-expanded', 'false');
+
+    const icon = document.createElement('span');
+    icon.className = 'forward-icon';
+    icon.textContent = '▶';
+    const title = document.createElement('span');
+    title.className = 'forward-title';
+    title.textContent = (forward && forward.title) || 'Forwarded messages';
+    const count = document.createElement('span');
+    count.className = 'forward-count';
+    count.textContent = nodes.length ? `${nodes.length} messages` : ((forward && forward.status) === 'unavailable' ? 'unavailable' : 'loading failed');
+    head.append(icon, title, count);
+    card.appendChild(head);
+
+    if (forward && forward.summary) {
+      const summary = document.createElement('div');
+      summary.className = 'forward-summary';
+      summary.textContent = forward.summary;
+      card.appendChild(summary);
+    }
+
+    const body = document.createElement('div');
+    body.className = 'forward-body';
+    if (nodes.length) {
+      for (const node of nodes) {
+        appendForwardNode(body, node || {});
+      }
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'forward-node-content';
+      empty.textContent = (forward && forward.error) || 'Forward content is unavailable.';
+      body.appendChild(empty);
+    }
+    card.appendChild(body);
+
+    head.addEventListener('click', () => {
+      const open = card.classList.toggle('open');
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
+      icon.textContent = open ? '▼' : '▶';
+    });
+    bubble.appendChild(card);
+  }
+}
+
+function appendForwardNode(body, node) {
+  const item = document.createElement('div');
+  item.className = 'forward-node';
+
+  const meta = document.createElement('div');
+  meta.className = 'forward-node-meta';
+  const name = document.createElement('span');
+  name.className = 'forward-node-name';
+  name.textContent = node.sender_name || String(node.sender_id || 'Unknown');
+  meta.appendChild(name);
+  if (node.time) {
+    const time = document.createElement('span');
+    time.textContent = new Date(node.time * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    meta.appendChild(time);
+  }
+  item.appendChild(meta);
+
+  const text = (node.content || '').replace(/\[image\]/g, '').trim();
+  if (text) {
+    const content = document.createElement('div');
+    content.className = 'forward-node-content';
+    content.innerHTML = renderContent(text, node.mentions);
+    item.appendChild(content);
+  }
+  appendImages(item, node.images);
+  appendForwards(item, node.forwards);
+  body.appendChild(item);
+}
+
 function copyUid(uid) {
   navigator.clipboard.writeText(uid).then(() => showToast(`Copied: ${uid}`));
 }
@@ -334,9 +431,12 @@ function appendMessage(m, prepend = false) {
   if (m.time) div.dataset.time = String(m.time);
   const t = m.time ? new Date(m.time * 1000) : null;
   const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
-  const visibleText = Array.isArray(m.images) && m.images.length ? (m.content || '').replace(/\[image\]/g, '').trim() : (m.content || '');
+  let visibleText = Array.isArray(m.images) && m.images.length ? (m.content || '').replace(/\[image\]/g, '').trim() : (m.content || '');
+  if (Array.isArray(m.forwards) && m.forwards.length) visibleText = visibleText.replace(/\[forward\]/g, '').trim();
   div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(visibleText, m.mentions)}</div><div class="ts">${ts}</div>`;
-  appendImages(div.querySelector('.bubble'), m.images);
+  const bubble = div.querySelector('.bubble');
+  appendImages(bubble, m.images);
+  appendForwards(bubble, m.forwards);
   if (prepend) {
     scroll.prepend(div);
   } else {

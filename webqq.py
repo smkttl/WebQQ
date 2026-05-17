@@ -124,7 +124,7 @@ class MessageStore:
             nick = sender.get("card") or sender.get("nickname") or ""
             if nick:
                 self._nicknames[str(sender["user_id"])] = nick
-        content, mentions, images = self._extract_text(msg)
+        content, mentions, images, forwards = self._extract_text(msg)
         return {
             "message_id": msg.get("message_id"),
             "time": msg.get("time", int(time.time())),
@@ -133,6 +133,7 @@ class MessageStore:
             "content": content,
             "mentions": mentions,
             "images": images,
+            "forwards": forwards,
             "chat_id": self.chat_key(msg),
             "type": mt,
             "chat_name": chat_name,
@@ -143,11 +144,17 @@ class MessageStore:
         segments = msg.get("message", [])
         mentions = {}
         images = []
+        forwards = []
         if isinstance(segments, list):
             parts = []
             for seg in segments:
+                if not isinstance(seg, dict):
+                    parts.append(str(seg))
+                    continue
                 t = seg.get("type", "")
                 d = seg.get("data", {})
+                if not isinstance(d, dict):
+                    d = {}
                 if t == "text":
                     parts.append(d.get("text", ""))
                 elif t == "image":
@@ -173,10 +180,80 @@ class MessageStore:
                     parts.append(f"@[{qq}]")
                 elif t == "reply":
                     parts.append(f"[reply:{d.get('id', '')}]")
+                elif t == "forward":
+                    forward = self._simplify_forward_segment(d)
+                    forwards.append(forward)
+                    parts.append("[forward]")
                 else:
                     parts.append(f"[{t}]")
-            return "".join(parts), mentions, images
-        return str(msg.get("raw_message", "")), mentions, images
+            return "".join(parts), mentions, images, forwards
+        if isinstance(segments, str):
+            return segments, mentions, images, forwards
+        return str(msg.get("raw_message", "")), mentions, images, forwards
+
+    def _simplify_forward_segment(self, data):
+        forward = {
+            "id": data.get("id") or data.get("message_id") or data.get("resid") or "",
+            "title": data.get("title") or data.get("name") or "Forwarded messages",
+            "summary": data.get("summary") or data.get("desc") or "",
+            "status": "unavailable" if data.get("error") else "pending",
+            "error": data.get("error", ""),
+            "nodes": [],
+        }
+        nodes = self._extract_forward_nodes(data.get("content") or data.get("nodes") or data.get("messages"))
+        if nodes:
+            forward["nodes"] = nodes
+            forward["status"] = "ok"
+        return {k: v for k, v in forward.items() if v or k in ("nodes", "status")}
+
+    def _extract_forward_nodes(self, payload):
+        if not payload:
+            return []
+        if isinstance(payload, dict):
+            if payload.get("type") == "node" and isinstance(payload.get("data"), dict):
+                return [self._simplify_forward_node(payload["data"])]
+            node_keys = ("sender", "nickname", "name", "user_id", "uin", "time", "timestamp")
+            container_keys = ("messages", "nodes")
+            if not any(key in payload for key in node_keys):
+                container_keys = container_keys + ("message", "content")
+            for key in container_keys:
+                nodes = self._extract_forward_nodes(payload.get(key))
+                if nodes:
+                    return nodes
+            return [self._simplify_forward_node(payload)]
+        if isinstance(payload, list):
+            nodes = []
+            for item in payload:
+                if isinstance(item, dict) and item.get("type") == "node" and isinstance(item.get("data"), dict):
+                    nodes.append(self._simplify_forward_node(item["data"]))
+                elif isinstance(item, dict):
+                    nodes.append(self._simplify_forward_node(item))
+                else:
+                    node = self._simplify_forward_node({"content": str(item)})
+                    if node.get("content"):
+                        nodes.append(node)
+            return nodes
+        if isinstance(payload, str):
+            return [self._simplify_forward_node({"content": payload})]
+        return []
+
+    def _simplify_forward_node(self, node):
+        sender = node.get("sender") if isinstance(node.get("sender"), dict) else {}
+        content = node.get("content", node.get("message", ""))
+        fake_msg = {
+            "message": content,
+            "raw_message": content if isinstance(content, str) else "",
+        }
+        text, mentions, images, forwards = self._extract_text(fake_msg)
+        return {
+            "sender_id": node.get("user_id") or node.get("uin") or sender.get("user_id") or "",
+            "sender_name": node.get("nickname") or node.get("name") or sender.get("nickname") or sender.get("card") or "",
+            "time": node.get("time") or node.get("timestamp") or 0,
+            "content": text,
+            "mentions": mentions,
+            "images": images,
+            "forwards": forwards,
+        }
 
     def get_messages(self, chat_id, limit=50, before=None):
         msgs = list(self._data.get(chat_id, []))
@@ -301,9 +378,48 @@ class NapCatConnection:
             return
         post_type = data.get("post_type")
         if post_type == "message":
+            await self._resolve_forward_segments(data)
             simplified = self.store.add(data)
             if simplified:
                 await self._broadcast({"type": "new_message", "data": simplified})
+
+    async def _resolve_forward_segments(self, msg):
+        segments = msg.get("message", [])
+        if not isinstance(segments, list):
+            return
+        for seg in segments:
+            if not isinstance(seg, dict) or seg.get("type") != "forward":
+                continue
+            data = seg.setdefault("data", {})
+            if not isinstance(data, dict):
+                continue
+            if data.get("content") or data.get("nodes") or data.get("messages"):
+                continue
+            forward_id = data.get("id") or data.get("message_id") or data.get("resid")
+            if not forward_id:
+                data["error"] = "missing forward id"
+                continue
+            resp = await self._request("get_forward_msg", {"id": forward_id}, timeout=10)
+            if not resp or resp.get("status") != "ok":
+                data["error"] = (resp or {}).get("wording") or (resp or {}).get("message") or "forward unavailable"
+                continue
+            content = self._extract_forward_response_payload(resp.get("data"))
+            if content:
+                data["content"] = content
+            else:
+                data["error"] = "empty forward content"
+
+    @staticmethod
+    def _extract_forward_response_payload(payload):
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("messages", "message", "content", "nodes"):
+                value = payload.get(key)
+                if value:
+                    return value
+            return payload
+        return payload
 
     async def send_message(self, chat_id, text):
         if not self.ws:
