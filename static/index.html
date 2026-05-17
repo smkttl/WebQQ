@@ -33,7 +33,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .chat-item .preview{font-size:12px;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-item .time{font-size:11px;color:var(--fg2);float:right;margin-top:2px}
 .messages-area{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
-.messages-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600}
+.messages-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.back-button{display:none;width:32px;height:32px;flex:0 0 32px;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--fg);font-size:22px;line-height:1;cursor:pointer}
+.back-button:hover{background:var(--bg3)}
+.chat-title-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .messages-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px 16px}
 .msg{margin-bottom:8px;max-width:70%}
 .msg.self{margin-left:auto}
@@ -79,6 +82,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:var(--bg3);color:var(--fg);padding:8px 18px;border-radius:6px;font-size:13px;z-index:300;animation:toastIn .2s,toastOut .3s 1.5s forwards}
 @keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 @keyframes toastOut{to{opacity:0;transform:translateX(-50%) translateY(10px)}}
+@media (max-width:700px){
+  .sidebar{width:100%;border-right:0}
+  .empty-state{display:none}
+  body:not(.chat-open) .messages-area{display:none!important}
+  body.chat-open .sidebar{display:none}
+  body.chat-open .messages-area{display:flex!important}
+  body.chat-open .back-button{display:flex}
+  .messages-header{padding:8px 10px}
+  .messages-scroll{padding:10px}
+  .msg{max-width:88%}
+  .msg-image{max-width:min(240px,72vw)}
+}
 </style>
 </head>
 <body>
@@ -105,7 +120,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="chat-list" id="chatList"></div>
   </div>
   <div class="messages-area" id="messagesArea" style="display:none">
-    <div class="messages-header" id="chatTitle">-</div>
+    <div class="messages-header">
+      <button class="back-button" id="backButton" type="button" aria-label="Back to chats">‹</button>
+      <div class="chat-title-text" id="chatTitle">-</div>
+    </div>
     <div class="messages-scroll" id="messagesScroll"></div>
     <div class="send-bar">
       <div class="at-dropdown" id="atDropdown"></div>
@@ -248,12 +266,18 @@ async function selectChat(chatId, name) {
   loadingOlder = false;
   noMoreMessages = false;
   await loadNicknames();
+  document.body.classList.add('chat-open');
   $('emptyState').style.display = 'none';
   $('messagesArea').style.display = 'flex';
   $('chatTitle').textContent = name || chatId;
   $('messagesScroll').innerHTML = '';
   await loadMessages(chatId);
   renderChats((await (await api('/api/chats')).json()).chats || []);
+}
+
+function showChatList() {
+  document.body.classList.remove('chat-open');
+  hideAtDropdown();
 }
 
 async function loadMessages(chatId, before = null) {
@@ -545,6 +569,8 @@ $('sendInput').addEventListener('keydown', function(e) {
 $('sendInput').addEventListener('blur', () => {
   setTimeout(hideAtDropdown, 200);
 });
+
+$('backButton').addEventListener('click', showChatList);
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
