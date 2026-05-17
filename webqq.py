@@ -551,8 +551,9 @@ async def handle_send(request):
             err = result.get("wording", result.get("message", "send failed")) if result else "not connected"
             return web.json_response({"ok": False, "error": err}, status=500)
         now = int(time.time())
+        message_id = extract_message_id(result)
         simplified = {
-            "message_id": (result or {}).get("message_id"),
+            "message_id": message_id,
             "time": now,
             "sender_id": "self",
             "sender_name": "You",
@@ -571,6 +572,17 @@ async def handle_send(request):
         return web.json_response({"ok": True, "data": result})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+def extract_message_id(result):
+    if not isinstance(result, dict):
+        return None
+    if result.get("message_id") is not None:
+        return result.get("message_id")
+    data = result.get("data")
+    if isinstance(data, dict):
+        return data.get("message_id")
+    return None
 
 
 async def handle_status(request):

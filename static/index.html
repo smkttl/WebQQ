@@ -50,6 +50,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .at-mention{color:var(--accent);cursor:pointer;border-radius:3px;padding:0 2px}
 .at-mention:hover{text-decoration:underline}
 .qq-face{width:24px;height:24px;vertical-align:-6px;object-fit:contain}
+.reply-card{margin-bottom:6px;padding:6px 8px;border-left:3px solid var(--accent);border-radius:4px;background:rgba(0,0,0,.14);cursor:pointer}
+.reply-card:hover{background:rgba(255,255,255,.05)}
+.reply-name{font-size:12px;font-weight:600;color:var(--fg)}
+.reply-preview{margin-top:2px;color:var(--fg2);font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reply-missing{cursor:default}
+.reply-missing .reply-name{color:var(--fg2)}
+.msg.flash .bubble{outline:2px solid var(--accent);outline-offset:2px}
 .forward-card{margin-top:6px;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:rgba(0,0,0,.12)}
 .forward-head{width:100%;display:flex;align-items:center;gap:8px;padding:8px 10px;border:0;background:transparent;color:var(--fg);font:inherit;text-align:left;cursor:pointer}
 .forward-head:hover{background:rgba(255,255,255,.04)}
@@ -144,6 +151,8 @@ let atSearch = null;
 let loadingOlder = false;
 let noMoreMessages = false;
 let lastLoadTime = 0;
+let messageIndex = new Map();
+let loadedMessages = [];
 
 const $ = id => document.getElementById(id);
 
@@ -271,6 +280,8 @@ async function selectChat(chatId, name) {
   $('emptyState').style.display = 'none';
   $('messagesArea').style.display = 'flex';
   $('chatTitle').textContent = name || chatId;
+  messageIndex = new Map();
+  loadedMessages = [];
   $('messagesScroll').innerHTML = '';
   await loadMessages(chatId);
   renderChats((await (await api('/api/chats')).json()).chats || []);
@@ -295,6 +306,12 @@ async function loadMessages(chatId, before = null) {
     if (before !== null && msgs.length < 50) noMoreMessages = true;
     const prepend = before !== null;
     if (prepend) msgs.reverse();
+    indexMessages(msgs);
+    if (prepend) {
+      loadedMessages = msgs.concat(loadedMessages);
+    } else {
+      loadedMessages = loadedMessages.concat(msgs);
+    }
     const scroll = $('messagesScroll');
     const wasAtBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 50;
     const oldHeight = scroll.scrollHeight;
@@ -326,6 +343,103 @@ function renderContent(text, mentions) {
     return `<img class="qq-face" src="${src}" alt="${label}" title="${label}" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode(this.alt))">`;
   });
   return html;
+}
+
+function splitReplyTokens(text) {
+  const replies = [];
+  const content = String(text || '').replace(/\[reply:(\d+)\]/g, (match, id) => {
+    replies.push(normalizeMessageId(id));
+    return '';
+  }).trim();
+  return {content, replies};
+}
+
+function messagePreview(m) {
+  if (!m) return '';
+  let text = String(m.content || '')
+    .replace(/\[reply:\d+\]/g, '')
+    .replace(/\[image\]/g, '')
+    .replace(/\[forward\]/g, '')
+    .trim();
+  if (!text && Array.isArray(m.images) && m.images.length) text = '[image]';
+  if (!text && Array.isArray(m.forwards) && m.forwards.length) text = '[forward]';
+  return text || '[message]';
+}
+
+function indexMessages(messages) {
+  if (!Array.isArray(messages)) return;
+  for (const m of messages) {
+    const id = normalizeMessageId(m && m.message_id);
+    if (!id) continue;
+    messageIndex.set(id, m);
+    refreshReplyCards(id);
+  }
+}
+
+function normalizeMessageId(id) {
+  if (id === undefined || id === null) return '';
+  return String(id).trim();
+}
+
+function appendReplies(bubble, replyIds) {
+  if (!Array.isArray(replyIds) || !replyIds.length) return;
+  for (const id of replyIds) {
+    const card = document.createElement('div');
+    card.className = 'reply-card';
+    card.dataset.replyId = id;
+    renderReplyCard(card);
+    bubble.appendChild(card);
+  }
+}
+
+function renderReplyCard(card) {
+  const id = normalizeMessageId(card.dataset.replyId);
+  const original = findMessageById(id);
+  card.className = 'reply-card' + (original ? '' : ' reply-missing');
+  card.replaceChildren();
+
+  const name = document.createElement('div');
+  name.className = 'reply-name';
+  name.textContent = original ? (original.sender_name || String(original.sender_id || 'Unknown')) : 'Reply';
+  const preview = document.createElement('div');
+  preview.className = 'reply-preview';
+  preview.innerHTML = original ? renderContent(messagePreview(original), original.mentions) : `Original message ${esc(id)} is not loaded`;
+  card.append(name, preview);
+
+  card.title = original ? 'Jump to replied message' : '';
+  card.onclick = original ? () => jumpToMessage(id) : null;
+}
+
+function findMessageById(id) {
+  const key = normalizeMessageId(id);
+  if (!key) return null;
+  const indexed = messageIndex.get(key);
+  if (indexed) return indexed;
+  for (const m of loadedMessages) {
+    if (normalizeMessageId(m && m.message_id) === key) {
+      messageIndex.set(key, m);
+      return m;
+    }
+  }
+  return null;
+}
+
+function refreshReplyCards(id) {
+  for (const card of document.querySelectorAll(`.reply-card[data-reply-id="${attrSelectorValue(id)}"]`)) {
+    renderReplyCard(card);
+  }
+}
+
+function jumpToMessage(id) {
+  const target = document.querySelector(`.msg[data-message-id="${attrSelectorValue(id)}"]`);
+  if (!target) return;
+  target.scrollIntoView({block: 'center', behavior: 'smooth'});
+  target.classList.add('flash');
+  setTimeout(() => target.classList.remove('flash'), 1200);
+}
+
+function attrSelectorValue(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function appendImages(bubble, images) {
@@ -459,12 +573,24 @@ function appendMessage(m, prepend = false) {
   const div = document.createElement('div');
   div.className = 'msg' + (m.self ? ' self' : '');
   if (m.time) div.dataset.time = String(m.time);
+  const messageId = normalizeMessageId(m.message_id);
+  if (messageId) {
+    div.dataset.messageId = messageId;
+    messageIndex.set(messageId, m);
+    refreshReplyCards(messageId);
+  }
   const t = m.time ? new Date(m.time * 1000) : null;
   const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
   let visibleText = Array.isArray(m.images) && m.images.length ? (m.content || '').replace(/\[image\]/g, '').trim() : (m.content || '');
   if (Array.isArray(m.forwards) && m.forwards.length) visibleText = visibleText.replace(/\[forward\]/g, '').trim();
-  div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(visibleText, m.mentions)}</div><div class="ts">${ts}</div>`;
+  const rendered = splitReplyTokens(visibleText);
+  div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(rendered.content, m.mentions)}</div><div class="ts">${ts}</div>`;
   const bubble = div.querySelector('.bubble');
+  appendReplies(bubble, rendered.replies);
+  if (rendered.replies.length) {
+    const replyEls = bubble.querySelectorAll('.reply-card');
+    for (let i = replyEls.length - 1; i >= 0; i--) bubble.prepend(replyEls[i]);
+  }
   appendImages(bubble, m.images);
   appendForwards(bubble, m.forwards);
   if (prepend) {
@@ -474,6 +600,9 @@ function appendMessage(m, prepend = false) {
     if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150) {
       scroll.scrollTop = scroll.scrollHeight;
     }
+  }
+  for (const card of div.querySelectorAll('.reply-missing')) {
+    renderReplyCard(card);
   }
 }
 
@@ -587,6 +716,8 @@ function connectWS() {
       const d = JSON.parse(e.data);
       if (d.type === 'new_message' && d.data) {
         if (d.data.chat_id === currentChat) {
+          loadedMessages.push(d.data);
+          indexMessages([d.data]);
           appendMessage(d.data);
         }
         loadChats();
