@@ -76,6 +76,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .send-bar input:focus{border-color:var(--accent)}
 .send-bar button{margin-left:8px;padding:10px 20px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
 .send-bar button:hover{opacity:.85}
+.reply-draft{position:absolute;left:12px;right:12px;bottom:100%;display:none;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-bottom:0;border-radius:6px 6px 0 0;background:var(--bg2);font-size:12px}
+.reply-draft.show{display:flex}
+.reply-draft-text{flex:1;min-width:0;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reply-draft-name{color:var(--fg);font-weight:600}
+.reply-draft button{width:24px;height:24px;margin:0;padding:0;border:0;border-radius:4px;background:transparent;color:var(--fg2);font-size:18px;line-height:1;cursor:pointer}
+.reply-draft button:hover{background:var(--bg3);color:var(--fg)}
+.msg-menu{position:fixed;display:none;min-width:120px;padding:4px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);box-shadow:0 8px 24px rgba(0,0,0,.35);z-index:500}
+.msg-menu.show{display:block}
+.msg-menu button{display:block;width:100%;padding:8px 10px;border:0;border-radius:4px;background:transparent;color:var(--fg);font-size:13px;text-align:left;cursor:pointer}
+.msg-menu button:hover{background:var(--bg3)}
 .empty-state{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;color:var(--fg2);font-size:15px}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
 .modal-box{background:var(--bg2);padding:28px 32px;border-radius:10px;max-width:400px;width:90%;text-align:center}
@@ -135,11 +145,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="messages-scroll" id="messagesScroll"></div>
     <div class="send-bar">
       <div class="at-dropdown" id="atDropdown"></div>
+      <div class="reply-draft" id="replyDraft">
+        <div class="reply-draft-text" id="replyDraftText"></div>
+        <button id="replyDraftCancel" type="button" aria-label="Cancel reply">×</button>
+      </div>
       <input type="text" id="sendInput" placeholder="Type a message... (@ to mention)" autocomplete="off">
       <button onclick="doSend()">Send</button>
     </div>
   </div>
   <div class="empty-state" id="emptyState">Select a chat</div>
+</div>
+
+<div class="msg-menu" id="msgMenu">
+  <button type="button" id="msgMenuCopy">Copy</button>
+  <button type="button" id="msgMenuReply">Reply</button>
 </div>
 
 <script>
@@ -153,6 +172,10 @@ let noMoreMessages = false;
 let lastLoadTime = 0;
 let messageIndex = new Map();
 let loadedMessages = [];
+let selectedMenuMessage = null;
+let pendingReply = null;
+let longPressTimer = null;
+let longPressStart = null;
 
 const $ = id => document.getElementById(id);
 
@@ -282,6 +305,8 @@ async function selectChat(chatId, name) {
   $('chatTitle').textContent = name || chatId;
   messageIndex = new Map();
   loadedMessages = [];
+  clearReplyDraft();
+  hideMessageMenu();
   $('messagesScroll').innerHTML = '';
   await loadMessages(chatId);
   renderChats((await (await api('/api/chats')).json()).chats || []);
@@ -290,6 +315,7 @@ async function selectChat(chatId, name) {
 function showChatList() {
   document.body.classList.remove('chat-open');
   hideAtDropdown();
+  hideMessageMenu();
 }
 
 async function loadMessages(chatId, before = null) {
@@ -364,6 +390,11 @@ function messagePreview(m) {
   if (!text && Array.isArray(m.images) && m.images.length) text = '[image]';
   if (!text && Array.isArray(m.forwards) && m.forwards.length) text = '[forward]';
   return text || '[message]';
+}
+
+function copyMessageText(m) {
+  if (!m) return '';
+  return String(m.content || '').trim() || messagePreview(m);
 }
 
 function indexMessages(messages) {
@@ -571,6 +602,111 @@ function copyUid(uid) {
   navigator.clipboard.writeText(uid).then(() => showToast(`Copied: ${uid}`));
 }
 
+function bindMessageMenu(el, message) {
+  el.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    showMessageMenu(message, e.clientX, e.clientY);
+  });
+  el.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' || e.button !== 0) return;
+    longPressStart = {x: e.clientX, y: e.clientY};
+    clearTimeout(longPressTimer);
+    longPressTimer = setTimeout(() => {
+      showMessageMenu(message, e.clientX, e.clientY);
+      longPressTimer = null;
+    }, 550);
+  });
+  el.addEventListener('pointermove', e => {
+    if (!longPressStart) return;
+    if (Math.abs(e.clientX - longPressStart.x) > 10 || Math.abs(e.clientY - longPressStart.y) > 10) {
+      cancelLongPress();
+    }
+  });
+  el.addEventListener('pointerup', cancelLongPress);
+  el.addEventListener('pointercancel', cancelLongPress);
+  el.addEventListener('pointerleave', cancelLongPress);
+}
+
+function cancelLongPress() {
+  clearTimeout(longPressTimer);
+  longPressTimer = null;
+  longPressStart = null;
+}
+
+function showMessageMenu(message, x, y) {
+  selectedMenuMessage = message;
+  const menu = $('msgMenu');
+  menu.classList.add('show');
+  menu.style.left = '0px';
+  menu.style.top = '0px';
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(8, Math.min(x, window.innerWidth - rect.width - 8));
+  const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function hideMessageMenu() {
+  $('msgMenu').classList.remove('show');
+  selectedMenuMessage = null;
+  cancelLongPress();
+}
+
+async function copySelectedMessage() {
+  const text = copyMessageText(selectedMenuMessage);
+  hideMessageMenu();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Copied');
+  } catch {
+    showModal(text);
+  }
+}
+
+function replyToSelectedMessage() {
+  const message = selectedMenuMessage;
+  hideMessageMenu();
+  const id = normalizeMessageId(message && message.message_id);
+  if (!id) {
+    showToast('Cannot reply: message id unavailable');
+    return;
+  }
+  pendingReply = {id, message};
+  updateReplyDraft();
+  prependReplyMention(message);
+  const input = $('sendInput');
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function prependReplyMention(message) {
+  const uid = normalizeMessageId(message && message.sender_id);
+  if (!uid || uid === 'self') return;
+  const mention = `@[${uid}] `;
+  const input = $('sendInput');
+  const value = input.value;
+  if (value.startsWith(mention)) return;
+  input.value = mention + value;
+}
+
+function updateReplyDraft() {
+  const draft = $('replyDraft');
+  if (!pendingReply) {
+    draft.classList.remove('show');
+    $('replyDraftText').textContent = '';
+    return;
+  }
+  const name = pendingReply.message.sender_name || String(pendingReply.message.sender_id || 'Unknown');
+  $('replyDraftText').innerHTML = `<span class="reply-draft-name">${esc(name)}</span>: ${renderContent(messagePreview(pendingReply.message), pendingReply.message.mentions)}`;
+  draft.classList.add('show');
+}
+
+function clearReplyDraft() {
+  pendingReply = null;
+  updateReplyDraft();
+}
+
 function appendMessage(m, prepend = false) {
   const scroll = $('messagesScroll');
   const div = document.createElement('div');
@@ -596,6 +732,7 @@ function appendMessage(m, prepend = false) {
   }
   appendImages(bubble, m.images);
   appendForwards(bubble, m.forwards);
+  bindMessageMenu(div, m);
   if (prepend) {
     scroll.prepend(div);
   } else {
@@ -616,14 +753,16 @@ async function doSend() {
   if (!text) return;
   input.value = '';
   hideAtDropdown();
+  const replyTo = pendingReply && pendingReply.id;
   try {
     const r = await api('/api/send', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({chat_id: currentChat, text})
+      body: JSON.stringify({chat_id: currentChat, text, reply_to: replyTo || undefined})
     });
     const d = await r.json();
     if (!d.ok) { input.value = text; showModal(d.error || 'Send failed'); }
+    else if (replyTo) { clearReplyDraft(); }
   } catch (e) { input.value = text; showModal('Send failed: ' + e); }
 }
 
@@ -704,6 +843,19 @@ $('sendInput').addEventListener('keydown', function(e) {
   }
 });
 
+$('msgMenuCopy').addEventListener('click', copySelectedMessage);
+$('msgMenuReply').addEventListener('click', replyToSelectedMessage);
+$('replyDraftCancel').addEventListener('click', clearReplyDraft);
+document.addEventListener('pointerdown', e => {
+  if (!$('msgMenu').contains(e.target)) hideMessageMenu();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    hideMessageMenu();
+    clearReplyDraft();
+  }
+});
+
 $('sendInput').addEventListener('blur', () => {
   setTimeout(hideAtDropdown, 200);
 });
@@ -739,6 +891,7 @@ function esc(s) {
 
 // Scroll up to load more
 $('messagesScroll').addEventListener('scroll', function() {
+  hideMessageMenu();
   if (this.scrollTop < 30 && currentChat && Date.now() - lastLoadTime > 500) {
     const first = this.querySelector('.msg');
     if (first && first.dataset.time) {

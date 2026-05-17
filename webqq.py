@@ -421,10 +421,10 @@ class NapCatConnection:
             return payload
         return payload
 
-    async def send_message(self, chat_id, text):
+    async def send_message(self, chat_id, text, reply_to=None):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")
-        message = self._parse_message(text)
+        message = self._parse_message(text, reply_to=reply_to)
         if chat_id.startswith("group_"):
             group_id = int(chat_id.split("_", 1)[1])
             return await self._request("send_group_msg", {"group_id": group_id, "message": message})
@@ -435,12 +435,15 @@ class NapCatConnection:
             raise ValueError(f"unknown chat_id: {chat_id}")
 
     @staticmethod
-    def _parse_message(text):
+    def _parse_message(text, reply_to=None):
         import re
         parts = re.split(r"@\[(\d+)\]", text)
+        prefix = []
+        if reply_to:
+            prefix.append({"type": "reply", "data": {"id": str(reply_to)}})
         if len(parts) == 1:
-            return text
-        result = []
+            return prefix + [{"type": "text", "data": {"text": text}}] if prefix else text
+        result = list(prefix)
         for i, part in enumerate(parts):
             if i % 2 == 0:
                 if part:
@@ -531,6 +534,7 @@ async def handle_send(request):
     body = await read_json_body(request)
     chat_id = body.get("chat_id")
     text = body.get("text")
+    reply_to = body.get("reply_to")
     if not isinstance(chat_id, str) or not chat_id:
         return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
     if not isinstance(text, str):
@@ -543,10 +547,14 @@ async def handle_send(request):
         return web.json_response({"ok": False, "error": "unknown chat_id"}, status=400)
     if not chat_num.isdigit():
         return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    if reply_to is not None:
+        reply_to = str(reply_to).strip()
+        if not reply_to.isdigit():
+            return web.json_response({"ok": False, "error": "invalid reply_to"}, status=400)
     napcat = request.app["napcat"]
     store = request.app["store"]
     try:
-        result = await napcat.send_message(chat_id, text)
+        result = await napcat.send_message(chat_id, text, reply_to=reply_to)
         if not result or result.get("status") != "ok":
             err = result.get("wording", result.get("message", "send failed")) if result else "not connected"
             return web.json_response({"ok": False, "error": err}, status=500)
@@ -557,7 +565,7 @@ async def handle_send(request):
             "time": now,
             "sender_id": "self",
             "sender_name": "You",
-            "content": text,
+            "content": f"[reply:{reply_to}]{text}" if reply_to else text,
             "chat_id": chat_id,
             "type": chat_id.startswith("group_") and "group" or "private",
             "chat_name": "",
