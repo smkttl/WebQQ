@@ -658,7 +658,9 @@ async def handle_image_proxy(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     url = request.query.get("url", "")
-    urls = await resolve_image_urls(request, url, "", refresh=False)
+    file = request.query.get("file", "")
+    refresh = request.query.get("refresh") == "1"
+    urls = await resolve_image_urls(request, url, file, refresh=refresh)
     if not urls:
         return web.json_response({"error": "invalid image url"}, status=400)
     return await fetch_first_image(urls)

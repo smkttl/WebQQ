@@ -457,18 +457,21 @@ function appendImages(bubble, images) {
       continue;
     }
     const file = image && image.file;
-    const thumbProxyUrl = `/api/image?url=${encodeURIComponent(thumbnailUrl)}`;
+    const thumbProxyUrl = `/api/image?url=${encodeURIComponent(thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
+    const refreshedThumbProxyUrl = `${thumbProxyUrl}&refresh=1`;
     const fullProxyUrl = `/api/image/full?url=${encodeURIComponent(url || thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
     const img = document.createElement('img');
     img.className = 'msg-image';
-    img.src = thumbnailUrl;
+    img.src = thumbProxyUrl;
     img.alt = image.summary || image.file || 'image';
     img.loading = 'lazy';
     img.referrerPolicy = 'no-referrer';
+    img.dataset.refreshed = '0';
     img.addEventListener('click', () => window.open(fullProxyUrl, '_blank', 'noopener'));
     img.addEventListener('error', () => {
-      if (img.src !== thumbProxyUrl) {
-        img.src = thumbProxyUrl;
+      if (img.dataset.refreshed !== '1') {
+        img.dataset.refreshed = '1';
+        img.src = refreshedThumbProxyUrl;
         return;
       }
       const fallback = document.createElement('div');
