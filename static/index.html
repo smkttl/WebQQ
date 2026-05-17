@@ -49,6 +49,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg .ts{font-size:11px;color:var(--fg2);margin-top:2px}
 .at-mention{color:var(--accent);cursor:pointer;border-radius:3px;padding:0 2px}
 .at-mention:hover{text-decoration:underline}
+.qq-face{width:24px;height:24px;vertical-align:-6px;object-fit:contain}
 .forward-card{margin-top:6px;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:rgba(0,0,0,.12)}
 .forward-head{width:100%;display:flex;align-items:center;gap:8px;padding:8px 10px;border:0;background:transparent;color:var(--fg);font:inherit;text-align:left;cursor:pointer}
 .forward-head:hover{background:rgba(255,255,255,.04)}
@@ -318,6 +319,11 @@ function renderContent(text, mentions) {
   html = html.replace(/@\[(\d+)\]/g, (match, uid) => {
     const name = (mentions && mentions[uid]) || nicknames[uid] || uid;
     return `<span class="at-mention" onclick="copyUid('${uid}')" title="Click to copy UID: ${uid}">@${esc(name)}</span>`;
+  });
+  html = html.replace(/\[face:(\d+)\]/g, (match, id) => {
+    const label = `[face:${id}]`;
+    const src = `https://qzonestyle.gtimg.cn/qzone/em/e${id}.gif`;
+    return `<img class="qq-face" src="${src}" alt="${label}" title="${label}" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode(this.alt))">`;
   });
   return html;
 }
