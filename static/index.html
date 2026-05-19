@@ -86,6 +86,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg-menu.show{display:block}
 .msg-menu button{display:block;width:100%;padding:8px 10px;border:0;border-radius:4px;background:transparent;color:var(--fg);font-size:13px;text-align:left;cursor:pointer}
 .msg-menu button:hover{background:var(--bg3)}
+.face-picker{position:fixed;display:none;grid-template-columns:repeat(8,32px);gap:4px;max-width:304px;max-height:min(360px,70vh);overflow:auto;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg2);box-shadow:0 8px 24px rgba(0,0,0,.35);z-index:501}
+.face-picker.show{display:grid}
+.face-picker button{width:32px;height:32px;border:0;border-radius:4px;background:transparent;cursor:pointer}
+.face-picker button:hover{background:var(--bg3)}
+.face-picker img{width:24px;height:24px;object-fit:contain}
+.reaction-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.reaction-chip{display:flex;align-items:center;gap:3px;padding:2px 6px;border:1px solid var(--border);border-radius:999px;background:rgba(0,0,0,.12);color:var(--fg2);font-size:12px;line-height:1}
+.reaction-chip img{width:18px;height:18px;object-fit:contain}
 .empty-state{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;color:var(--fg2);font-size:15px}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
 .modal-box{background:var(--bg2);padding:28px 32px;border-radius:10px;max-width:400px;width:90%;text-align:center}
@@ -159,7 +167,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="msg-menu" id="msgMenu">
   <button type="button" id="msgMenuCopy">Copy</button>
   <button type="button" id="msgMenuReply">Reply</button>
+  <button type="button" id="msgMenuFaceReply">Face Reply</button>
 </div>
+<div class="face-picker" id="facePicker"></div>
 
 <script>
 let currentChat = null;
@@ -176,6 +186,12 @@ let selectedMenuMessage = null;
 let pendingReply = null;
 let longPressTimer = null;
 let longPressStart = null;
+let reactionFetches = new Set();
+const reactionFaceIds = [
+  '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
+  '66','79','111','114','118','144','147','173','182','187','266','283','289','294','297',
+  '314','318','320','325','326','339','344','349','352','426','427'
+];
 
 const $ = id => document.getElementById(id);
 
@@ -305,6 +321,7 @@ async function selectChat(chatId, name) {
   $('chatTitle').textContent = name || chatId;
   messageIndex = new Map();
   loadedMessages = [];
+  reactionFetches = new Set();
   clearReplyDraft();
   hideMessageMenu();
   $('messagesScroll').innerHTML = '';
@@ -344,6 +361,7 @@ async function loadMessages(chatId, before = null) {
     for (const m of msgs) {
       appendMessage(m, prepend);
     }
+    fetchReactionBatch(msgs);
     if (before) {
       scroll.scrollTop = scroll.scrollHeight - oldHeight;
     } else if (wasAtBottom) {
@@ -471,6 +489,57 @@ function jumpToMessage(id) {
 
 function attrSelectorValue(value) {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function appendReactionChips(msgEl, reactions = []) {
+  const old = msgEl.querySelector(':scope > .reaction-chips');
+  if (old) old.remove();
+  const visible = Array.isArray(reactions) ? reactions.filter(r => Number(r && r.count) > 0) : [];
+  if (!visible.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'reaction-chips';
+  for (const reaction of visible) {
+    const chip = document.createElement('div');
+    chip.className = 'reaction-chip';
+    chip.title = `[face:${reaction.emoji_id}]`;
+    const img = document.createElement('img');
+    img.src = faceUrl(reaction.emoji_id);
+    img.alt = `[face:${reaction.emoji_id}]`;
+    img.referrerPolicy = 'no-referrer';
+    const count = document.createElement('span');
+    count.textContent = reaction.count;
+    chip.append(img, count);
+    wrap.appendChild(chip);
+  }
+  msgEl.appendChild(wrap);
+}
+
+function renderMessageReactions(messageId, reactions) {
+  const target = document.querySelector(`.msg[data-message-id="${attrSelectorValue(messageId)}"]`);
+  if (target) appendReactionChips(target, reactions);
+}
+
+function fetchReactionBatch(messages) {
+  if (!Array.isArray(messages)) return;
+  for (const m of messages) {
+    const id = normalizeMessageId(m && m.message_id);
+    if (id) fetchMessageReactions(id);
+  }
+}
+
+async function fetchMessageReactions(messageId) {
+  if (reactionFetches.has(messageId)) return;
+  reactionFetches.add(messageId);
+  await refreshMessageReactions(messageId);
+}
+
+async function refreshMessageReactions(messageId) {
+  try {
+    const r = await api(`/api/message/emoji-likes?message_id=${encodeURIComponent(messageId)}&chat_id=${encodeURIComponent(currentChat || '')}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    renderMessageReactions(d.message_id || messageId, d.reactions || []);
+  } catch {}
 }
 
 function appendImages(bubble, images) {
@@ -649,7 +718,70 @@ function showMessageMenu(message, x, y) {
 function hideMessageMenu() {
   $('msgMenu').classList.remove('show');
   selectedMenuMessage = null;
+  hideFacePicker();
   cancelLongPress();
+}
+
+function showFacePicker() {
+  const message = selectedMenuMessage;
+  const id = normalizeMessageId(message && message.message_id);
+  if (!id) {
+    hideMessageMenu();
+    showToast('Cannot react: message id unavailable');
+    return;
+  }
+  const menu = $('msgMenu');
+  const picker = $('facePicker');
+  picker.replaceChildren();
+  for (const faceId of reactionFaceIds) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.title = `[face:${faceId}]`;
+    const img = document.createElement('img');
+    img.src = faceUrl(faceId);
+    img.alt = `[face:${faceId}]`;
+    img.referrerPolicy = 'no-referrer';
+    btn.appendChild(img);
+    btn.addEventListener('click', () => sendFaceReply(id, faceId));
+    picker.appendChild(btn);
+  }
+  const rect = menu.getBoundingClientRect();
+  picker.classList.add('show');
+  const pickerRect = picker.getBoundingClientRect();
+  const left = Math.max(8, Math.min(rect.right + 6, window.innerWidth - pickerRect.width - 8));
+  const top = Math.max(8, Math.min(rect.top, window.innerHeight - pickerRect.height - 8));
+  picker.style.left = `${left}px`;
+  picker.style.top = `${top}px`;
+}
+
+function hideFacePicker() {
+  $('facePicker').classList.remove('show');
+}
+
+function faceUrl(id) {
+  return `https://qzonestyle.gtimg.cn/qzone/em/e${id}.gif`;
+}
+
+async function sendFaceReply(messageId, emojiId) {
+  hideFacePicker();
+  hideMessageMenu();
+  try {
+    const r = await api('/api/message/emoji-like', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message_id: messageId, emoji_id: emojiId})
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      showModal(d.error || 'Reaction failed');
+      return;
+    }
+    showToast('Reaction sent');
+    reactionFetches.delete(messageId);
+    fetchMessageReactions(messageId);
+  } catch (e) {
+    showModal('Reaction failed: ' + e);
+  }
 }
 
 async function copySelectedMessage() {
@@ -845,9 +977,10 @@ $('sendInput').addEventListener('keydown', function(e) {
 
 $('msgMenuCopy').addEventListener('click', copySelectedMessage);
 $('msgMenuReply').addEventListener('click', replyToSelectedMessage);
+$('msgMenuFaceReply').addEventListener('click', showFacePicker);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
 document.addEventListener('pointerdown', e => {
-  if (!$('msgMenu').contains(e.target)) hideMessageMenu();
+  if (!$('msgMenu').contains(e.target) && !$('facePicker').contains(e.target)) hideMessageMenu();
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
@@ -874,8 +1007,11 @@ function connectWS() {
           loadedMessages.push(d.data);
           indexMessages([d.data]);
           appendMessage(d.data);
+          fetchReactionBatch([d.data]);
         }
         loadChats();
+      } else if (d.type === 'emoji_like' && d.data) {
+        renderMessageReactions(d.data.message_id, d.data.reactions || []);
       }
     } catch {}
   };

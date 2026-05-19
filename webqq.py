@@ -16,6 +16,12 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 STATIC_DIR = Path(__file__).parent / "static"
 DATA_DIR = Path(__file__).parent / "data"
 MAX_MESSAGES = 1000
+REACTION_EMOJI_IDS = tuple(str(i) for i in (
+    0, 1, 2, 4, 5, 8, 9, 11, 13, 14, 20, 21, 23, 24, 26, 28, 30, 32, 33, 34,
+    66, 79, 111, 114, 118, 144, 147, 173, 182, 187, 266, 283, 289, 294, 297,
+    314, 318, 320, 325, 326, 339, 344, 349, 352, 426, 427,
+))
+REACTION_FETCH_EMOJI_IDS = ("14", "1", "4", "5", "8", "9", "21", "23", "24", "66")
 
 DEFAULT_CONFIG = {
     "ws_url": "ws://localhost:49341/?message_post_format=array",
@@ -382,6 +388,16 @@ class NapCatConnection:
             simplified = self.store.add(data)
             if simplified:
                 await self._broadcast({"type": "new_message", "data": simplified})
+        elif post_type == "notice" and data.get("notice_type") == "group_msg_emoji_like":
+            message_id = data.get("message_id")
+            if message_id is not None:
+                await self._broadcast({
+                    "type": "emoji_like",
+                    "data": {
+                        "message_id": str(message_id),
+                        "reactions": normalize_emoji_likes(data.get("likes") or data.get("like") or []),
+                    },
+                })
 
     async def _resolve_forward_segments(self, msg):
         segments = msg.get("message", [])
@@ -433,6 +449,31 @@ class NapCatConnection:
             return await self._request("send_private_msg", {"user_id": user_id, "message": message})
         else:
             raise ValueError(f"unknown chat_id: {chat_id}")
+
+    async def set_msg_emoji_like(self, message_id, emoji_id):
+        return await self._request("set_msg_emoji_like", {
+            "message_id": int(message_id),
+            "emoji_id": str(emoji_id),
+        })
+
+    async def fetch_emoji_likes(self, message_id, chat_id=""):
+        reactions = []
+        for emoji_id in REACTION_FETCH_EMOJI_IDS:
+            params = {
+                "message_id": int(message_id),
+                "emojiId": str(emoji_id),
+                "emojiType": "1",
+                "count": 20,
+            }
+            if chat_id.startswith("group_"):
+                params["group_id"] = int(chat_id.split("_", 1)[1])
+            resp = await self._request("fetch_emoji_like", params, timeout=5)
+            if not resp or resp.get("status") != "ok":
+                continue
+            reaction = normalize_emoji_like_response(emoji_id, resp.get("data"))
+            if reaction and reaction.get("count", 0) > 0:
+                reactions.append(reaction)
+        return reactions
 
     @staticmethod
     def _parse_message(text, reply_to=None):
@@ -582,6 +623,34 @@ async def handle_send(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+async def handle_message_emoji_like(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    message_id = str(body.get("message_id", "")).strip()
+    emoji_id = str(body.get("emoji_id", "")).strip()
+    if not is_int_string(message_id):
+        return web.json_response({"ok": False, "error": "message_id is required"}, status=400)
+    if not emoji_id.isdigit():
+        return web.json_response({"ok": False, "error": "emoji_id is required"}, status=400)
+    result = await request.app["napcat"].set_msg_emoji_like(message_id, emoji_id)
+    if not result or result.get("status") != "ok":
+        err = result.get("wording", result.get("message", "reaction failed")) if result else "not connected"
+        return web.json_response({"ok": False, "error": err}, status=500)
+    return web.json_response({"ok": True})
+
+
+async def handle_message_emoji_likes(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    message_id = str(request.query.get("message_id", "")).strip()
+    chat_id = request.query.get("chat_id", "")
+    if not is_int_string(message_id):
+        return web.json_response({"error": "message_id is required"}, status=400)
+    reactions = await request.app["napcat"].fetch_emoji_likes(message_id, chat_id=chat_id)
+    return web.json_response({"message_id": message_id, "reactions": reactions})
+
+
 def extract_message_id(result):
     if not isinstance(result, dict):
         return None
@@ -591,6 +660,70 @@ def extract_message_id(result):
     if isinstance(data, dict):
         return data.get("message_id")
     return None
+
+
+def is_int_string(value):
+    return bool(value) and value.lstrip("-").isdigit()
+
+
+def normalize_emoji_like_response(emoji_id, data):
+    if data is None:
+        return None
+    if isinstance(data, list):
+        users = normalize_emoji_like_users(data)
+        return {"emoji_id": str(emoji_id), "count": len(users), "users": users}
+    if not isinstance(data, dict):
+        return None
+    users = normalize_emoji_like_users(
+        data.get("userList")
+        or data.get("emojiLikesList")
+        or data.get("users")
+        or data.get("likes")
+        or data.get("items")
+        or data.get("list")
+        or []
+    )
+    count = data.get("count") or data.get("likeCount") or data.get("total_count") or data.get("total") or len(users)
+    try:
+        count = int(count)
+    except (TypeError, ValueError):
+        count = len(users)
+    return {"emoji_id": str(data.get("emoji_id") or data.get("emojiId") or emoji_id), "count": count, "users": users}
+
+
+def normalize_emoji_likes(payload, message_id=None):
+    if isinstance(payload, dict):
+        payload = payload.get("likes") or payload.get("items") or payload.get("list") or [payload]
+    if not isinstance(payload, list):
+        return []
+    reactions = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        item_message_id = item.get("message_id") or item.get("msg_id") or item.get("msgId")
+        if message_id is not None and item_message_id is not None and str(item_message_id) != str(message_id):
+            continue
+        emoji_id = item.get("emoji_id") or item.get("emojiId") or item.get("id")
+        if emoji_id is None:
+            continue
+        reaction = normalize_emoji_like_response(emoji_id, item)
+        if reaction:
+            reactions.append(reaction)
+    return reactions
+
+
+def normalize_emoji_like_users(users):
+    if not isinstance(users, list):
+        return []
+    result = []
+    for user in users:
+        if isinstance(user, dict):
+            uid = user.get("user_id") or user.get("uin") or user.get("uid") or user.get("tiny_id")
+            name = user.get("nickname") or user.get("name") or user.get("nick") or ""
+            result.append({k: v for k, v in {"user_id": uid, "name": name}.items() if v})
+        elif user:
+            result.append({"user_id": user})
+    return result
 
 
 async def handle_status(request):
@@ -722,6 +855,8 @@ async def main():
     app.router.add_get("/api/chats", handle_chats)
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_post("/api/send", handle_send)
+    app.router.add_post("/api/message/emoji-like", handle_message_emoji_like)
+    app.router.add_get("/api/message/emoji-likes", handle_message_emoji_likes)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nicknames", handle_nicknames)
     app.router.add_get("/api/image", handle_image_proxy)
