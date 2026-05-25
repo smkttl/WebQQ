@@ -91,9 +91,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .face-picker button{width:32px;height:32px;border:0;border-radius:4px;background:transparent;cursor:pointer}
 .face-picker button:hover{background:var(--bg3)}
 .face-picker img{width:24px;height:24px;object-fit:contain}
+.face-picker .face-text{font-size:11px;color:var(--fg);line-height:1}
 .reaction-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
 .reaction-chip{display:flex;align-items:center;gap:3px;padding:2px 6px;border:1px solid var(--border);border-radius:999px;background:rgba(0,0,0,.12);color:var(--fg2);font-size:12px;line-height:1}
 .reaction-chip img{width:18px;height:18px;object-fit:contain}
+.reaction-chip .face-text{font-size:14px;line-height:1}
 .empty-state{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;color:var(--fg2);font-size:15px}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
 .modal-box{background:var(--bg2);padding:28px 32px;border-radius:10px;max-width:400px;width:90%;text-align:center}
@@ -187,7 +189,8 @@ let pendingReply = null;
 let longPressTimer = null;
 let longPressStart = null;
 let reactionFetches = new Set();
-const reactionFaceIds = [
+let faceManifest = {faces:{}, reaction_ids:[]};
+const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
   '66','79','111','114','118','144','147','173','182','187','266','283','289','294','297',
   '314','318','320','325','326','339','344','349','352','426','427'
@@ -265,6 +268,7 @@ async function loadNicknames() {
 }
 
 async function init() {
+  await loadFaceManifest();
   await loadNicknames();
   updateStatus();
   loadChats();
@@ -272,6 +276,14 @@ async function init() {
   setInterval(updateStatus, 15000);
   setInterval(loadChats, 10000);
   setInterval(loadNicknames, 60000);
+}
+
+async function loadFaceManifest() {
+  try {
+    const r = await api('/faces/manifest.json');
+    const d = await r.json();
+    if (d && d.faces) faceManifest = d;
+  } catch {}
 }
 
 async function updateStatus() {
@@ -382,11 +394,69 @@ function renderContent(text, mentions) {
     return `<span class="at-mention" onclick="copyUid('${uid}')" title="Click to copy UID: ${uid}">@${esc(name)}</span>`;
   });
   html = html.replace(/\[face:(\d+)\]/g, (match, id) => {
-    const label = `[face:${id}]`;
-    const src = `https://qzonestyle.gtimg.cn/qzone/em/e${id}.gif`;
-    return `<img class="qq-face" src="${src}" alt="${label}" title="${label}" loading="lazy" referrerpolicy="no-referrer" onerror="this.replaceWith(document.createTextNode(this.alt))">`;
+    return faceHtml(id);
   });
   return html;
+}
+
+function faceInfo(id) {
+  return (faceManifest.faces && faceManifest.faces[String(id)]) || null;
+}
+
+function faceLabel(id) {
+  const info = faceInfo(id);
+  return info && info.name ? `${info.name} [face:${id}]` : `[face:${id}]`;
+}
+
+function faceText(id) {
+  const info = faceInfo(id);
+  return info && info.name ? `[face:${id} ${info.name}]` : `[face:${id}]`;
+}
+
+function faceAssetUrl(info, kind) {
+  return info && info[kind] ? `/faces/${info[kind]}` : '';
+}
+
+function faceHtml(id) {
+  const wrap = document.createElement('span');
+  wrap.appendChild(createFaceNode(id));
+  return wrap.innerHTML;
+}
+
+function createFaceNode(id, className = 'qq-face') {
+  const info = faceInfo(id);
+  const label = faceLabel(id);
+  const gif = faceAssetUrl(info, 'gif');
+  const png = faceAssetUrl(info, 'png');
+  if (gif || png) {
+    const img = document.createElement('img');
+    img.className = className;
+    img.src = gif || png;
+    img.alt = faceText(id);
+    img.title = label;
+    img.referrerPolicy = 'no-referrer';
+    img.dataset.fallback = '0';
+    img.addEventListener('error', () => {
+      if (img.dataset.fallback === '0' && gif && png) {
+        img.dataset.fallback = '1';
+        img.src = png;
+        return;
+      }
+      img.replaceWith(document.createTextNode(img.alt));
+    });
+    return img;
+  }
+  const span = document.createElement('span');
+  span.className = 'face-text';
+  span.title = label;
+  span.textContent = info && info.type === 2 && info.unicode ? info.unicode : (info && info.name ? info.name : String(id));
+  return span;
+}
+
+function reactionFaceIds() {
+  return Array.isArray(faceManifest.reaction_ids) && faceManifest.reaction_ids.length
+    ? faceManifest.reaction_ids
+    : fallbackReactionFaceIds;
 }
 
 function splitReplyTokens(text) {
@@ -499,16 +569,14 @@ function appendReactionChips(msgEl, reactions = []) {
   const wrap = document.createElement('div');
   wrap.className = 'reaction-chips';
   for (const reaction of visible) {
+    const emojiId = String(reaction.emoji_id);
     const chip = document.createElement('div');
     chip.className = 'reaction-chip';
-    chip.title = `[face:${reaction.emoji_id}]`;
-    const img = document.createElement('img');
-    img.src = faceUrl(reaction.emoji_id);
-    img.alt = `[face:${reaction.emoji_id}]`;
-    img.referrerPolicy = 'no-referrer';
+    chip.title = faceLabel(emojiId);
+    const face = createFaceNode(emojiId);
     const count = document.createElement('span');
     count.textContent = reaction.count;
-    chip.append(img, count);
+    chip.append(face, count);
     wrap.appendChild(chip);
   }
   msgEl.appendChild(wrap);
@@ -733,15 +801,11 @@ function showFacePicker() {
   const menu = $('msgMenu');
   const picker = $('facePicker');
   picker.replaceChildren();
-  for (const faceId of reactionFaceIds) {
+  for (const faceId of reactionFaceIds()) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.title = `[face:${faceId}]`;
-    const img = document.createElement('img');
-    img.src = faceUrl(faceId);
-    img.alt = `[face:${faceId}]`;
-    img.referrerPolicy = 'no-referrer';
-    btn.appendChild(img);
+    btn.title = faceLabel(faceId);
+    btn.appendChild(createFaceNode(faceId));
     btn.addEventListener('click', () => sendFaceReply(id, faceId));
     picker.appendChild(btn);
   }
@@ -756,10 +820,6 @@ function showFacePicker() {
 
 function hideFacePicker() {
   $('facePicker').classList.remove('show');
-}
-
-function faceUrl(id) {
-  return `https://qzonestyle.gtimg.cn/qzone/em/e${id}.gif`;
 }
 
 async function sendFaceReply(messageId, emojiId) {
