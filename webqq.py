@@ -159,6 +159,53 @@ class MessageStore:
         if chat_id and chat_id in self._data:
             self._message_chat_index.setdefault(str(message_id), chat_id)
 
+    def add_local_reaction(self, message_id, emoji_id, chat_id=None):
+        key = str(message_id)
+        emoji_id = str(emoji_id)
+        known_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        if not known_chat_id and chat_id in self._data:
+            known_chat_id = chat_id
+        if not known_chat_id:
+            return None
+        self_user = dict(self._self_user)
+        self_uid = str(self_user.get("user_id") or "")
+        for msg in reversed(self._data.get(known_chat_id, [])):
+            if str(msg.get("message_id")) != key:
+                continue
+            reactions = [
+                dict(item)
+                for item in (msg.get("reactions") or [])
+                if isinstance(item, dict) and item.get("emoji_id") is not None
+            ]
+            target = None
+            for reaction in reactions:
+                if str(reaction.get("emoji_id")) == emoji_id:
+                    target = reaction
+                    break
+            if target is None:
+                target = {"emoji_id": emoji_id, "count": 0, "users": []}
+                reactions.append(target)
+            users = target.get("users") if isinstance(target.get("users"), list) else []
+            users = self._dedupe_reaction_users(users)
+            already_reacted = self_uid and any(
+                str(user.get("user_id")) == self_uid
+                for user in users
+                if isinstance(user, dict)
+            )
+            if not already_reacted:
+                users.append(self_user)
+            users = self._dedupe_reaction_users(users)
+            prior_count = reaction_count(target)
+            target["emoji_id"] = emoji_id
+            target["users"] = users
+            target["count"] = max(prior_count + (0 if already_reacted else 1), len(users), 1)
+            msg["reactions"] = reactions
+            self._message_chat_index[key] = known_chat_id
+            self._dirty.add(known_chat_id)
+            return {"chat_id": known_chat_id, "reactions": reactions}
+        self._message_chat_index.pop(key, None)
+        return None
+
     def set_self_user(self, user_id, name=""):
         if user_id is None:
             return
@@ -624,10 +671,11 @@ class NapCatConnection:
             "message": message,
         })
 
-    async def set_msg_emoji_like(self, message_id, emoji_id):
+    async def set_msg_emoji_like(self, message_id, emoji_id, enabled=True):
         return await self._request("set_msg_emoji_like", {
             "message_id": int(message_id),
             "emoji_id": str(emoji_id),
+            "set": bool(enabled),
         })
 
     async def fetch_emoji_likes(self, message_id, chat_id="", emoji_ids=None):
@@ -637,7 +685,7 @@ class NapCatConnection:
             params = {
                 "message_id": int(message_id),
                 "emojiId": str(emoji_id),
-                "emojiType": "1",
+                "emojiType": 1,
                 "count": 20,
             }
             if chat_id.startswith("group_"):
@@ -653,19 +701,26 @@ class NapCatConnection:
     @staticmethod
     def _parse_message(text, reply_to=None):
         import re
-        parts = re.split(r"@\[(\d+)\]", text)
         prefix = []
         if reply_to:
             prefix.append({"type": "reply", "data": {"id": str(reply_to)}})
-        if len(parts) == 1:
+
+        token_re = re.compile(r"@\[(\d+)\]|\[face:(\d+)\]")
+        if not token_re.search(text):
             return prefix + [{"type": "text", "data": {"text": text}}] if prefix else text
+
         result = list(prefix)
-        for i, part in enumerate(parts):
-            if i % 2 == 0:
-                if part:
-                    result.append({"type": "text", "data": {"text": part}})
+        pos = 0
+        for match in token_re.finditer(text):
+            if match.start() > pos:
+                result.append({"type": "text", "data": {"text": text[pos:match.start()]}})
+            if match.group(1) is not None:
+                result.append({"type": "at", "data": {"qq": match.group(1)}})
             else:
-                result.append({"type": "at", "data": {"qq": part}})
+                result.append({"type": "face", "data": {"id": match.group(2)}})
+            pos = match.end()
+        if pos < len(text):
+            result.append({"type": "text", "data": {"text": text[pos:]}})
         return result
 
     async def _broadcast(self, obj):
@@ -834,8 +889,24 @@ async def handle_message_emoji_like(request):
     if not result or result.get("status") != "ok":
         err = result.get("wording", result.get("message", "reaction failed")) if result else "not connected"
         return web.json_response({"ok": False, "error": err}, status=500)
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("result") is False:
+        err = data.get("errMsg") or data.get("message") or result.get("wording") or "reaction was not accepted by QQ"
+        return web.json_response({"ok": False, "error": err}, status=500)
     request.app["store"].remember_local_reaction(message_id, emoji_id, chat_id=chat_id)
-    return web.json_response({"ok": True})
+    applied = request.app["store"].add_local_reaction(message_id, emoji_id, chat_id=chat_id)
+    payload = {
+        "message_id": message_id,
+        "reactions": applied["reactions"] if applied else [{
+            "emoji_id": emoji_id,
+            "count": 1,
+            "users": [dict(request.app["store"]._self_user)],
+        }],
+    }
+    if applied:
+        payload["chat_id"] = applied["chat_id"]
+        await request.app["napcat"]._broadcast({"type": "emoji_like", "data": payload})
+    return web.json_response({"ok": True, **payload})
 
 
 async def handle_message_emoji_likes(request):

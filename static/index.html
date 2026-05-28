@@ -113,6 +113,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .at-item{padding:6px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)}
 .at-item:hover{background:var(--bg3)}
 .at-item .uid{color:var(--fg2);margin-left:8px;font-size:11px}
+.emoji-dropdown{position:absolute;bottom:100%;left:12px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;max-height:240px;overflow-y:auto;display:none;z-index:51;min-width:240px;max-width:min(360px,calc(100vw - 24px));padding:4px}
+.emoji-dropdown.show{display:block}
+.emoji-item{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:0;border-radius:4px;background:transparent;color:var(--fg);font-size:13px;text-align:left;cursor:pointer}
+.emoji-item:hover{background:var(--bg3)}
+.emoji-item .qq-face{flex:0 0 auto}
+.emoji-item .face-text{flex:0 0 24px;text-align:center;font-size:18px;color:var(--fg)}
+.emoji-item-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.emoji-item-id{color:var(--fg2);font-size:11px}
 .toast{position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:var(--bg3);color:var(--fg);padding:8px 18px;border-radius:6px;font-size:13px;z-index:300;animation:toastIn .2s,toastOut .3s 1.5s forwards}
 @keyframes toastIn{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
 @keyframes toastOut{to{opacity:0;transform:translateX(-50%) translateY(10px)}}
@@ -161,6 +169,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="messages-scroll" id="messagesScroll"></div>
     <div class="send-bar">
       <div class="at-dropdown" id="atDropdown"></div>
+      <div class="emoji-dropdown" id="emojiDropdown"></div>
       <div class="reply-draft" id="replyDraft">
         <div class="reply-draft-text" id="replyDraftText"></div>
         <button id="replyDraftCancel" type="button" aria-label="Cancel reply">×</button>
@@ -197,11 +206,39 @@ let longPressTimer = null;
 let longPressStart = null;
 let messageReactions = new Map();
 let faceManifest = {faces:{}, reaction_ids:[]};
+let slashSearch = null;
 const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
   '66','79','111','114','118','144','147','173','182','187','266','283','289','294','297',
-  '314','318','320','325','326','339','344','349','352','426','427'
+  '314','318','320','325','326','339','344','349','352','426','427','128560','9728','9749',
+  '9786','10024','10060','10068','127801','127817','127822','127827','127836','127838',
+  '127847','127866','127867','127881','128027','128046','128051','128053','128074','128076',
+  '128077','128079','128089','128102','128104','128147','128157','128164','128166','128168',
+  '128170','128235','128293','128513','128514','128516','128522','128524','128527','128530',
+  '128531','128532','128536','128538','128540','128541','128557','128563'
 ];
+const faceInitialsByName = {
+  '得意':'dy','流泪':'ll','睡':'s','大哭':'dk','尴尬':'gg','调皮':'tp','微笑':'wx','酷':'k','可爱':'ka',
+  '傲慢':'am','饥饿':'je','困':'k','惊恐':'jk','流汗':'lh','憨笑':'hx','悠闲':'yx','奋斗':'fd',
+  '疑问':'yw','嘘':'x','晕':'y','敲打':'qd','再见':'zj','发抖':'fd','爱情':'aq','跳跳':'tt',
+  '拥抱':'yb','蛋糕':'dg','咖啡':'kf','玫瑰':'mg','爱心':'ax','太阳':'ty','月亮':'yl','赞':'z',
+  '握手':'ws','胜利':'sl','飞吻':'fw','西瓜':'xg','冷汗':'lh','擦汗':'ch','抠鼻':'kb','鼓掌':'gz',
+  '糗大了':'qdl','坏笑':'hx','左哼哼':'zhh','右哼哼':'yhh','哈欠':'hq','委屈':'wq','左亲亲':'zqq',
+  '可怜':'kl','示爱':'sa','抱拳':'bq','拳头':'qt','爱你':'an','NO':'no','OK':'ok','转圈':'zq',
+  '挥手':'hs','喝彩':'hc','棒棒糖':'bbt','茶':'c','泪奔':'lb','无奈':'wn','卖萌':'mm','小纠结':'xjj',
+  'doge':'doge','惊喜':'jx','骚扰':'sr','笑哭':'xk','我最美':'wzm','点赞':'dz','托脸':'tl','托腮':'ts',
+  '啵啵':'bb','蹭一蹭':'cyc','抱抱':'bb','拍手':'ps','佛系':'fx','喷脸':'pl','甩头':'st','加油抱抱':'jybb',
+  '脑阔疼':'nkt','捂脸':'wl','辣眼睛':'lyj','哦哟':'oy','头秃':'tt','问号脸':'whl','暗中观察':'azgc',
+  'emm':'emm','吃瓜':'cg','呵呵哒':'hhd','我酸了':'wsl','汪汪':'ww','汗':'h','无眼笑':'wyx','敬礼':'jl',
+  '面无表情':'mwbq','摸鱼':'my','哦':'o','睁眼':'zy','敲开心':'qkx','摸锦鲤':'mjl','期待':'qd','拜谢':'bx',
+  '元宝':'yb','牛啊':'na','右亲亲':'yqq','牛气冲天':'nqct','喵喵':'mm','仔细分析':'zxfx','加油':'jy',
+  '崇拜':'cb','比心':'bx','庆祝':'qz','拒绝':'jj','吃糖':'ct','生气':'sq','晴天':'qt','闪光':'sg',
+  '错误':'cw','问号':'wh','苹果':'pg','草莓':'cm','拉面':'lm','面包':'mb','刨冰':'bb','啤酒':'pj',
+  '干杯':'gb','虫':'c','牛':'n','鲸鱼':'jy','猴':'h','好的':'hd','厉害':'lh','内衣':'ny','男孩':'nh',
+  '爸爸':'bb','礼物':'lw','睡觉':'sj','水':'s','吹气':'cq','肌肉':'jr','邮箱':'yx','火':'h','呲牙':'cy',
+  '激动':'jd','高兴':'gx','嘿嘿':'hh','羞涩':'xs','哼哼':'hh','不屑':'bx','失落':'sl','亲亲':'qq',
+  '淘气':'tq','吐舌':'ts','紧张':'jz','瞪眼':'dy'
+};
 
 const $ = id => document.getElementById(id);
 
@@ -511,6 +548,27 @@ function reactionFaceIds() {
   return Array.isArray(faceManifest.reaction_ids) && faceManifest.reaction_ids.length
     ? faceManifest.reaction_ids
     : fallbackReactionFaceIds;
+}
+
+function namedFaceEntries() {
+  return Object.entries(faceManifest.faces || {})
+    .filter(([, info]) => info && info.name)
+    .sort((a, b) => Number(a[0]) - Number(b[0]));
+}
+
+function faceSearchText(id, info) {
+  const name = String(info.name || '').toLowerCase();
+  const initials = (faceInitialsByName[info.name] || name).toLowerCase();
+  return {id: String(id), name, initials};
+}
+
+function matchingNamedFaces(query) {
+  const q = String(query || '').trim().toLowerCase();
+  return namedFaceEntries().filter(([id, info]) => {
+    if (!q) return true;
+    const search = faceSearchText(id, info);
+    return search.id.includes(q) || search.name.includes(q) || search.initials.includes(q);
+  }).slice(0, 12);
 }
 
 function splitReplyTokens(text) {
@@ -919,6 +977,11 @@ async function sendFaceReply(messageId, emojiId) {
       showModal(d.error || 'Reaction failed');
       return;
     }
+    applyEmojiLikeEvent({
+      message_id: d.message_id || messageId,
+      chat_id: d.chat_id || currentChat || '',
+      reactions: d.reactions || [{emoji_id: String(emojiId), count: 1, users: [{user_id: 'self', name: 'You'}]}]
+    });
     showToast('Reaction sent');
   } catch (e) {
     showModal('Reaction failed: ' + e);
@@ -1063,6 +1126,7 @@ async function doSend() {
   if (!text) return;
   input.value = '';
   hideAtDropdown();
+  hideEmojiDropdown();
   const replyTo = pendingReply && pendingReply.id;
   try {
     const r = await api('/api/send', {
@@ -1113,6 +1177,77 @@ function hideAtDropdown() {
   atSearch = null;
 }
 
+function activeSlashToken(input) {
+  const cursor = input.selectionStart;
+  if (cursor !== input.selectionEnd) return null;
+  const before = input.value.substring(0, cursor);
+  const match = before.match(/(?:^|\s)\/([A-Za-z0-9\u4e00-\u9fff]*)$/);
+  if (!match) return null;
+  const slashIdx = cursor - match[1].length - 1;
+  return {start: slashIdx, end: cursor, query: match[1]};
+}
+
+function showEmojiDropdown(token) {
+  const dd = $('emojiDropdown');
+  const entries = matchingNamedFaces(token.query);
+  if (!entries.length) {
+    dd.classList.remove('show');
+    return;
+  }
+  dd.replaceChildren();
+  for (const [faceId, info] of entries) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'emoji-item';
+    item.dataset.faceId = faceId;
+    item.title = faceLabel(faceId);
+    item.addEventListener('mousedown', e => {
+      e.preventDefault();
+      insertFaceToken(faceId);
+    });
+
+    item.appendChild(createFaceNode(faceId));
+    const name = document.createElement('span');
+    name.className = 'emoji-item-name';
+    name.textContent = info.name;
+    const id = document.createElement('span');
+    id.className = 'emoji-item-id';
+    id.textContent = `[face:${faceId}]`;
+    item.append(name, id);
+    dd.appendChild(item);
+  }
+  dd.classList.add('show');
+}
+
+function hideEmojiDropdown() {
+  $('emojiDropdown').classList.remove('show');
+  slashSearch = null;
+}
+
+function updateEmojiDropdown() {
+  const input = $('sendInput');
+  const token = activeSlashToken(input);
+  if (!token) {
+    hideEmojiDropdown();
+    return;
+  }
+  slashSearch = token;
+  showEmojiDropdown(token);
+}
+
+function insertFaceToken(faceId) {
+  const input = $('sendInput');
+  const token = activeSlashToken(input) || slashSearch;
+  if (!token) return;
+  const val = input.value;
+  const insert = `[face:${faceId}]`;
+  input.value = val.substring(0, token.start) + insert + val.substring(token.end);
+  const pos = token.start + insert.length;
+  hideEmojiDropdown();
+  input.focus();
+  input.setSelectionRange(pos, pos);
+}
+
 function insertAt(uid) {
   const input = $('sendInput');
   const val = input.value;
@@ -1135,6 +1270,7 @@ $('sendInput').addEventListener('input', function() {
   } else {
     hideAtDropdown();
   }
+  updateEmojiDropdown();
 });
 
 $('sendInput').addEventListener('keydown', function(e) {
@@ -1150,7 +1286,13 @@ $('sendInput').addEventListener('keydown', function(e) {
     doSend();
   } else if (e.key === 'Escape') {
     hideAtDropdown();
+    hideEmojiDropdown();
   }
+});
+
+$('sendInput').addEventListener('click', updateEmojiDropdown);
+$('sendInput').addEventListener('keyup', e => {
+  if (['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) updateEmojiDropdown();
 });
 
 $('msgMenuCopy').addEventListener('click', copySelectedMessage);
@@ -1165,11 +1307,13 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     hideMessageMenu();
     clearReplyDraft();
+    hideEmojiDropdown();
   }
 });
 
 $('sendInput').addEventListener('blur', () => {
   setTimeout(hideAtDropdown, 200);
+  setTimeout(hideEmojiDropdown, 200);
 });
 
 $('backButton').addEventListener('click', showChatList);
