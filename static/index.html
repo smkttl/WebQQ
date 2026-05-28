@@ -169,6 +169,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="msg-menu" id="msgMenu">
   <button type="button" id="msgMenuCopy">Copy</button>
   <button type="button" id="msgMenuReply">Reply</button>
+  <button type="button" id="msgMenuTempChat">Temp Chat</button>
   <button type="button" id="msgMenuFaceReply">Face Reply</button>
 </div>
 <div class="face-picker" id="facePicker"></div>
@@ -189,6 +190,7 @@ let pendingReply = null;
 let longPressTimer = null;
 let longPressStart = null;
 let reactionFetches = new Set();
+let messageReactions = new Map();
 let faceManifest = {faces:{}, reaction_ids:[]};
 const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
@@ -334,6 +336,7 @@ async function selectChat(chatId, name) {
   messageIndex = new Map();
   loadedMessages = [];
   reactionFetches = new Set();
+  messageReactions = new Map();
   clearReplyDraft();
   hideMessageMenu();
   $('messagesScroll').innerHTML = '';
@@ -582,9 +585,31 @@ function appendReactionChips(msgEl, reactions = []) {
   msgEl.appendChild(wrap);
 }
 
-function renderMessageReactions(messageId, reactions) {
+function mergeReactionState(messageId, reactions, fetchedEmojiIds = null) {
+  const key = normalizeMessageId(messageId);
+  if (!key) return [];
+  const existing = new Map((messageReactions.get(key) || []).map(r => [String(r.emoji_id), r]));
+  const fetched = Array.isArray(fetchedEmojiIds) ? new Set(fetchedEmojiIds.map(String)) : null;
+  if (fetched) {
+    for (const emojiId of fetched) existing.delete(emojiId);
+  } else if (!Array.isArray(reactions) || !reactions.length) {
+    existing.clear();
+  }
+  for (const reaction of Array.isArray(reactions) ? reactions : []) {
+    const emojiId = String(reaction && reaction.emoji_id);
+    if (!emojiId || emojiId === 'undefined') continue;
+    if (Number(reaction.count) > 0) existing.set(emojiId, reaction);
+    else existing.delete(emojiId);
+  }
+  const merged = Array.from(existing.values());
+  messageReactions.set(key, merged);
+  return merged;
+}
+
+function renderMessageReactions(messageId, reactions, fetchedEmojiIds = null) {
   const target = document.querySelector(`.msg[data-message-id="${attrSelectorValue(messageId)}"]`);
-  if (target) appendReactionChips(target, reactions);
+  const merged = mergeReactionState(messageId, reactions, fetchedEmojiIds);
+  if (target) appendReactionChips(target, merged);
 }
 
 function fetchReactionBatch(messages) {
@@ -601,12 +626,14 @@ async function fetchMessageReactions(messageId) {
   await refreshMessageReactions(messageId);
 }
 
-async function refreshMessageReactions(messageId) {
+async function refreshMessageReactions(messageId, emojiId = null) {
   try {
-    const r = await api(`/api/message/emoji-likes?message_id=${encodeURIComponent(messageId)}&chat_id=${encodeURIComponent(currentChat || '')}`);
+    let url = `/api/message/emoji-likes?message_id=${encodeURIComponent(messageId)}&chat_id=${encodeURIComponent(currentChat || '')}`;
+    if (emojiId) url += `&emoji_id=${encodeURIComponent(emojiId)}`;
+    const r = await api(url);
     if (!r.ok) return;
     const d = await r.json();
-    renderMessageReactions(d.message_id || messageId, d.reactions || []);
+    renderMessageReactions(d.message_id || messageId, d.reactions || [], d.fetched_emoji_ids || (emojiId ? [emojiId] : null));
   } catch {}
 }
 
@@ -773,6 +800,7 @@ function cancelLongPress() {
 function showMessageMenu(message, x, y) {
   selectedMenuMessage = message;
   const menu = $('msgMenu');
+  $('msgMenuTempChat').style.display = canStartTempChat(message) ? 'block' : 'none';
   menu.classList.add('show');
   menu.style.left = '0px';
   menu.style.top = '0px';
@@ -781,6 +809,20 @@ function showMessageMenu(message, x, y) {
   const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+}
+
+function canStartTempChat(message) {
+  if (!message || message.self) return false;
+  return message.type === 'group'
+    && groupIdForMessage(message)
+    && normalizeMessageId(message.sender_id);
+}
+
+function groupIdForMessage(message) {
+  const direct = normalizeMessageId(message && message.group_id);
+  if (direct) return direct;
+  const chatId = normalizeMessageId((message && message.chat_id) || currentChat);
+  return chatId.startsWith('group_') ? chatId.slice(6) : '';
 }
 
 function hideMessageMenu() {
@@ -838,7 +880,8 @@ async function sendFaceReply(messageId, emojiId) {
     }
     showToast('Reaction sent');
     reactionFetches.delete(messageId);
-    fetchMessageReactions(messageId);
+    renderMessageReactions(messageId, [{emoji_id: emojiId, count: 1}]);
+    await refreshMessageReactions(messageId, emojiId);
   } catch (e) {
     showModal('Reaction failed: ' + e);
   }
@@ -870,6 +913,41 @@ function replyToSelectedMessage() {
   const input = $('sendInput');
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
+}
+
+async function startTempChatFromSelectedMessage() {
+  const message = selectedMenuMessage;
+  hideMessageMenu();
+  if (!canStartTempChat(message)) return;
+  const groupId = groupIdForMessage(message);
+  const userId = normalizeMessageId(message.sender_id);
+  const senderName = message.sender_name || userId;
+  const groupName = message.chat_name || $('chatTitle').textContent || '';
+  const name = groupName ? `${groupName} / ${senderName}` : `群临时会话: ${senderName}`;
+  try {
+    const r = await api('/api/temp-chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({group_id: groupId, user_id: userId, name, group_name: groupName})
+    });
+    const raw = await r.text();
+    let d;
+    try {
+      d = JSON.parse(raw);
+    } catch {
+      showModal(`Temp chat failed: HTTP ${r.status} ${raw || r.statusText}`);
+      return;
+    }
+    if (!d.ok) {
+      showModal(d.error || 'Temp chat failed');
+      return;
+    }
+    await loadChats();
+    await selectChat(d.chat_id, d.name || name);
+    $('sendInput').focus();
+  } catch (e) {
+    showModal('Temp chat failed: ' + e);
+  }
 }
 
 function prependReplyMention(message) {
@@ -1037,6 +1115,7 @@ $('sendInput').addEventListener('keydown', function(e) {
 
 $('msgMenuCopy').addEventListener('click', copySelectedMessage);
 $('msgMenuReply').addEventListener('click', replyToSelectedMessage);
+$('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage);
 $('msgMenuFaceReply').addEventListener('click', showFacePicker);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
 document.addEventListener('pointerdown', e => {
@@ -1071,7 +1150,7 @@ function connectWS() {
         }
         loadChats();
       } else if (d.type === 'emoji_like' && d.data) {
-        renderMessageReactions(d.data.message_id, d.data.reactions || []);
+        renderMessageReactions(d.data.message_id, d.data.reactions || [], d.data.reactions ? d.data.reactions.map(r => r.emoji_id) : null);
       }
     } catch {}
   };

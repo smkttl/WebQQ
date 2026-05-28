@@ -37,6 +37,17 @@ DEFAULT_CONFIG = {
 }
 
 
+def parse_chat_id(chat_id):
+    if not isinstance(chat_id, str):
+        return None
+    parts = chat_id.split("_")
+    if len(parts) == 2 and parts[0] in ("group", "private") and parts[1].isdigit():
+        return {"type": parts[0], f"{parts[0]}_id": int(parts[1])}
+    if len(parts) == 3 and parts[0] == "temp" and parts[1].isdigit() and parts[2].isdigit():
+        return {"type": "temp", "group_id": int(parts[1]), "user_id": int(parts[2])}
+    return None
+
+
 def load_config():
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -100,6 +111,8 @@ class MessageStore:
         if mt == "group":
             return f"group_{msg['group_id']}"
         if mt == "private":
+            if msg.get("sub_type") == "group" and msg.get("group_id"):
+                return f"temp_{msg['group_id']}_{msg['user_id']}"
             return f"private_{msg['user_id']}"
         return None
 
@@ -113,7 +126,7 @@ class MessageStore:
             self._chat_meta[key] = {
                 "chat_id": key,
                 "name": simplified.get("chat_name", key),
-                "type": msg.get("message_type", ""),
+                "type": simplified.get("type", ""),
                 "last_time": 0,
                 "last_text": "",
             }
@@ -127,10 +140,17 @@ class MessageStore:
         sender = msg.get("sender") or {}
         chat_name = ""
         mt = msg.get("message_type", "")
+        chat_type = mt
         if mt == "group":
             chat_name = msg.get("group_name", "")
         if mt == "private":
-            chat_name = sender.get("nickname", str(msg.get("user_id", "")))
+            if msg.get("sub_type") == "group" and msg.get("group_id"):
+                chat_type = "temp"
+                sender_name = sender.get("card") or sender.get("nickname") or str(msg.get("user_id", ""))
+                group_name = msg.get("group_name", "")
+                chat_name = f"{group_name} / {sender_name}" if group_name else f"群临时会话: {sender_name}"
+            else:
+                chat_name = sender.get("nickname", str(msg.get("user_id", "")))
         if sender.get("user_id"):
             nick = sender.get("card") or sender.get("nickname") or ""
             if nick:
@@ -140,15 +160,20 @@ class MessageStore:
             "message_id": msg.get("message_id"),
             "time": msg.get("time", int(time.time())),
             "sender_id": msg.get("user_id"),
-            "sender_name": sender.get("nickname", "") or sender.get("card", "") or str(msg.get("user_id", "")),
+            "sender_name": sender.get("card", "") or sender.get("nickname", "") or str(msg.get("user_id", "")),
             "content": content,
             "mentions": mentions,
             "images": images,
             "forwards": forwards,
             "chat_id": self.chat_key(msg),
-            "type": mt,
+            "type": chat_type,
+            "group_id": msg.get("group_id"),
+            "user_id": msg.get("user_id"),
             "chat_name": chat_name,
-            "self": msg.get("sub_type") == "friend" and msg.get("target_id") == msg.get("self_user_id"),
+            "self": (
+                (msg.get("sub_type") == "friend" and msg.get("target_id") == msg.get("self_user_id"))
+                or (msg.get("self_user_id") is not None and msg.get("user_id") == msg.get("self_user_id"))
+            ),
         }
 
     def _extract_text(self, msg):
@@ -275,9 +300,11 @@ class MessageStore:
     def get_chats(self):
         return sorted(self._chat_meta.values(), key=lambda c: c.get("last_time", 0), reverse=True)
 
-    def ensure_chat(self, chat_id, name, chat_type):
+    def ensure_chat(self, chat_id, name, chat_type, **extra):
         if chat_id in self._chat_meta:
             self._chat_meta[chat_id]["name"] = name
+            self._chat_meta[chat_id]["type"] = chat_type
+            self._chat_meta[chat_id].update(extra)
         else:
             self._chat_meta[chat_id] = {
                 "chat_id": chat_id,
@@ -285,6 +312,7 @@ class MessageStore:
                 "type": chat_type,
                 "last_time": 0,
                 "last_text": "",
+                **extra,
             }
 
 
@@ -446,14 +474,18 @@ class NapCatConnection:
         if not self.ws:
             raise RuntimeError("not connected to NapCat")
         message = self._parse_message(text, reply_to=reply_to)
-        if chat_id.startswith("group_"):
-            group_id = int(chat_id.split("_", 1)[1])
-            return await self._request("send_group_msg", {"group_id": group_id, "message": message})
-        elif chat_id.startswith("private_"):
-            user_id = int(chat_id.split("_", 1)[1])
-            return await self._request("send_private_msg", {"user_id": user_id, "message": message})
-        else:
+        parsed = parse_chat_id(chat_id)
+        if not parsed:
             raise ValueError(f"unknown chat_id: {chat_id}")
+        if parsed["type"] == "group":
+            return await self._request("send_group_msg", {"group_id": parsed["group_id"], "message": message})
+        if parsed["type"] == "private":
+            return await self._request("send_private_msg", {"user_id": parsed["private_id"], "message": message})
+        return await self._request("send_private_msg", {
+            "user_id": parsed["user_id"],
+            "group_id": parsed["group_id"],
+            "message": message,
+        })
 
     async def set_msg_emoji_like(self, message_id, emoji_id):
         return await self._request("set_msg_emoji_like", {
@@ -461,9 +493,10 @@ class NapCatConnection:
             "emoji_id": str(emoji_id),
         })
 
-    async def fetch_emoji_likes(self, message_id, chat_id=""):
+    async def fetch_emoji_likes(self, message_id, chat_id="", emoji_ids=None):
         reactions = []
-        for emoji_id in REACTION_FETCH_EMOJI_IDS:
+        fetch_ids = tuple(dict.fromkeys(str(eid) for eid in (emoji_ids or REACTION_FETCH_EMOJI_IDS) if str(eid).isdigit()))
+        for emoji_id in fetch_ids:
             params = {
                 "message_id": int(message_id),
                 "emojiId": str(emoji_id),
@@ -574,6 +607,25 @@ async def handle_messages(request):
     return web.json_response({"messages": store.get_messages(chat_id, limit=limit, before=before)})
 
 
+async def handle_temp_chat(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    group_id = str(body.get("group_id", "")).strip()
+    user_id = str(body.get("user_id", "")).strip()
+    if not group_id.isdigit() or not user_id.isdigit():
+        return web.json_response({"ok": False, "error": "group_id and user_id are required"}, status=400)
+    name = str(body.get("name", "")).strip()
+    group_name = str(body.get("group_name", "")).strip()
+    if not name:
+        sender_name = str(body.get("sender_name", "")).strip() or user_id
+        name = f"{group_name} / {sender_name}" if group_name else f"群临时会话: {sender_name}"
+    chat_id = f"temp_{group_id}_{user_id}"
+    store = request.app["store"]
+    store.ensure_chat(chat_id, name, "temp", group_id=int(group_id), user_id=int(user_id), group_name=group_name)
+    return web.json_response({"ok": True, "chat_id": chat_id, "name": name})
+
+
 async def handle_send(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -585,13 +637,8 @@ async def handle_send(request):
         return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
     if not isinstance(text, str):
         return web.json_response({"ok": False, "error": "text is required"}, status=400)
-    if chat_id.startswith("group_"):
-        chat_num = chat_id.split("_", 1)[1]
-    elif chat_id.startswith("private_"):
-        chat_num = chat_id.split("_", 1)[1]
-    else:
-        return web.json_response({"ok": False, "error": "unknown chat_id"}, status=400)
-    if not chat_num.isdigit():
+    parsed_chat = parse_chat_id(chat_id)
+    if not parsed_chat:
         return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
     if reply_to is not None:
         reply_to = str(reply_to).strip()
@@ -613,12 +660,18 @@ async def handle_send(request):
             "sender_name": "You",
             "content": f"[reply:{reply_to}]{text}" if reply_to else text,
             "chat_id": chat_id,
-            "type": chat_id.startswith("group_") and "group" or "private",
+            "type": parsed_chat["type"],
+            "group_id": parsed_chat.get("group_id"),
+            "user_id": parsed_chat.get("user_id") or parsed_chat.get("private_id"),
             "chat_name": "",
             "self": True,
         }
         store._data[chat_id].append(simplified)
         if chat_id in store._chat_meta:
+            store._chat_meta[chat_id]["last_time"] = now
+            store._chat_meta[chat_id]["last_text"] = text[:50]
+        else:
+            store.ensure_chat(chat_id, chat_id, parsed_chat["type"])
             store._chat_meta[chat_id]["last_time"] = now
             store._chat_meta[chat_id]["last_text"] = text[:50]
         store._dirty.add(chat_id)
@@ -650,10 +703,14 @@ async def handle_message_emoji_likes(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     message_id = str(request.query.get("message_id", "")).strip()
     chat_id = request.query.get("chat_id", "")
+    emoji_id = str(request.query.get("emoji_id", "")).strip()
     if not is_int_string(message_id):
         return web.json_response({"error": "message_id is required"}, status=400)
-    reactions = await request.app["napcat"].fetch_emoji_likes(message_id, chat_id=chat_id)
-    return web.json_response({"message_id": message_id, "reactions": reactions})
+    if emoji_id and not emoji_id.isdigit():
+        return web.json_response({"error": "emoji_id must be numeric"}, status=400)
+    fetched_emoji_ids = [emoji_id] if emoji_id else list(REACTION_FETCH_EMOJI_IDS)
+    reactions = await request.app["napcat"].fetch_emoji_likes(message_id, chat_id=chat_id, emoji_ids=fetched_emoji_ids)
+    return web.json_response({"message_id": message_id, "reactions": reactions, "fetched_emoji_ids": fetched_emoji_ids})
 
 
 def extract_message_id(result):
@@ -859,6 +916,7 @@ async def main():
     app.router.add_post("/api/login", handle_login)
     app.router.add_get("/api/chats", handle_chats)
     app.router.add_get("/api/messages", handle_messages)
+    app.router.add_post("/api/temp-chat", handle_temp_chat)
     app.router.add_post("/api/send", handle_send)
     app.router.add_post("/api/message/emoji-like", handle_message_emoji_like)
     app.router.add_get("/api/message/emoji-likes", handle_message_emoji_likes)
