@@ -69,6 +69,9 @@ class MessageStore:
         self._dirty = set()
         self._nicknames = {}  # uid -> nickname
         self._group_members = defaultdict(dict)  # chat_id -> {uid: nickname}
+        self._message_chat_index = {}  # message_id -> chat_id
+        self._pending_local_reactions = {}  # (message_id, emoji_id) -> user
+        self._self_user = {"user_id": "self", "name": "You"}
         data_dir.mkdir(exist_ok=True)
 
     def _chat_path(self, chat_id):
@@ -82,6 +85,7 @@ class MessageStore:
                     msgs = json.load(f)
                 if isinstance(msgs, list):
                     self._data[chat_id] = deque(msgs[-self.maxlen:], maxlen=self.maxlen)
+                    self._reindex_chat(chat_id)
                     if msgs:
                         last = msgs[-1]
                         self._chat_meta[chat_id] = {
@@ -121,7 +125,7 @@ class MessageStore:
         if not key:
             return
         simplified = self._simplify(msg)
-        self._data[key].append(simplified)
+        self.append_simplified(key, simplified)
         if key not in self._chat_meta:
             self._chat_meta[key] = {
                 "chat_id": key,
@@ -135,6 +139,122 @@ class MessageStore:
         self._chat_meta[key]["last_text"] = simplified["content"][:50]
         self._dirty.add(key)
         return simplified
+
+    def append_simplified(self, chat_id, simplified):
+        self._data[chat_id].append(simplified)
+        self._reindex_chat(chat_id)
+
+    def _reindex_chat(self, chat_id):
+        for message_id, indexed_chat_id in list(self._message_chat_index.items()):
+            if indexed_chat_id == chat_id:
+                self._message_chat_index.pop(message_id, None)
+        for msg in self._data.get(chat_id, []):
+            message_id = msg.get("message_id")
+            if message_id is not None:
+                self._message_chat_index[str(message_id)] = chat_id
+
+    def remember_local_reaction(self, message_id, emoji_id, chat_id=None):
+        key = (str(message_id), str(emoji_id))
+        self._pending_local_reactions[key] = dict(self._self_user)
+        if chat_id and chat_id in self._data:
+            self._message_chat_index.setdefault(str(message_id), chat_id)
+
+    def set_self_user(self, user_id, name=""):
+        if user_id is None:
+            return
+        uid = str(user_id)
+        display = name or self._nicknames.get(uid) or uid
+        self._self_user = {"user_id": uid, "name": display}
+        self._nicknames[uid] = display
+
+    def apply_reactions(self, message_id, reactions, chat_id=None, notice_user=None):
+        key = str(message_id)
+        known_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        if not known_chat_id and chat_id in self._data:
+            known_chat_id = chat_id
+        if not known_chat_id:
+            return None
+        normalized = reactions if isinstance(reactions, list) else []
+        for msg in reversed(self._data.get(known_chat_id, [])):
+            if str(msg.get("message_id")) == key:
+                merged = self._merge_reactions(key, normalized, msg.get("reactions") or [], notice_user=notice_user)
+                msg["reactions"] = merged
+                self._message_chat_index[key] = known_chat_id
+                self._dirty.add(known_chat_id)
+                return {"chat_id": known_chat_id, "reactions": merged}
+        self._message_chat_index.pop(key, None)
+        return None
+
+    def _merge_reactions(self, message_id, reactions, previous_reactions, notice_user=None):
+        previous = {
+            str(item.get("emoji_id")): item
+            for item in previous_reactions
+            if isinstance(item, dict) and item.get("emoji_id") is not None
+        }
+        updates = self._merge_reaction_users(message_id, reactions, previous, notice_user=notice_user)
+        merged = dict(previous)
+        for reaction in updates:
+            emoji_id = str(reaction.get("emoji_id"))
+            if reaction_count(reaction) > 0:
+                merged[emoji_id] = reaction
+            else:
+                merged.pop(emoji_id, None)
+        return list(merged.values())
+
+    def _merge_reaction_users(self, message_id, reactions, previous, notice_user=None):
+        merged = []
+        for reaction in reactions:
+            if not isinstance(reaction, dict):
+                continue
+            reaction = dict(reaction)
+            emoji_id = str(reaction.get("emoji_id"))
+            users = reaction.get("users") if isinstance(reaction.get("users"), list) else []
+            if not users:
+                prior_users = previous.get(emoji_id, {}).get("users", [])
+                if isinstance(prior_users, list) and prior_users:
+                    users = prior_users
+            users = self._dedupe_reaction_users(users)
+            if notice_user and not any(str(u.get("user_id")) == str(notice_user["user_id"]) for u in users if isinstance(u, dict)):
+                users = users + [notice_user]
+            pending_key = (str(message_id), emoji_id)
+            pending_user = self._pending_local_reactions.pop(pending_key, None)
+            if pending_user and not any(str(u.get("user_id")) == str(pending_user["user_id"]) for u in users if isinstance(u, dict)):
+                users = users + [pending_user]
+            users = self._dedupe_reaction_users(users)
+            reaction["users"] = users
+            merged.append(reaction)
+        return merged
+
+    def _dedupe_reaction_users(self, users):
+        if not isinstance(users, list):
+            return []
+        normalized = []
+        seen = set()
+        self_id = str(self._self_user.get("user_id") or "")
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            uid = str(user.get("user_id") or "")
+            if uid == "self" and self_id and self_id != "self":
+                uid = self_id
+                user = {"user_id": self_id, "name": self._self_user.get("name") or user.get("name") or self_id}
+            elif uid:
+                user = {**user, "user_id": uid}
+            if uid and uid in seen:
+                continue
+            if uid:
+                seen.add(uid)
+            normalized.append(user)
+        return normalized
+
+    def find_chat_by_message_id(self, message_id):
+        key = str(message_id)
+        for chat_id, msgs in self._data.items():
+            for msg in msgs:
+                if str(msg.get("message_id")) == key:
+                    self._message_chat_index[key] = chat_id
+                    return chat_id
+        return None
 
     def _simplify(self, msg):
         sender = msg.get("sender") or {}
@@ -165,6 +285,7 @@ class MessageStore:
             "mentions": mentions,
             "images": images,
             "forwards": forwards,
+            "reactions": normalize_emoji_likes(msg.get("reactions") or msg.get("likes") or msg.get("like") or []),
             "chat_id": self.chat_key(msg),
             "type": chat_type,
             "group_id": msg.get("group_id"),
@@ -357,6 +478,13 @@ class NapCatConnection:
 
     async def _fetch_contacts(self):
         try:
+            login = await self._request("get_login_info", {})
+            if login and login.get("status") == "ok":
+                info = login.get("data") or {}
+                self.store.set_self_user(info.get("user_id"), info.get("nickname") or info.get("name") or "")
+        except Exception:
+            pass
+        try:
             friends = await self._request("get_friend_list", {})
             if friends and friends.get("status") == "ok":
                 for f in (friends.get("data") or []):
@@ -424,12 +552,21 @@ class NapCatConnection:
         elif post_type == "notice" and data.get("notice_type") == "group_msg_emoji_like":
             message_id = data.get("message_id")
             if message_id is not None:
+                chat_id = f"group_{data['group_id']}" if data.get("group_id") else None
+                notice_user = extract_notice_user(data, chat_id=chat_id, store=self.store)
+                reactions = normalize_emoji_likes(data.get("likes") or data.get("like") or [], message_id=message_id)
+                applied = self.store.apply_reactions(message_id, reactions, chat_id=chat_id, notice_user=notice_user)
+                if applied:
+                    reactions = applied["reactions"]
+                payload = {
+                    "message_id": str(message_id),
+                    "reactions": reactions,
+                }
+                if applied:
+                    payload["chat_id"] = applied["chat_id"]
                 await self._broadcast({
                     "type": "emoji_like",
-                    "data": {
-                        "message_id": str(message_id),
-                        "reactions": normalize_emoji_likes(data.get("likes") or data.get("like") or []),
-                    },
+                    "data": payload,
                 })
 
     async def _resolve_forward_segments(self, msg):
@@ -659,6 +796,7 @@ async def handle_send(request):
             "sender_id": "self",
             "sender_name": "You",
             "content": f"[reply:{reply_to}]{text}" if reply_to else text,
+            "reactions": [],
             "chat_id": chat_id,
             "type": parsed_chat["type"],
             "group_id": parsed_chat.get("group_id"),
@@ -666,7 +804,7 @@ async def handle_send(request):
             "chat_name": "",
             "self": True,
         }
-        store._data[chat_id].append(simplified)
+        store.append_simplified(chat_id, simplified)
         if chat_id in store._chat_meta:
             store._chat_meta[chat_id]["last_time"] = now
             store._chat_meta[chat_id]["last_text"] = text[:50]
@@ -687,6 +825,7 @@ async def handle_message_emoji_like(request):
     body = await read_json_body(request)
     message_id = str(body.get("message_id", "")).strip()
     emoji_id = str(body.get("emoji_id", "")).strip()
+    chat_id = str(body.get("chat_id", "")).strip()
     if not is_int_string(message_id):
         return web.json_response({"ok": False, "error": "message_id is required"}, status=400)
     if not emoji_id.isdigit():
@@ -695,6 +834,7 @@ async def handle_message_emoji_like(request):
     if not result or result.get("status") != "ok":
         err = result.get("wording", result.get("message", "reaction failed")) if result else "not connected"
         return web.json_response({"ok": False, "error": err}, status=500)
+    request.app["store"].remember_local_reaction(message_id, emoji_id, chat_id=chat_id)
     return web.json_response({"ok": True})
 
 
@@ -726,6 +866,44 @@ def extract_message_id(result):
 
 def is_int_string(value):
     return bool(value) and value.lstrip("-").isdigit()
+
+
+def reaction_count(reaction):
+    try:
+        return int(reaction.get("count", 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def extract_notice_user(data, chat_id=None, store=None):
+    uid = (
+        data.get("user_id")
+        or data.get("operator_id")
+        or data.get("sender_id")
+        or data.get("uin")
+        or data.get("uid")
+    )
+    if uid is None:
+        sender = data.get("sender")
+        if isinstance(sender, dict):
+            uid = sender.get("user_id") or sender.get("uin") or sender.get("uid")
+    if uid is None:
+        return None
+    uid = str(uid)
+    name = ""
+    sender = data.get("sender")
+    if isinstance(sender, dict):
+        name = sender.get("card") or sender.get("nickname") or sender.get("name") or ""
+    name = (
+        name
+        or data.get("card")
+        or data.get("nickname")
+        or data.get("name")
+        or ((store._group_members.get(chat_id, {}) if store and chat_id else {}).get(uid))
+        or ((store._nicknames.get(uid) if store else None))
+        or uid
+    )
+    return {"user_id": uid, "name": name}
 
 
 def normalize_emoji_like_response(emoji_id, data):
@@ -902,6 +1080,10 @@ async def flush_loop(store, interval):
         store.flush()
 
 
+async def flush_on_shutdown(app):
+    app["store"].flush()
+
+
 async def main():
     config = load_config()
     store = MessageStore(maxlen=MAX_MESSAGES)
@@ -912,6 +1094,7 @@ async def main():
     app["config"] = config
     app["store"] = store
     app["napcat"] = napcat
+    app.on_shutdown.append(flush_on_shutdown)
 
     app.router.add_post("/api/login", handle_login)
     app.router.add_get("/api/chats", handle_chats)

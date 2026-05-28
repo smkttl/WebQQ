@@ -93,9 +93,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .face-picker img{width:24px;height:24px;object-fit:contain}
 .face-picker .face-text{font-size:11px;color:var(--fg);line-height:1}
 .reaction-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
-.reaction-chip{display:flex;align-items:center;gap:3px;padding:2px 6px;border:1px solid var(--border);border-radius:999px;background:rgba(0,0,0,.12);color:var(--fg2);font-size:12px;line-height:1}
+.reaction-chip{display:flex;align-items:center;gap:4px;max-width:180px;padding:2px 6px;border:1px solid var(--border);border-radius:999px;background:rgba(0,0,0,.12);color:var(--fg2);font-size:12px;line-height:1;cursor:pointer}
+.reaction-chip:hover{background:rgba(255,255,255,.08)}
 .reaction-chip img{width:18px;height:18px;object-fit:contain}
 .reaction-chip .face-text{font-size:14px;line-height:1}
+.reaction-chip .reaction-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.reaction-chip .reaction-count{flex:0 0 auto}
+.reaction-users{margin:0 0 18px;text-align:left;display:grid;gap:8px}
+.reaction-user{display:flex;justify-content:space-between;gap:12px;font-size:13px;line-height:1.35}
+.reaction-user .uid{color:var(--fg2);font-size:12px}
 .empty-state{flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;color:var(--fg2);font-size:15px}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
 .modal-box{background:var(--bg2);padding:28px 32px;border-radius:10px;max-width:400px;width:90%;text-align:center}
@@ -189,7 +195,6 @@ let selectedMenuMessage = null;
 let pendingReply = null;
 let longPressTimer = null;
 let longPressStart = null;
-let reactionFetches = new Set();
 let messageReactions = new Map();
 let faceManifest = {faces:{}, reaction_ids:[]};
 const fallbackReactionFaceIds = [
@@ -226,6 +231,49 @@ function showModal(msg) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `<div class="modal-box"><p>${esc(msg)}</p><button onclick="this.closest('.modal-overlay').remove()">OK</button></div>`;
+  document.body.appendChild(overlay);
+}
+
+function showReactionUsers(reaction) {
+  const emojiId = String(reaction && reaction.emoji_id);
+  const users = Array.isArray(reaction && reaction.users) ? reaction.users : [];
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const box = document.createElement('div');
+  box.className = 'modal-box';
+  const title = document.createElement('p');
+  title.textContent = `${faceName(emojiId)} reactions`;
+  const list = document.createElement('div');
+  list.className = 'reaction-users';
+  if (users.length) {
+    for (const user of users) {
+      const row = document.createElement('div');
+      row.className = 'reaction-user';
+      const uid = user && user.user_id !== undefined ? String(user.user_id) : '';
+      const name = (user && user.name) || (uid && nicknames[uid]) || uid || 'Unknown';
+      const nameEl = document.createElement('span');
+      nameEl.textContent = name;
+      row.appendChild(nameEl);
+      if (uid && uid !== 'self') {
+        const uidEl = document.createElement('span');
+        uidEl.className = 'uid';
+        uidEl.textContent = uid;
+        row.appendChild(uidEl);
+      }
+      list.appendChild(row);
+    }
+  } else {
+    const empty = document.createElement('div');
+    empty.className = 'reaction-user';
+    empty.textContent = 'No sender details available';
+    list.appendChild(empty);
+  }
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'OK';
+  button.addEventListener('click', () => overlay.remove());
+  box.append(title, list, button);
+  overlay.appendChild(box);
   document.body.appendChild(overlay);
 }
 
@@ -335,7 +383,6 @@ async function selectChat(chatId, name) {
   $('chatTitle').textContent = name || chatId;
   messageIndex = new Map();
   loadedMessages = [];
-  reactionFetches = new Set();
   messageReactions = new Map();
   clearReplyDraft();
   hideMessageMenu();
@@ -376,7 +423,6 @@ async function loadMessages(chatId, before = null) {
     for (const m of msgs) {
       appendMessage(m, prepend);
     }
-    fetchReactionBatch(msgs);
     if (before) {
       scroll.scrollTop = scroll.scrollHeight - oldHeight;
     } else if (wasAtBottom) {
@@ -409,6 +455,11 @@ function faceInfo(id) {
 function faceLabel(id) {
   const info = faceInfo(id);
   return info && info.name ? `${info.name} [face:${id}]` : `[face:${id}]`;
+}
+
+function faceName(id) {
+  const info = faceInfo(id);
+  return info && info.name ? info.name : String(id);
 }
 
 function faceText(id) {
@@ -494,6 +545,7 @@ function indexMessages(messages) {
     const id = normalizeMessageId(m && m.message_id);
     if (!id) continue;
     messageIndex.set(id, m);
+    setStoredMessageReactions(id, m.reactions || []);
     refreshReplyCards(id);
   }
 }
@@ -573,68 +625,57 @@ function appendReactionChips(msgEl, reactions = []) {
   wrap.className = 'reaction-chips';
   for (const reaction of visible) {
     const emojiId = String(reaction.emoji_id);
-    const chip = document.createElement('div');
+    const chip = document.createElement('button');
+    chip.type = 'button';
     chip.className = 'reaction-chip';
     chip.title = faceLabel(emojiId);
     const face = createFaceNode(emojiId);
+    const name = document.createElement('span');
+    name.className = 'reaction-name';
+    name.textContent = faceName(emojiId);
     const count = document.createElement('span');
+    count.className = 'reaction-count';
     count.textContent = reaction.count;
-    chip.append(face, count);
+    chip.addEventListener('click', e => {
+      e.stopPropagation();
+      showReactionUsers(reaction);
+    });
+    chip.append(face, name, count);
     wrap.appendChild(chip);
   }
   msgEl.appendChild(wrap);
 }
 
-function mergeReactionState(messageId, reactions, fetchedEmojiIds = null) {
+function setStoredMessageReactions(messageId, reactions) {
   const key = normalizeMessageId(messageId);
   if (!key) return [];
-  const existing = new Map((messageReactions.get(key) || []).map(r => [String(r.emoji_id), r]));
-  const fetched = Array.isArray(fetchedEmojiIds) ? new Set(fetchedEmojiIds.map(String)) : null;
-  if (fetched) {
-    for (const emojiId of fetched) existing.delete(emojiId);
-  } else if (!Array.isArray(reactions) || !reactions.length) {
-    existing.clear();
-  }
+  const list = Array.isArray(reactions) ? reactions : [];
+  messageReactions.set(key, list);
+  const msg = findMessageById(key);
+  if (msg) msg.reactions = list;
+  return list;
+}
+
+function mergeStoredMessageReactions(messageId, reactions) {
+  const key = normalizeMessageId(messageId);
+  if (!key) return [];
+  const merged = new Map((messageReactions.get(key) || []).map(r => [String(r.emoji_id), r]));
   for (const reaction of Array.isArray(reactions) ? reactions : []) {
-    const emojiId = String(reaction && reaction.emoji_id);
-    if (!emojiId || emojiId === 'undefined') continue;
-    if (Number(reaction.count) > 0) existing.set(emojiId, reaction);
-    else existing.delete(emojiId);
+    if (!reaction || reaction.emoji_id === undefined || reaction.emoji_id === null) continue;
+    const emojiId = String(reaction.emoji_id);
+    if (Number(reaction.count) > 0) merged.set(emojiId, reaction);
+    else merged.delete(emojiId);
   }
-  const merged = Array.from(existing.values());
-  messageReactions.set(key, merged);
-  return merged;
+  return setStoredMessageReactions(key, Array.from(merged.values()));
 }
 
-function renderMessageReactions(messageId, reactions, fetchedEmojiIds = null) {
-  const target = document.querySelector(`.msg[data-message-id="${attrSelectorValue(messageId)}"]`);
-  const merged = mergeReactionState(messageId, reactions, fetchedEmojiIds);
-  if (target) appendReactionChips(target, merged);
-}
-
-function fetchReactionBatch(messages) {
-  if (!Array.isArray(messages)) return;
-  for (const m of messages) {
-    const id = normalizeMessageId(m && m.message_id);
-    if (id) fetchMessageReactions(id);
-  }
-}
-
-async function fetchMessageReactions(messageId) {
-  if (reactionFetches.has(messageId)) return;
-  reactionFetches.add(messageId);
-  await refreshMessageReactions(messageId);
-}
-
-async function refreshMessageReactions(messageId, emojiId = null) {
-  try {
-    let url = `/api/message/emoji-likes?message_id=${encodeURIComponent(messageId)}&chat_id=${encodeURIComponent(currentChat || '')}`;
-    if (emojiId) url += `&emoji_id=${encodeURIComponent(emojiId)}`;
-    const r = await api(url);
-    if (!r.ok) return;
-    const d = await r.json();
-    renderMessageReactions(d.message_id || messageId, d.reactions || [], d.fetched_emoji_ids || (emojiId ? [emojiId] : null));
-  } catch {}
+function applyEmojiLikeEvent(data) {
+  if (!data || (data.chat_id && currentChat && data.chat_id !== currentChat)) return;
+  const key = normalizeMessageId(data.message_id);
+  if (!key) return;
+  const reactions = mergeStoredMessageReactions(key, data.reactions || []);
+  const target = document.querySelector(`.msg[data-message-id="${attrSelectorValue(key)}"]`);
+  if (target) appendReactionChips(target, reactions);
 }
 
 function appendImages(bubble, images) {
@@ -871,7 +912,7 @@ async function sendFaceReply(messageId, emojiId) {
     const r = await api('/api/message/emoji-like', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message_id: messageId, emoji_id: emojiId})
+      body: JSON.stringify({message_id: messageId, emoji_id: emojiId, chat_id: currentChat || ''})
     });
     const d = await r.json();
     if (!d.ok) {
@@ -879,9 +920,6 @@ async function sendFaceReply(messageId, emojiId) {
       return;
     }
     showToast('Reaction sent');
-    reactionFetches.delete(messageId);
-    renderMessageReactions(messageId, [{emoji_id: emojiId, count: 1}]);
-    await refreshMessageReactions(messageId, emojiId);
   } catch (e) {
     showModal('Reaction failed: ' + e);
   }
@@ -986,6 +1024,7 @@ function appendMessage(m, prepend = false) {
   if (messageId) {
     div.dataset.messageId = messageId;
     messageIndex.set(messageId, m);
+    setStoredMessageReactions(messageId, m.reactions || []);
     refreshReplyCards(messageId);
   }
   const t = m.time ? new Date(m.time * 1000) : null;
@@ -1002,6 +1041,7 @@ function appendMessage(m, prepend = false) {
   }
   appendImages(bubble, m.images);
   appendForwards(bubble, m.forwards);
+  if (messageId) appendReactionChips(div, messageReactions.get(messageId) || []);
   bindMessageMenu(div, m);
   if (prepend) {
     scroll.prepend(div);
@@ -1146,11 +1186,10 @@ function connectWS() {
           loadedMessages.push(d.data);
           indexMessages([d.data]);
           appendMessage(d.data);
-          fetchReactionBatch([d.data]);
         }
         loadChats();
       } else if (d.type === 'emoji_like' && d.data) {
-        renderMessageReactions(d.data.message_id, d.data.reactions || [], d.data.reactions ? d.data.reactions.map(r => r.emoji_id) : null);
+        applyEmojiLikeEvent(d.data);
       }
     } catch {}
   };
