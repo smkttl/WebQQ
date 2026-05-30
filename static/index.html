@@ -54,7 +54,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg .bubble{padding:8px 12px;border-radius:8px;background:var(--msg-other);word-break:break-word;font-size:14px;line-height:1.5}
 .msg.self .bubble{background:var(--msg-self)}
 .msg-images{display:flex;flex-direction:column;gap:6px;margin-top:6px}
-.msg-image{display:block;max-width:240px;max-height:320px;border-radius:6px;object-fit:contain;cursor:pointer;background:var(--bg)}
+.msg-image-frame{width:240px;height:320px;max-width:100%;border-radius:6px;background:var(--bg);overflow:hidden;display:flex;align-items:center;justify-content:center;overflow-anchor:none}
+.msg-image{display:block;width:100%;height:100%;object-fit:contain;cursor:pointer}
 .msg-image-fallback{color:var(--fg2);font-size:13px}
 .msg-files{display:flex;flex-direction:column;gap:6px;margin-top:6px}
 .file-card{display:flex;align-items:center;gap:10px;max-width:320px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:rgba(0,0,0,.12)}
@@ -166,7 +167,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   .messages-header{padding:8px 10px}
   .messages-scroll{padding:10px}
   .msg{max-width:88%}
-  .msg-image{max-width:min(240px,72vw)}
+  .msg-image-frame{width:min(240px,72vw)}
 }
 </style>
 </head>
@@ -243,6 +244,7 @@ let faceManifest = {faces:{}, reaction_ids:[]};
 let slashSearch = null;
 let faceReplyMessageId = null;
 let userScrollActive = false;
+let imageDimensions = new Map();
 const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
   '66','79','111','114','118','144','147','173','182','187','266','283','289','294','297',
@@ -789,7 +791,8 @@ function attrSelectorValue(value) {
 }
 
 function appendReactionChips(msgEl, reactions = []) {
-  const old = msgEl.querySelector(':scope > .reaction-chips');
+  const container = msgEl.querySelector(':scope > .msg-body') || msgEl;
+  const old = container.querySelector(':scope > .reaction-chips');
   if (old) old.remove();
   const visible = Array.isArray(reactions) ? reactions.filter(r => Number(r && r.count) > 0) : [];
   if (!visible.length) return;
@@ -815,7 +818,7 @@ function appendReactionChips(msgEl, reactions = []) {
     chip.append(face, name, count);
     wrap.appendChild(chip);
   }
-  msgEl.appendChild(wrap);
+  container.appendChild(wrap);
 }
 
 function setStoredMessageReactions(messageId, reactions) {
@@ -850,6 +853,57 @@ function applyEmojiLikeEvent(data) {
   if (target) appendReactionChips(target, reactions);
 }
 
+function isNearBottom(scroll, threshold = 80) {
+  return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < threshold;
+}
+
+function preserveBottomIfNeeded(wasNearBottom) {
+  if (!wasNearBottom) return;
+  const schedule = window.requestAnimationFrame || (fn => setTimeout(fn, 0));
+  schedule(() => {
+    const scroll = $('messagesScroll');
+    scroll.scrollTop = scroll.scrollHeight;
+  });
+}
+
+function imageDimensionKey(image) {
+  return String((image && (image.file || image.url || image.thumbnail)) || '');
+}
+
+function imageDisplaySize(image) {
+  const key = imageDimensionKey(image);
+  const stored = key ? imageDimensions.get(key) : null;
+  const rawWidth = Number((image && image.width) || (stored && stored.width));
+  const rawHeight = Number((image && image.height) || (stored && stored.height));
+  const maxWidth = Math.min(240, Math.floor(window.innerWidth * 0.72));
+  const maxHeight = 320;
+  if (rawWidth > 0 && rawHeight > 0) {
+    const scale = Math.min(maxWidth / rawWidth, maxHeight / rawHeight, 1);
+    return {
+      width: Math.max(1, Math.round(rawWidth * scale)),
+      height: Math.max(1, Math.round(rawHeight * scale)),
+    };
+  }
+  return {width: maxWidth, height: maxHeight};
+}
+
+function applyImageFrameSize(frame, image) {
+  const size = imageDisplaySize(image);
+  frame.style.width = `${size.width}px`;
+  frame.style.height = `${size.height}px`;
+}
+
+function rememberImageDimensions(image, img, frame) {
+  const key = imageDimensionKey(image);
+  if (!key || !img.naturalWidth || !img.naturalHeight) return;
+  imageDimensions.set(key, {width: img.naturalWidth, height: img.naturalHeight});
+  if (!image.width || !image.height) {
+    image.width = img.naturalWidth;
+    image.height = img.naturalHeight;
+    applyImageFrameSize(frame, image);
+  }
+}
+
 function appendImages(bubble, images) {
   if (!Array.isArray(images) || !images.length) return;
   const wrap = document.createElement('div');
@@ -868,13 +922,20 @@ function appendImages(bubble, images) {
     const thumbProxyUrl = `/api/image?url=${encodeURIComponent(thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
     const refreshedThumbProxyUrl = `${thumbProxyUrl}&refresh=1`;
     const fullProxyUrl = `/api/image/full?url=${encodeURIComponent(url || thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
+    const frame = document.createElement('div');
+    frame.className = 'msg-image-frame';
+    applyImageFrameSize(frame, image);
     const img = document.createElement('img');
     img.className = 'msg-image';
-    img.src = thumbProxyUrl;
     img.alt = image.summary || image.file || 'image';
     img.loading = 'lazy';
     img.referrerPolicy = 'no-referrer';
     img.dataset.refreshed = '0';
+    const wasNearBottom = isNearBottom($('messagesScroll'));
+    img.addEventListener('load', () => {
+      rememberImageDimensions(image, img, frame);
+      preserveBottomIfNeeded(wasNearBottom);
+    });
     img.addEventListener('click', () => window.open(fullProxyUrl, '_blank', 'noopener'));
     img.addEventListener('error', () => {
       if (img.dataset.refreshed !== '1') {
@@ -885,9 +946,12 @@ function appendImages(bubble, images) {
       const fallback = document.createElement('div');
       fallback.className = 'msg-image-fallback';
       fallback.textContent = '[image unavailable]';
-      img.replaceWith(fallback);
+      frame.replaceWith(fallback);
+      preserveBottomIfNeeded(wasNearBottom);
     });
-    wrap.appendChild(img);
+    frame.appendChild(img);
+    img.src = thumbProxyUrl;
+    wrap.appendChild(frame);
   }
   bubble.appendChild(wrap);
 }

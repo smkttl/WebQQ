@@ -405,6 +405,8 @@ class MessageStore:
                         "file": file,
                         "summary": d.get("summary", ""),
                         "sub_type": d.get("sub_type", ""),
+                        "width": first_positive_int(d.get("width"), d.get("w"), d.get("image_width"), d.get("imageWidth")),
+                        "height": first_positive_int(d.get("height"), d.get("h"), d.get("image_height"), d.get("imageHeight")),
                     }
                     images.append({k: v for k, v in image.items() if v})
                     parts.append("[image]")
@@ -1251,6 +1253,17 @@ def first_text(*values):
         if text:
             return text
     return ""
+
+
+def first_positive_int(*values):
+    for value in values:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return None
 
 
 def simplify_group_member(member, fallback_name=""):
