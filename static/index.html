@@ -447,6 +447,41 @@ async function loadChats() {
   } catch {}
 }
 
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function formatDateYMD(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function sameLocalDate(a, b) {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+}
+
+function formatClock(date, withSeconds = false) {
+  const parts = [pad2(date.getHours()), pad2(date.getMinutes())];
+  if (withSeconds) parts.push(pad2(date.getSeconds()));
+  return parts.join(':');
+}
+
+function formatMessageTimestamp(date) {
+  const now = new Date();
+  const clock = formatClock(date, true);
+  if (sameLocalDate(date, now)) return clock;
+  if (date.getFullYear() === now.getFullYear()) return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${clock}`;
+  return `${formatDateYMD(date)} ${clock}`;
+}
+
+function formatCompactTimestamp(date) {
+  const now = new Date();
+  if (sameLocalDate(date, now)) return formatClock(date);
+  if (date.getFullYear() === now.getFullYear()) return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  return formatDateYMD(date);
+}
+
 function renderChats(chats) {
   const el = $('chatList');
   el.innerHTML = '';
@@ -454,7 +489,7 @@ function renderChats(chats) {
     const div = document.createElement('div');
     div.className = 'chat-item' + (c.chat_id === currentChat ? ' active' : '');
     const t = c.last_time ? new Date(c.last_time * 1000) : null;
-    const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '';
+    const ts = t ? formatCompactTimestamp(t) : '';
     const nameText = c.name || c.chat_id;
     div.appendChild(createAvatar('chat-avatar', c.avatar_url || avatarUrlForChat(c.chat_id), nameText));
     const main = document.createElement('div');
@@ -1082,7 +1117,7 @@ function appendForwardNode(body, node) {
   meta.appendChild(name);
   if (node.time) {
     const time = document.createElement('span');
-    time.textContent = new Date(node.time * 1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    time.textContent = formatCompactTimestamp(new Date(node.time * 1000));
     meta.appendChild(time);
   }
   item.appendChild(meta);
@@ -1459,7 +1494,7 @@ function appendMessage(m, prepend = false) {
     refreshReplyCards(messageId);
   }
   const t = m.time ? new Date(m.time * 1000) : null;
-  const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+  const ts = t ? formatMessageTimestamp(t) : '';
   let visibleText = Array.isArray(m.images) && m.images.length ? (m.content || '').replace(/\[image\]/g, '').trim() : (m.content || '');
   if (Array.isArray(m.forwards) && m.forwards.length) visibleText = visibleText.replace(/\[forward\]/g, '').trim();
   if (Array.isArray(m.files) && m.files.length) visibleText = visibleText.replace(/\[file\]/g, '').trim();
