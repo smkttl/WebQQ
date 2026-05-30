@@ -36,7 +36,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .messages-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
 .back-button{display:none;width:32px;height:32px;flex:0 0 32px;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--fg);font-size:22px;line-height:1;cursor:pointer}
 .back-button:hover{background:var(--bg3)}
-.chat-title-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-title-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.header-icon-button{display:none;width:32px;height:32px;flex:0 0 32px;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--fg);font-size:18px;line-height:1;cursor:pointer}
+.header-icon-button:hover{background:var(--bg3)}
 .messages-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px 16px}
 .msg{margin-bottom:8px;max-width:70%}
 .msg.self{margin-left:auto}
@@ -113,6 +115,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .modal-box p{margin-bottom:18px;font-size:14px;line-height:1.5}
 .modal-box button{padding:8px 28px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
 .modal-box button:hover{opacity:.85}
+.member-modal{max-width:420px;text-align:left;padding:20px}
+.member-modal-head{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.member-modal-head h2{flex:1;min-width:0;font-size:16px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member-modal-close{width:28px;height:28px;padding:0!important;border-radius:4px!important;background:transparent!important;color:var(--fg2)!important;font-size:20px!important;line-height:1!important}
+.member-search{width:100%;padding:9px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;outline:none}
+.member-search:focus{border-color:var(--accent)}
+.member-list{max-height:min(420px,60vh);overflow-y:auto;border:1px solid var(--border);border-radius:6px}
+.member-modal .member-item{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-bottom:1px solid var(--border);border-radius:0;background:transparent;color:var(--fg);font-size:13px;text-align:left;cursor:pointer}
+.member-item:last-child{border-bottom:0}
+.member-modal .member-item:hover{background:var(--bg3)}
+.member-avatar{flex:0 0 30px;width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--bg3);color:var(--fg);font-size:12px}
+.member-main{min-width:0}
+.member-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member-fields{margin-top:2px;color:var(--fg2);font-size:11px;line-height:1.35}
+.member-field{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.member-empty{padding:14px;color:var(--fg2);font-size:13px;text-align:center}
 .at-dropdown{position:absolute;bottom:100%;left:12px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:50;min-width:220px}
 .at-dropdown.show{display:block}
 .at-item{padding:6px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--border)}
@@ -171,6 +189,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="messages-header">
       <button class="back-button" id="backButton" type="button" aria-label="Back to chats">‹</button>
       <div class="chat-title-text" id="chatTitle">-</div>
+      <button class="header-icon-button" id="memberListButton" type="button" title="Group members" aria-label="Group members">👥</button>
     </div>
     <div class="messages-scroll" id="messagesScroll"></div>
     <div class="send-bar">
@@ -373,6 +392,10 @@ async function loadNicknames() {
   } catch {}
 }
 
+function updateHeaderActions() {
+  $('memberListButton').style.display = currentChat && currentChat.startsWith('group_') ? 'flex' : 'none';
+}
+
 async function init() {
   await loadFaceManifest();
   await loadNicknames();
@@ -437,6 +460,7 @@ async function selectChat(chatId, name) {
   $('emptyState').style.display = 'none';
   $('messagesArea').style.display = 'flex';
   $('chatTitle').textContent = name || chatId;
+  updateHeaderActions();
   messageIndex = new Map();
   loadedMessages = [];
   messageReactions = new Map();
@@ -451,6 +475,10 @@ function showChatList() {
   document.body.classList.remove('chat-open');
   hideAtDropdown();
   hideMessageMenu();
+}
+
+function currentGroupId() {
+  return currentChat && currentChat.startsWith('group_') ? currentChat.slice(6) : '';
 }
 
 async function loadMessages(chatId, before = null) {
@@ -1124,6 +1152,146 @@ async function startTempChatFromSelectedMessage() {
   }
 }
 
+async function startTempChatFromMember(userId, senderName) {
+  const groupId = currentGroupId();
+  if (!groupId || !userId) return;
+  const groupName = $('chatTitle').textContent || '';
+  const name = groupName ? `${groupName} / ${senderName || userId}` : `群临时会话: ${senderName || userId}`;
+  try {
+    const r = await api('/api/temp-chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({group_id: groupId, user_id: userId, name, group_name: groupName, sender_name: senderName || userId})
+    });
+    const raw = await r.text();
+    let d;
+    try {
+      d = JSON.parse(raw);
+    } catch {
+      showModal(`Temp chat failed: HTTP ${r.status} ${raw || r.statusText}`);
+      return;
+    }
+    if (!d.ok) {
+      showModal(d.error || 'Temp chat failed');
+      return;
+    }
+    await loadChats();
+    await selectChat(d.chat_id, d.name || name);
+    $('sendInput').focus();
+  } catch (e) {
+    showModal('Temp chat failed: ' + e);
+  }
+}
+
+async function showMemberList() {
+  const groupId = currentGroupId();
+  if (!groupId) return;
+  await loadNicknames();
+  const r = await api(`/api/group-members?chat_id=${encodeURIComponent(currentChat)}`);
+  const d = await r.json();
+  const members = normalizeGroupMembers(d.members || [])
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, {numeric: true}) || a.uid.localeCompare(b.uid));
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const box = document.createElement('div');
+  box.className = 'modal-box member-modal';
+  const head = document.createElement('div');
+  head.className = 'member-modal-head';
+  const title = document.createElement('h2');
+  title.textContent = 'Group members';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'member-modal-close';
+  close.setAttribute('aria-label', 'Close');
+  close.textContent = '×';
+  close.addEventListener('click', () => overlay.remove());
+  head.append(title, close);
+
+  const search = document.createElement('input');
+  search.className = 'member-search';
+  search.type = 'search';
+  search.placeholder = 'Search members';
+  const list = document.createElement('div');
+  list.className = 'member-list';
+
+  function renderMemberList() {
+    const query = search.value.trim().toLowerCase();
+    const visible = members.filter(m => !query || m.searchText.includes(query)).slice(0, 300);
+    list.replaceChildren();
+    if (!visible.length) {
+      const empty = document.createElement('div');
+      empty.className = 'member-empty';
+      empty.textContent = members.length ? 'No matching members' : 'No members loaded';
+      list.appendChild(empty);
+      return;
+    }
+    for (const member of visible) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'member-item';
+      const avatar = document.createElement('div');
+      avatar.className = 'member-avatar';
+      avatar.textContent = member.displayName.slice(0, 2);
+      const main = document.createElement('div');
+      main.className = 'member-main';
+      const name = document.createElement('div');
+      name.className = 'member-name';
+      name.textContent = member.displayName;
+      const fields = document.createElement('div');
+      fields.className = 'member-fields';
+      for (const line of member.lines) {
+        const field = document.createElement('span');
+        field.className = 'member-field';
+        field.textContent = line;
+        fields.appendChild(field);
+      }
+      main.append(name);
+      if (member.lines.length) main.append(fields);
+      item.append(avatar, main);
+      item.addEventListener('click', async () => {
+        overlay.remove();
+        await startTempChatFromMember(member.uid, member.displayName);
+      });
+      list.appendChild(item);
+    }
+  }
+
+  search.addEventListener('input', renderMemberList);
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.remove();
+  });
+  box.append(head, search, list);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  renderMemberList();
+  search.focus();
+}
+
+function normalizeGroupMembers(rawMembers) {
+  if (!Array.isArray(rawMembers) || !rawMembers.length) {
+    return Object.entries(nicknames || {}).map(([uid, name]) => normalizeGroupMember({user_id: uid, display_name: name}));
+  }
+  return rawMembers.map(normalizeGroupMember).filter(m => m.uid);
+}
+
+function normalizeGroupMember(raw) {
+  const uid = normalizeMessageId(raw.user_id || raw.uid);
+  const values = {
+    remark: String(raw.remark || '').trim(),
+    name: String(raw.name || '').trim(),
+    nick: String(raw.nick || raw.nickname || '').trim(),
+    qid: String(raw.qid || '').trim(),
+  };
+  const displayName = String(raw.display_name || raw.card || values.remark || values.name || values.nick || uid).trim();
+  const lines = [`uid: ${uid}`];
+  for (const key of ['remark', 'name', 'nick', 'qid']) {
+    if (values[key]) lines.push(`${key}: ${values[key]}`);
+  }
+  const searchText = [uid, displayName, ...Object.values(values)].join(' ').toLowerCase();
+  return {uid, displayName, lines, searchText};
+}
+
 function prependReplyMention(message) {
   const uid = normalizeMessageId(message && message.sender_id);
   if (!uid || uid === 'self') return;
@@ -1421,6 +1589,7 @@ $('msgMenuReply').addEventListener('click', replyToSelectedMessage);
 $('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage);
 $('msgMenuFaceReply').addEventListener('click', showFaceReplyPicker);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
+$('memberListButton').addEventListener('click', showMemberList);
 document.addEventListener('pointerdown', e => {
   if (!$('msgMenu').contains(e.target) && !$('emojiDropdown').contains(e.target)) hideMessageMenu();
 });

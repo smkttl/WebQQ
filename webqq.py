@@ -71,6 +71,7 @@ class MessageStore:
         self._dirty = set()
         self._nicknames = {}  # uid -> nickname
         self._group_members = defaultdict(dict)  # chat_id -> {uid: nickname}
+        self._group_member_details = defaultdict(list)  # chat_id -> [{user_id, names...}]
         self._message_chat_index = {}  # message_id -> chat_id
         self._pending_local_reactions = {}  # (message_id, emoji_id) -> user
         self._self_user = {"user_id": "self", "name": "You"}
@@ -583,14 +584,19 @@ class NapCatConnection:
             resp = await self._request("get_group_member_list", {"group_id": group_id})
             if resp and resp.get("status") == "ok":
                 members = {}
+                details = []
                 for m in (resp.get("data") or []):
                     uid = m.get("user_id")
                     if uid:
                         uid = str(uid)
-                        nick = m.get("card") or m.get("nickname") or str(uid)
+                        detail = simplify_group_member(m, fallback_name=self.store._nicknames.get(uid))
+                        nick = detail["display_name"]
                         members[uid] = nick
-                        self.store._nicknames[uid] = nick
+                        details.append(detail)
+                        if nick != uid:
+                            self.store._nicknames[uid] = nick
                 self.store._group_members[f"group_{group_id}"] = members
+                self.store._group_member_details[f"group_{group_id}"] = details
         except Exception:
             pass
 
@@ -1200,6 +1206,38 @@ def normalize_emoji_like_users(users):
     return result
 
 
+def first_text(*values):
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def simplify_group_member(member, fallback_name=""):
+    uid = first_text(member.get("user_id"), member.get("uin"), member.get("uid"))
+    card = first_text(member.get("card"), member.get("card_name"))
+    nickname = first_text(member.get("nickname"), member.get("nick"))
+    remark = first_text(member.get("remark"), member.get("remarks"))
+    name = first_text(member.get("name"), member.get("user_name"), member.get("username"))
+    nick = first_text(member.get("nick"), member.get("nickname"))
+    qid = first_text(member.get("qid"), member.get("q_id"))
+    display = first_text(card, remark, name, nickname, nick, fallback_name, uid)
+    return {
+        "user_id": uid,
+        "uid": uid,
+        "display_name": display,
+        "card": card,
+        "remark": remark,
+        "name": name,
+        "nick": nick,
+        "nickname": nickname,
+        "qid": qid,
+    }
+
+
 async def handle_status(request):
     napcat = request.app["napcat"]
     return web.json_response({
@@ -1219,6 +1257,19 @@ async def handle_nicknames(request):
             await request.app["napcat"]._fetch_group_members(int(group_id))
         return web.json_response(store._group_members.get(chat_id, {}))
     return web.json_response(store._nicknames)
+
+
+async def handle_group_members(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    store = request.app["store"]
+    chat_id = request.query.get("chat_id", "")
+    if not chat_id.startswith("group_"):
+        return web.json_response({"members": []})
+    group_id = chat_id.split("_", 1)[1]
+    if group_id.isdigit():
+        await request.app["napcat"]._fetch_group_members(int(group_id))
+    return web.json_response({"members": store._group_member_details.get(chat_id, [])})
 
 
 def image_url_allowed(url):
@@ -1411,6 +1462,7 @@ async def main():
     app.router.add_get("/api/message/emoji-likes", handle_message_emoji_likes)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nicknames", handle_nicknames)
+    app.router.add_get("/api/group-members", handle_group_members)
     app.router.add_get("/api/image", handle_image_proxy)
     app.router.add_get("/api/image/full", handle_image_full)
     app.router.add_get("/api/file", handle_file_proxy)
