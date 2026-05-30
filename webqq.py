@@ -6,6 +6,7 @@ import time
 import uuid
 import hmac
 import tempfile
+import mimetypes
 from urllib.parse import quote, urlparse
 from collections import defaultdict, deque
 from pathlib import Path
@@ -16,8 +17,10 @@ import aiohttp
 CONFIG_PATH = Path(__file__).parent / "config.json"
 STATIC_DIR = Path(__file__).parent / "static"
 DATA_DIR = Path(__file__).parent / "data"
+AVATAR_DIR = DATA_DIR / "avatars"
 MAX_MESSAGES = 1000
 MAX_FILE_UPLOAD = 100 * 1024 * 1024
+AVATAR_CACHE_TTL = 7 * 24 * 60 * 60
 REACTION_EMOJI_IDS = tuple(str(i) for i in (
     4, 5, 8, 9, 10, 12, 14, 16, 21, 23, 24, 25, 26, 27, 28, 29, 30, 32,
     33, 34, 38, 39, 41, 42, 43, 49, 53, 60, 63, 66, 74, 75, 76, 78, 79,
@@ -48,6 +51,28 @@ def parse_chat_id(chat_id):
     if len(parts) == 3 and parts[0] == "temp" and parts[1].isdigit() and parts[2].isdigit():
         return {"type": "temp", "group_id": int(parts[1]), "user_id": int(parts[2])}
     return None
+
+
+def avatar_url_for(avatar_type, avatar_id):
+    if str(avatar_id).isdigit() and avatar_type in ("user", "group"):
+        return f"/api/avatar?type={avatar_type}&id={avatar_id}"
+    return ""
+
+
+def chat_avatar_url(chat_id, chat_type="", user_id=None, group_id=None):
+    parsed = parse_chat_id(chat_id)
+    if parsed:
+        if parsed["type"] == "group":
+            return avatar_url_for("group", parsed["group_id"])
+        if parsed["type"] == "private":
+            return avatar_url_for("user", parsed["private_id"])
+        if parsed["type"] == "temp":
+            return avatar_url_for("user", parsed["user_id"])
+    if chat_type == "group" and group_id:
+        return avatar_url_for("group", group_id)
+    if chat_type in ("private", "temp") and user_id:
+        return avatar_url_for("user", user_id)
+    return ""
 
 
 def load_config():
@@ -97,6 +122,7 @@ class MessageStore:
                             "type": last.get("type", ""),
                             "last_time": last.get("time", 0),
                             "last_text": (last.get("content", "") or "")[:50],
+                            "avatar_url": chat_avatar_url(chat_id, last.get("type", ""), last.get("user_id"), last.get("group_id")),
                         }
             except Exception:
                 pass
@@ -138,6 +164,7 @@ class MessageStore:
                 "last_text": "",
             }
         self._chat_meta[key]["name"] = simplified.get("chat_name") or self._chat_meta[key]["name"]
+        self._chat_meta[key]["avatar_url"] = chat_avatar_url(key, simplified.get("type", ""), simplified.get("user_id"), simplified.get("group_id"))
         self._chat_meta[key]["last_time"] = simplified["time"]
         self._chat_meta[key]["last_text"] = simplified["content"][:50]
         self._dirty.add(key)
@@ -331,6 +358,7 @@ class MessageStore:
             "time": msg.get("time", int(time.time())),
             "sender_id": msg.get("user_id"),
             "sender_name": sender.get("card", "") or sender.get("nickname", "") or str(msg.get("user_id", "")),
+            "sender_avatar_url": avatar_url_for("user", msg.get("user_id")),
             "content": content,
             "mentions": mentions,
             "images": images,
@@ -505,8 +533,15 @@ class MessageStore:
                 "type": chat_type,
                 "last_time": 0,
                 "last_text": "",
+                "avatar_url": chat_avatar_url(chat_id, chat_type, extra.get("user_id"), extra.get("group_id")),
                 **extra,
             }
+        self._chat_meta[chat_id]["avatar_url"] = chat_avatar_url(
+            chat_id,
+            self._chat_meta[chat_id].get("type", chat_type),
+            self._chat_meta[chat_id].get("user_id"),
+            self._chat_meta[chat_id].get("group_id"),
+        )
 
 
 class NapCatConnection:
@@ -926,6 +961,7 @@ async def handle_send(request):
             "time": now,
             "sender_id": "self",
             "sender_name": "You",
+            "sender_avatar_url": avatar_url_for("user", store._self_user.get("user_id")),
             "content": f"[reply:{reply_to}]{text}" if reply_to else text,
             "mentions": {},
             "images": [],
@@ -1011,6 +1047,7 @@ async def handle_send_file(request):
             "time": now,
             "sender_id": "self",
             "sender_name": "You",
+            "sender_avatar_url": avatar_url_for("user", store._self_user.get("user_id")),
             "content": "[file]",
             "mentions": {},
             "images": [],
@@ -1290,6 +1327,114 @@ def file_url_allowed(url):
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
+def avatar_cache_paths(avatar_type, avatar_id):
+    base = AVATAR_DIR / avatar_type
+    return base / f"{avatar_id}.img", base / f"{avatar_id}.json"
+
+
+def avatar_source_url(avatar_type, avatar_id):
+    if avatar_type == "user":
+        return f"https://q1.qlogo.cn/g?b=qq&nk={avatar_id}&s=100"
+    if avatar_type == "group":
+        return f"https://p.qlogo.cn/gh/{avatar_id}/{avatar_id}/100"
+    return ""
+
+
+def avatar_cache_fresh(meta):
+    try:
+        fetched_at = float(meta.get("fetched_at", 0))
+    except (TypeError, ValueError):
+        return False
+    return time.time() - fetched_at < AVATAR_CACHE_TTL
+
+
+def read_avatar_meta(meta_path):
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        return meta if isinstance(meta, dict) else {}
+    except Exception:
+        return {}
+
+
+def serve_cached_avatar(image_path, meta_path, stale=False):
+    meta = read_avatar_meta(meta_path)
+    content_type = meta.get("content_type") or mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+    headers = {"Cache-Control": "private, max-age=86400", "Content-Type": content_type}
+    if stale:
+        headers["Warning"] = '110 - "avatar cache is stale"'
+    return web.FileResponse(image_path, headers=headers)
+
+
+def avatar_placeholder_svg(label):
+    text = (str(label or "?").strip() or "?")[:2]
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">'
+        '<rect width="100" height="100" rx="50" fill="#0f3460"/>'
+        f'<text x="50" y="57" text-anchor="middle" font-family="Arial,sans-serif" font-size="34" fill="#e0e0e0">{text}</text>'
+        "</svg>"
+    )
+
+
+async def fetch_and_cache_avatar(avatar_type, avatar_id, image_path, meta_path):
+    url = avatar_source_url(avatar_type, avatar_id)
+    if not url:
+        return False
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+            if resp.status != 200:
+                return False
+            content_type = resp.headers.get("Content-Type", "image/jpeg").split(";", 1)[0]
+            if not content_type.startswith("image/"):
+                return False
+            body = await resp.read()
+            if not body:
+                return False
+    fd, tmp_image = tempfile.mkstemp(prefix=f"{avatar_id}.", dir=str(image_path.parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
+        os.replace(tmp_image, image_path)
+        tmp_meta = meta_path.with_suffix(".json.tmp")
+        with open(tmp_meta, "w", encoding="utf-8") as f:
+            json.dump({"content_type": content_type, "fetched_at": time.time(), "source_url": url}, f, separators=(",", ":"))
+        os.replace(tmp_meta, meta_path)
+        return True
+    finally:
+        try:
+            if os.path.exists(tmp_image):
+                os.unlink(tmp_image)
+        except OSError:
+            pass
+
+
+async def handle_avatar(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    avatar_type = request.query.get("type", "")
+    avatar_id = request.query.get("id", "")
+    if avatar_type not in ("user", "group") or not avatar_id.isdigit():
+        return web.json_response({"error": "type=user|group and numeric id are required"}, status=400)
+    image_path, meta_path = avatar_cache_paths(avatar_type, avatar_id)
+    if image_path.exists():
+        meta = read_avatar_meta(meta_path)
+        if avatar_cache_fresh(meta):
+            return serve_cached_avatar(image_path, meta_path)
+    try:
+        if await fetch_and_cache_avatar(avatar_type, avatar_id, image_path, meta_path):
+            return serve_cached_avatar(image_path, meta_path)
+    except Exception:
+        pass
+    if image_path.exists():
+        return serve_cached_avatar(image_path, meta_path, stale=True)
+    return web.Response(
+        text=avatar_placeholder_svg(avatar_id[-2:]),
+        content_type="image/svg+xml",
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
 def safe_download_name(name):
     name = os.path.basename(str(name or "file")).replace("\x00", "").strip()
     return name or "file"
@@ -1463,6 +1608,7 @@ async def main():
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nicknames", handle_nicknames)
     app.router.add_get("/api/group-members", handle_group_members)
+    app.router.add_get("/api/avatar", handle_avatar)
     app.router.add_get("/api/image", handle_image_proxy)
     app.router.add_get("/api/image/full", handle_image_full)
     app.router.add_get("/api/file", handle_file_proxy)
