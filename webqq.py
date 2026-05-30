@@ -5,7 +5,8 @@ import os
 import time
 import uuid
 import hmac
-from urllib.parse import urlparse
+import tempfile
+from urllib.parse import quote, urlparse
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -16,6 +17,7 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 STATIC_DIR = Path(__file__).parent / "static"
 DATA_DIR = Path(__file__).parent / "data"
 MAX_MESSAGES = 1000
+MAX_FILE_UPLOAD = 100 * 1024 * 1024
 REACTION_EMOJI_IDS = tuple(str(i) for i in (
     4, 5, 8, 9, 10, 12, 14, 16, 21, 23, 24, 25, 26, 27, 28, 29, 30, 32,
     33, 34, 38, 39, 41, 42, 43, 49, 53, 60, 63, 66, 74, 75, 76, 78, 79,
@@ -322,7 +324,7 @@ class MessageStore:
             nick = sender.get("card") or sender.get("nickname") or ""
             if nick:
                 self._nicknames[str(sender["user_id"])] = nick
-        content, mentions, images, forwards = self._extract_text(msg)
+        content, mentions, images, forwards, files = self._extract_text(msg)
         return {
             "message_id": msg.get("message_id"),
             "time": msg.get("time", int(time.time())),
@@ -332,6 +334,7 @@ class MessageStore:
             "mentions": mentions,
             "images": images,
             "forwards": forwards,
+            "files": files,
             "reactions": normalize_emoji_likes(msg.get("reactions") or msg.get("likes") or msg.get("like") or []),
             "chat_id": self.chat_key(msg),
             "type": chat_type,
@@ -349,6 +352,7 @@ class MessageStore:
         mentions = {}
         images = []
         forwards = []
+        files = []
         if isinstance(segments, list):
             parts = []
             for seg in segments:
@@ -388,12 +392,31 @@ class MessageStore:
                     forward = self._simplify_forward_segment(d)
                     forwards.append(forward)
                     parts.append("[forward]")
+                elif t == "file":
+                    file_item = self._simplify_file_segment(d)
+                    if file_item:
+                        files.append(file_item)
+                    parts.append("[file]")
                 else:
                     parts.append(f"[{t}]")
-            return "".join(parts), mentions, images, forwards
+            return "".join(parts), mentions, images, forwards, files
         if isinstance(segments, str):
-            return segments, mentions, images, forwards
-        return str(msg.get("raw_message", "")), mentions, images, forwards
+            return segments, mentions, images, forwards, files
+        return str(msg.get("raw_message", "")), mentions, images, forwards, files
+
+    @staticmethod
+    def _simplify_file_segment(data):
+        if not isinstance(data, dict):
+            return None
+        file_item = {
+            "id": data.get("id") or data.get("file_id") or data.get("fileId"),
+            "name": data.get("name") or data.get("file_name") or data.get("filename") or data.get("file"),
+            "size": data.get("size") or data.get("file_size") or data.get("fileSize"),
+            "url": data.get("url"),
+            "file": data.get("file"),
+            "busid": data.get("busid") or data.get("bus_id") or data.get("busId"),
+        }
+        return {k: v for k, v in file_item.items() if v is not None and v != ""}
 
     def _simplify_forward_segment(self, data):
         forward = {
@@ -448,7 +471,7 @@ class MessageStore:
             "message": content,
             "raw_message": content if isinstance(content, str) else "",
         }
-        text, mentions, images, forwards = self._extract_text(fake_msg)
+        text, mentions, images, forwards, files = self._extract_text(fake_msg)
         return {
             "sender_id": node.get("user_id") or node.get("uin") or sender.get("user_id") or "",
             "sender_name": node.get("nickname") or node.get("name") or sender.get("nickname") or sender.get("card") or "",
@@ -457,6 +480,7 @@ class MessageStore:
             "mentions": mentions,
             "images": images,
             "forwards": forwards,
+            "files": files,
         }
 
     def get_messages(self, chat_id, limit=50, before=None):
@@ -671,6 +695,52 @@ class NapCatConnection:
             "message": message,
         })
 
+    async def upload_file(self, chat_id, path, name):
+        if not self.ws:
+            raise RuntimeError("not connected to NapCat")
+        parsed = parse_chat_id(chat_id)
+        if not parsed:
+            raise ValueError(f"unknown chat_id: {chat_id}")
+        if parsed["type"] == "group":
+            return await self._request("upload_group_file", {
+                "group_id": parsed["group_id"],
+                "file": path,
+                "name": name,
+            }, timeout=60)
+        if parsed["type"] == "private":
+            return await self._request("upload_private_file", {
+                "user_id": parsed["private_id"],
+                "file": path,
+                "name": name,
+            }, timeout=60)
+        raise ValueError("file sending is not supported for temporary chats")
+
+    async def resolve_file_urls(self, file_id="", file_path="", busid="", url="", chat_id=""):
+        urls = []
+        if file_url_allowed(url):
+            urls.append(url)
+        candidates = []
+        if file_id:
+            candidates.append({"file_id": file_id})
+        if file_path:
+            candidates.append({"file": file_path})
+        if file_id and busid:
+            candidates.append({"file_id": file_id, "busid": busid})
+        parsed = parse_chat_id(chat_id)
+        for params in candidates:
+            if parsed and parsed["type"] == "group":
+                params = {**params, "group_id": parsed["group_id"]}
+            actions = ["get_file"]
+            if parsed and parsed["type"] == "group":
+                actions.append("get_group_file_url")
+            for action in actions:
+                resp = await self._request(action, params, timeout=10)
+                data = resp.get("data") if resp and resp.get("status") == "ok" else {}
+                for candidate in extract_file_urls(data):
+                    if file_url_allowed(candidate):
+                        urls.append(candidate)
+        return list(dict.fromkeys(urls))
+
     async def set_msg_emoji_like(self, message_id, emoji_id, enabled=True):
         return await self._request("set_msg_emoji_like", {
             "message_id": int(message_id),
@@ -851,6 +921,10 @@ async def handle_send(request):
             "sender_id": "self",
             "sender_name": "You",
             "content": f"[reply:{reply_to}]{text}" if reply_to else text,
+            "mentions": {},
+            "images": [],
+            "forwards": [],
+            "files": [],
             "reactions": [],
             "chat_id": chat_id,
             "type": parsed_chat["type"],
@@ -872,6 +946,95 @@ async def handle_send(request):
         return web.json_response({"ok": True, "data": result})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def handle_send_file(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    chat_id = ""
+    filename = "file"
+    temp_path = None
+    size = 0
+    too_large = False
+    try:
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "chat_id":
+                chat_id = (await part.text()).strip()
+            elif part.name == "file":
+                filename = safe_download_name(part.filename or "file")
+                fd, temp_path = tempfile.mkstemp(prefix="webqq-upload-")
+                with os.fdopen(fd, "wb") as f:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_FILE_UPLOAD:
+                            too_large = True
+                        else:
+                            f.write(chunk)
+            else:
+                await part.release()
+        parsed_chat = parse_chat_id(chat_id)
+        if not chat_id:
+            return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+        if not parsed_chat:
+            return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+        if parsed_chat["type"] not in ("group", "private"):
+            return web.json_response({"ok": False, "error": "file sending is not supported for temporary chats"}, status=400)
+        if not temp_path:
+            return web.json_response({"ok": False, "error": "file is required"}, status=400)
+        if too_large:
+            return web.json_response({"ok": False, "error": "file is larger than 100 MB"}, status=413)
+        if size <= 0:
+            return web.json_response({"ok": False, "error": "file is empty"}, status=400)
+        napcat = request.app["napcat"]
+        result = await napcat.upload_file(chat_id, temp_path, filename)
+        if not result or result.get("status") != "ok":
+            err = result.get("wording", result.get("message", "file upload failed")) if result else "not connected"
+            return web.json_response({"ok": False, "error": err}, status=500)
+
+        now = int(time.time())
+        message_id = extract_message_id(result)
+        simplified = {
+            "message_id": message_id,
+            "time": now,
+            "sender_id": "self",
+            "sender_name": "You",
+            "content": "[file]",
+            "mentions": {},
+            "images": [],
+            "forwards": [],
+            "files": [{"name": filename, "size": size}],
+            "reactions": [],
+            "chat_id": chat_id,
+            "type": parsed_chat["type"],
+            "group_id": parsed_chat.get("group_id"),
+            "user_id": parsed_chat.get("user_id") or parsed_chat.get("private_id"),
+            "chat_name": "",
+            "self": True,
+        }
+        store = request.app["store"]
+        store.append_simplified(chat_id, simplified)
+        if chat_id not in store._chat_meta:
+            store.ensure_chat(chat_id, chat_id, parsed_chat["type"])
+        store._chat_meta[chat_id]["last_time"] = now
+        store._chat_meta[chat_id]["last_text"] = "[file]"
+        store._dirty.add(chat_id)
+        await napcat._broadcast({"type": "new_message", "data": simplified})
+        return web.json_response({"ok": True, "data": result})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 async def handle_message_emoji_like(request):
@@ -1071,6 +1234,77 @@ def image_url_allowed(url):
     return parsed.scheme in ("http", "https") and host in allowed_hosts
 
 
+def file_url_allowed(url):
+    parsed = urlparse(url)
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+
+
+def safe_download_name(name):
+    name = os.path.basename(str(name or "file")).replace("\x00", "").strip()
+    return name or "file"
+
+
+def content_disposition(filename):
+    safe_ascii = safe_download_name(filename).encode("ascii", "ignore").decode("ascii") or "file"
+    safe_ascii = safe_ascii.replace("\\", "_").replace('"', "_")
+    encoded = quote(safe_download_name(filename))
+    return f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{encoded}'
+
+
+def extract_file_urls(payload):
+    urls = []
+    if isinstance(payload, dict):
+        for key in ("url", "file", "download_url", "downloadUrl"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                urls.append(value)
+        for key in ("data", "file_info", "fileInfo"):
+            urls.extend(extract_file_urls(payload.get(key)))
+    elif isinstance(payload, list):
+        for item in payload:
+            urls.extend(extract_file_urls(item))
+    return urls
+
+
+async def fetch_first_file(urls, filename):
+    async with aiohttp.ClientSession() as session:
+        last_status = 502
+        for file_url in urls:
+            try:
+                async with session.get(file_url, timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                    last_status = resp.status
+                    if resp.status != 200:
+                        continue
+                    content_type = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0]
+                    headers = {
+                        "Cache-Control": "private, max-age=300",
+                        "Content-Disposition": content_disposition(filename),
+                    }
+                    length = resp.headers.get("Content-Length")
+                    if length:
+                        headers["Content-Length"] = length
+                    return web.Response(body=await resp.read(), content_type=content_type, headers=headers)
+            except Exception:
+                continue
+        return web.json_response({"error": "file fetch failed"}, status=last_status)
+
+
+async def handle_file_proxy(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    filename = safe_download_name(request.query.get("name", "file"))
+    urls = await request.app["napcat"].resolve_file_urls(
+        file_id=request.query.get("id", ""),
+        file_path=request.query.get("file", ""),
+        busid=request.query.get("busid", ""),
+        url=request.query.get("url", ""),
+        chat_id=request.query.get("chat_id", ""),
+    )
+    if not urls:
+        return web.json_response({"error": "file url unavailable"}, status=400)
+    return await fetch_first_file(urls, filename)
+
+
 async def resolve_image_urls(request, url, file, refresh=False):
     urls = []
     if image_url_allowed(url):
@@ -1161,7 +1395,7 @@ async def main():
     store.load_all()
     napcat = NapCatConnection(config["ws_url"], config.get("napcat_token", ""), store)
 
-    app = web.Application()
+    app = web.Application(client_max_size=MAX_FILE_UPLOAD + 1024 * 1024)
     app["config"] = config
     app["store"] = store
     app["napcat"] = napcat
@@ -1172,12 +1406,14 @@ async def main():
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_post("/api/temp-chat", handle_temp_chat)
     app.router.add_post("/api/send", handle_send)
+    app.router.add_post("/api/send-file", handle_send_file)
     app.router.add_post("/api/message/emoji-like", handle_message_emoji_like)
     app.router.add_get("/api/message/emoji-likes", handle_message_emoji_likes)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nicknames", handle_nicknames)
     app.router.add_get("/api/image", handle_image_proxy)
     app.router.add_get("/api/image/full", handle_image_full)
+    app.router.add_get("/api/file", handle_file_proxy)
     app.router.add_get("/ws", handle_ws_browser)
     app.router.add_get("/", lambda r: web.FileResponse(STATIC_DIR / "index.html"))
     app.router.add_static("/", path=str(STATIC_DIR), name="static")

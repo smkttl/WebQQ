@@ -46,6 +46,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg-images{display:flex;flex-direction:column;gap:6px;margin-top:6px}
 .msg-image{display:block;max-width:240px;max-height:320px;border-radius:6px;object-fit:contain;cursor:pointer;background:var(--bg)}
 .msg-image-fallback{color:var(--fg2);font-size:13px}
+.msg-files{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.file-card{display:flex;align-items:center;gap:10px;max-width:320px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:rgba(0,0,0,.12)}
+.file-icon{flex:0 0 auto;color:var(--accent);font-size:18px;line-height:1}
+.file-main{flex:1;min-width:0}
+.file-name{font-size:13px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-size{margin-top:2px;color:var(--fg2);font-size:12px}
+.file-download{flex:0 0 auto;color:var(--accent);font-size:13px;text-decoration:none}
+.file-download:hover{text-decoration:underline}
 .msg .ts{font-size:11px;color:var(--fg2);margin-top:2px}
 .at-mention{color:var(--accent);cursor:pointer;border-radius:3px;padding:0 2px}
 .at-mention:hover{text-decoration:underline}
@@ -72,10 +80,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .forward-node-name{color:var(--fg);font-size:12px;font-weight:600}
 .forward-node-content{font-size:13px;line-height:1.45;white-space:pre-wrap}
 .send-bar{flex:0 0 auto;display:flex;padding:8px 12px calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--bg2);position:relative}
+.send-bar .attach-button{flex:0 0 40px;width:40px;height:40px;margin:0 8px 0 0;padding:0;display:flex;align-items:center;justify-content:center;border:none;border-radius:6px;background:var(--bg3);color:#fff;font-size:18px;line-height:1;cursor:pointer}
+.send-bar .attach-button:hover{opacity:.85}
 .send-bar input{flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;outline:none}
 .send-bar input:focus{border-color:var(--accent)}
 .send-bar button{margin-left:8px;padding:10px 20px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
 .send-bar button:hover{opacity:.85}
+.send-bar .file-input{display:none}
 .reply-draft{position:absolute;left:12px;right:12px;bottom:100%;display:none;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-bottom:0;border-radius:6px 6px 0 0;background:var(--bg2);font-size:12px}
 .reply-draft.show{display:flex}
 .reply-draft-text{flex:1;min-width:0;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -169,6 +180,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
         <div class="reply-draft-text" id="replyDraftText"></div>
         <button id="replyDraftCancel" type="button" aria-label="Cancel reply">×</button>
       </div>
+      <button class="attach-button" id="attachButton" type="button" title="Attach file" aria-label="Attach file">📎</button>
+      <input class="file-input" type="file" id="fileInput">
       <input type="text" id="sendInput" placeholder="Type a message... (@ to mention)" autocomplete="off">
       <button onclick="doSend()">Send</button>
     </div>
@@ -313,6 +326,16 @@ function showReactionUsers(reaction) {
 async function api(path, opts = {}) {
   const r = await fetch(path, opts);
   return r;
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {ok: false, error: text.trim() || `HTTP ${response.status}`};
+  }
 }
 
 async function doLogin() {
@@ -582,9 +605,11 @@ function messagePreview(m) {
     .replace(/\[reply:\d+\]/g, '')
     .replace(/\[image\]/g, '')
     .replace(/\[forward\]/g, '')
+    .replace(/\[file\]/g, '')
     .trim();
   if (!text && Array.isArray(m.images) && m.images.length) text = '[image]';
   if (!text && Array.isArray(m.forwards) && m.forwards.length) text = '[forward]';
+  if (!text && Array.isArray(m.files) && m.files.length) text = '[file]';
   return text || '[message]';
 }
 
@@ -774,6 +799,66 @@ function appendImages(bubble, images) {
   bubble.appendChild(wrap);
 }
 
+function humanFileSize(size) {
+  const n = Number(size);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = n;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const digits = unit === 0 || value >= 10 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}
+
+function fileDownloadUrl(file) {
+  const params = new URLSearchParams();
+  if (currentChat) params.set('chat_id', currentChat);
+  for (const [key, value] of Object.entries(file || {})) {
+    if (['id', 'name', 'url', 'file', 'busid'].includes(key) && value !== undefined && value !== null && value !== '') {
+      params.set(key, String(value));
+    }
+  }
+  return `/api/file?${params.toString()}`;
+}
+
+function appendFiles(bubble, files) {
+  if (!Array.isArray(files) || !files.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-files';
+  for (const file of files) {
+    const card = document.createElement('div');
+    card.className = 'file-card';
+    const icon = document.createElement('div');
+    icon.className = 'file-icon';
+    icon.textContent = '📄';
+    const main = document.createElement('div');
+    main.className = 'file-main';
+    const name = document.createElement('div');
+    name.className = 'file-name';
+    name.textContent = (file && file.name) || (file && file.file) || 'file';
+    const size = document.createElement('div');
+    size.className = 'file-size';
+    size.textContent = humanFileSize(file && file.size);
+    main.append(name);
+    if (size.textContent) main.append(size);
+    card.append(icon, main);
+    if (file && (file.url || file.file || file.id)) {
+      const link = document.createElement('a');
+      link.className = 'file-download';
+      link.href = fileDownloadUrl(file);
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.textContent = 'Download';
+      card.appendChild(link);
+    }
+    wrap.appendChild(card);
+  }
+  bubble.appendChild(wrap);
+}
+
 function appendForwards(bubble, forwards) {
   if (!Array.isArray(forwards) || !forwards.length) return;
   for (const forward of forwards) {
@@ -845,7 +930,7 @@ function appendForwardNode(body, node) {
   }
   item.appendChild(meta);
 
-  const text = (node.content || '').replace(/\[image\]/g, '').trim();
+  const text = (node.content || '').replace(/\[image\]/g, '').replace(/\[file\]/g, '').trim();
   if (text) {
     const content = document.createElement('div');
     content.className = 'forward-node-content';
@@ -853,6 +938,7 @@ function appendForwardNode(body, node) {
     item.appendChild(content);
   }
   appendImages(item, node.images);
+  appendFiles(item, node.files);
   appendForwards(item, node.forwards);
   body.appendChild(item);
 }
@@ -1081,6 +1167,7 @@ function appendMessage(m, prepend = false) {
   const ts = t ? t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
   let visibleText = Array.isArray(m.images) && m.images.length ? (m.content || '').replace(/\[image\]/g, '').trim() : (m.content || '');
   if (Array.isArray(m.forwards) && m.forwards.length) visibleText = visibleText.replace(/\[forward\]/g, '').trim();
+  if (Array.isArray(m.files) && m.files.length) visibleText = visibleText.replace(/\[file\]/g, '').trim();
   const rendered = splitReplyTokens(visibleText);
   div.innerHTML = `<div class="sender">${esc(m.sender_name || String(m.sender_id || ''))}</div><div class="bubble">${renderContent(rendered.content, m.mentions)}</div><div class="ts">${ts}</div>`;
   const bubble = div.querySelector('.bubble');
@@ -1090,6 +1177,7 @@ function appendMessage(m, prepend = false) {
     for (let i = replyEls.length - 1; i >= 0; i--) bubble.prepend(replyEls[i]);
   }
   appendImages(bubble, m.images);
+  appendFiles(bubble, m.files);
   appendForwards(bubble, m.forwards);
   if (messageId) appendReactionChips(div, messageReactions.get(messageId) || []);
   bindMessageMenu(div, m);
@@ -1125,6 +1213,28 @@ async function doSend() {
     if (!d.ok) { input.value = text; showModal(d.error || 'Send failed'); }
     else if (replyTo) { clearReplyDraft(); }
   } catch (e) { input.value = text; showModal('Send failed: ' + e); }
+}
+
+async function doSendFile(file) {
+  if (!currentChat || !file) return;
+  if (currentChat.startsWith('temp_')) {
+    showModal('File sending is not supported for temporary chats.');
+    return;
+  }
+  if (file.size > 100 * 1024 * 1024) {
+    showModal('File is larger than 100 MB.');
+    return;
+  }
+  const form = new FormData();
+  form.append('chat_id', currentChat);
+  form.append('file', file);
+  try {
+    const r = await api('/api/send-file', {method: 'POST', body: form});
+    const d = await readJsonResponse(r);
+    if (!d.ok) showModal(d.error || 'File send failed');
+  } catch (e) {
+    showModal('File send failed: ' + e);
+  }
 }
 
 // @ autocomplete
@@ -1333,6 +1443,21 @@ document.addEventListener('keydown', e => {
 $('sendInput').addEventListener('blur', () => {
   setTimeout(hideAtDropdown, 200);
   setTimeout(hideEmojiDropdown, 200);
+});
+
+$('attachButton').addEventListener('click', () => {
+  if (!currentChat) return;
+  if (currentChat.startsWith('temp_')) {
+    showModal('File sending is not supported for temporary chats.');
+    return;
+  }
+  $('fileInput').click();
+});
+
+$('fileInput').addEventListener('change', e => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (file) doSendFile(file);
 });
 
 $('backButton').addEventListener('click', showChatList);
