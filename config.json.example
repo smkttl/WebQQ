@@ -3,5 +3,8 @@
   "napcat_token": "",
   "web_port": 8080,
   "web_token": "",
-  "flush_interval": 15
+  "flush_interval": 15,
+  "fail2ban_max_failures": 5,
+  "fail2ban_window_seconds": 300,
+  "fail2ban_ban_seconds": 1800
 }
