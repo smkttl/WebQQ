@@ -827,7 +827,8 @@ class PluginContext:
         print(f"[plugin:{self.plugin_id}] {message}")
 
     async def send_message(self, chat_id, text, reply_to=None):
-        return await self.manager.napcat.send_message(chat_id, text, reply_to=reply_to)
+        sent = await send_text_and_register(self.manager.napcat, self.manager.store, chat_id, text, reply_to=reply_to)
+        return sent["result"]
 
     async def upload_file(self, chat_id, path, name=None):
         return await self.manager.napcat.upload_file(chat_id, path, name or os.path.basename(path))
@@ -1657,6 +1658,53 @@ async def read_json_body(request):
     return body
 
 
+async def send_text_and_register(napcat, store, chat_id, text, reply_to=None):
+    parsed_chat = parse_chat_id(chat_id)
+    if not parsed_chat:
+        raise ValueError("invalid chat_id")
+    result = await napcat.send_message(chat_id, text, reply_to=reply_to)
+    if not result or result.get("status") != "ok":
+        err = result.get("wording", result.get("message", "send failed")) if result else "not connected"
+        raise RuntimeError(err)
+    now = int(time.time())
+    message_id = extract_message_id(result)
+    simplified = {
+        "message_id": message_id,
+        "time": now,
+        "sender_id": "self",
+        "sender_name": "You",
+        "sender_avatar_url": avatar_url_for("user", store._self_user.get("user_id")),
+        "content": f"[reply:{reply_to}]{text}" if reply_to else text,
+        "mentions": {},
+        "images": [],
+        "forwards": [],
+        "files": [],
+        "videos": [],
+        "records": [],
+        "extra_segments": [],
+        "reactions": [],
+        "chat_id": chat_id,
+        "type": parsed_chat["type"],
+        "group_id": parsed_chat.get("group_id"),
+        "user_id": parsed_chat.get("user_id") or parsed_chat.get("private_id"),
+        "chat_name": "",
+        "self": True,
+    }
+    store.register_pending_local_message(chat_id, simplified)
+    if chat_id in store._chat_meta:
+        store._chat_meta[chat_id]["last_time"] = now
+        store._chat_meta[chat_id]["last_text"] = text[:50]
+    else:
+        store.ensure_chat(chat_id, chat_id, parsed_chat["type"])
+        store._chat_meta[chat_id]["last_time"] = now
+        store._chat_meta[chat_id]["last_text"] = text[:50]
+    store._dirty.add(chat_id)
+    await napcat._broadcast({"type": "new_message", "data": simplified})
+    if napcat.plugins:
+        await napcat.plugins.dispatch("message", {"message": simplified}, raw=None)
+    return {"result": result, "message": simplified}
+
+
 async def handle_login(request):
     cfg = request.app["config"]
     auth_token = cfg.get("web_token", "")
@@ -1751,45 +1799,8 @@ async def handle_send(request):
     napcat = request.app["napcat"]
     store = request.app["store"]
     try:
-        result = await napcat.send_message(chat_id, text, reply_to=reply_to)
-        if not result or result.get("status") != "ok":
-            err = result.get("wording", result.get("message", "send failed")) if result else "not connected"
-            return web.json_response({"ok": False, "error": err}, status=500)
-        now = int(time.time())
-        message_id = extract_message_id(result)
-        simplified = {
-            "message_id": message_id,
-            "time": now,
-            "sender_id": "self",
-            "sender_name": "You",
-            "sender_avatar_url": avatar_url_for("user", store._self_user.get("user_id")),
-            "content": f"[reply:{reply_to}]{text}" if reply_to else text,
-            "mentions": {},
-            "images": [],
-            "forwards": [],
-            "files": [],
-            "videos": [],
-            "records": [],
-            "extra_segments": [],
-            "reactions": [],
-            "chat_id": chat_id,
-            "type": parsed_chat["type"],
-            "group_id": parsed_chat.get("group_id"),
-            "user_id": parsed_chat.get("user_id") or parsed_chat.get("private_id"),
-            "chat_name": "",
-            "self": True,
-        }
-        store.register_pending_local_message(chat_id, simplified)
-        if chat_id in store._chat_meta:
-            store._chat_meta[chat_id]["last_time"] = now
-            store._chat_meta[chat_id]["last_text"] = text[:50]
-        else:
-            store.ensure_chat(chat_id, chat_id, parsed_chat["type"])
-            store._chat_meta[chat_id]["last_time"] = now
-            store._chat_meta[chat_id]["last_text"] = text[:50]
-        store._dirty.add(chat_id)
-        await napcat._broadcast({"type": "new_message", "data": simplified})
-        return web.json_response({"ok": True, "data": result})
+        sent = await send_text_and_register(napcat, store, chat_id, text, reply_to=reply_to)
+        return web.json_response({"ok": True, "data": sent["result"]})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
