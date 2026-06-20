@@ -58,10 +58,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .msg .sender{font-size:12px;color:var(--fg2);margin-bottom:2px}
 .msg .bubble{padding:8px 12px;border-radius:8px;background:var(--msg-other);word-break:break-word;font-size:14px;line-height:1.5}
 .msg.self .bubble{background:var(--msg-self)}
+.msg.recalled .bubble{outline:1px dashed var(--accent);outline-offset:2px}
+.recalled-tag{display:inline-flex;align-items:center;margin-bottom:6px;padding:2px 6px;border:1px solid var(--accent);border-radius:999px;color:var(--accent);font-size:11px;line-height:1.2}
 .msg-images{display:flex;flex-direction:column;gap:6px;margin-top:6px}
 .msg-image-frame{width:240px;height:320px;max-width:100%;border-radius:6px;background:var(--bg);overflow:hidden;display:flex;align-items:center;justify-content:center;overflow-anchor:none}
 .msg-image{display:block;width:100%;height:100%;object-fit:contain;cursor:pointer}
 .msg-image-fallback{color:var(--fg2);font-size:13px}
+.msg-media{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.media-card{max-width:320px;border:1px solid var(--border);border-radius:6px;background:rgba(0,0,0,.12);overflow:hidden}
+.media-card video,.media-card audio{display:block;width:100%;max-height:260px;background:#000}
+.media-fallback{padding:8px 10px;color:var(--fg2);font-size:13px}
+.extra-segments{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.extra-segment{max-width:360px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:rgba(0,0,0,.12);color:var(--fg2);font-size:12px;line-height:1.4}
+.extra-segment strong{display:block;color:var(--fg);font-size:12px;margin-bottom:2px}
 .msg-files{display:flex;flex-direction:column;gap:6px;margin-top:6px}
 .file-card{display:flex;align-items:center;gap:10px;max-width:320px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:rgba(0,0,0,.12)}
 .file-icon{flex:0 0 auto;color:var(--accent);font-size:18px;line-height:1}
@@ -798,10 +807,17 @@ function messagePreview(m) {
     .replace(/\[image\]/g, '')
     .replace(/\[forward\]/g, '')
     .replace(/\[file\]/g, '')
+    .replace(/\[video\]/g, '')
+    .replace(/\[voice\]/g, '')
+    .replace(/\[onlinefile\]/g, '')
+    .replace(/\[flashtransfer\]/g, '')
     .trim();
   if (!text && Array.isArray(m.images) && m.images.length) text = '[image]';
+  if (!text && Array.isArray(m.videos) && m.videos.length) text = '[video]';
+  if (!text && Array.isArray(m.records) && m.records.length) text = '[voice]';
   if (!text && Array.isArray(m.forwards) && m.forwards.length) text = '[forward]';
   if (!text && Array.isArray(m.files) && m.files.length) text = '[file]';
+  if (!text && Array.isArray(m.extra_segments) && m.extra_segments.length) text = m.extra_segments[0].label || '[message]';
   return text || '[message]';
 }
 
@@ -814,10 +830,11 @@ function indexMessages(messages) {
   if (!Array.isArray(messages)) return;
   for (const m of messages) {
     const id = normalizeMessageId(m && m.message_id);
-    if (!id) continue;
-    messageIndex.set(id, m);
-    setStoredMessageReactions(id, m.reactions || []);
-    refreshReplyCards(id);
+    if (id) {
+      messageIndex.set(id, m);
+      setStoredMessageReactions(id, m.reactions || []);
+      refreshReplyCards(id);
+    }
   }
 }
 
@@ -950,6 +967,52 @@ function applyEmojiLikeEvent(data) {
   if (target) appendReactionChips(target, reactions);
 }
 
+function findMessageElement(data) {
+  const messageId = normalizeMessageId(data && data.message_id);
+  if (messageId) {
+    const byId = document.querySelector(`.msg[data-message-id="${attrSelectorValue(messageId)}"]`);
+    if (byId) return byId;
+  }
+  const localId = normalizeMessageId(data && data.local_id);
+  if (localId) {
+    return document.querySelector(`.msg[data-local-id="${attrSelectorValue(localId)}"]`);
+  }
+  return null;
+}
+
+function upsertLoadedMessage(message, localId = '') {
+  if (!message) return;
+  const messageId = normalizeMessageId(message.message_id);
+  const normalizedLocalId = normalizeMessageId(localId || message.local_id);
+  let index = -1;
+  if (messageId) {
+    index = loadedMessages.findIndex(m => normalizeMessageId(m && m.message_id) === messageId);
+  }
+  if (index < 0 && normalizedLocalId) {
+    index = loadedMessages.findIndex(m => normalizeMessageId(m && m.local_id) === normalizedLocalId);
+  }
+  if (index >= 0) loadedMessages[index] = message;
+  else loadedMessages.push(message);
+  if (messageId) {
+    messageIndex.set(messageId, message);
+    refreshReplyCards(messageId);
+  }
+}
+
+function applyMessageUpdate(data) {
+  if (!data || (data.chat_id && currentChat && data.chat_id !== currentChat)) return;
+  const message = data.message;
+  if (!message) return;
+  upsertLoadedMessage(message, data.local_id);
+  const target = findMessageElement({message_id: message.message_id, local_id: data.local_id || message.local_id});
+  if (target) {
+    renderMessageElement(target, message);
+  } else if (message.chat_id === currentChat) {
+    appendMessage(message);
+  }
+  loadChats();
+}
+
 function isNearBottom(scroll, threshold = 80) {
   return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < threshold;
 }
@@ -1072,6 +1135,10 @@ function fileDownloadUrl(file) {
   if (currentChat) params.set('chat_id', currentChat);
   const token = document.cookie.match(/(?:^|;\s*)token=([^;]*)/)?.[1] || '';
   if (token) params.set('token', token);
+  if (file && file.file_id && !file.id) params.set('id', String(file.file_id));
+  if (file && file.fileName && !file.name) params.set('name', String(file.fileName));
+  if (file && file.msgId && !file.id) params.set('id', String(file.msgId));
+  if (file && file.fileSize && !file.size) params.set('size', String(file.fileSize));
   for (const [key, value] of Object.entries(file || {})) {
     if (['id', 'name', 'url', 'file', 'busid'].includes(key) && value !== undefined && value !== null && value !== '') {
       params.set(key, String(value));
@@ -1094,14 +1161,15 @@ function appendFiles(bubble, files) {
     main.className = 'file-main';
     const name = document.createElement('div');
     name.className = 'file-name';
-    name.textContent = (file && file.name) || (file && file.file) || 'file';
+    const kind = file && file.kind ? `${file.kind}: ` : '';
+    name.textContent = kind + ((file && (file.name || file.fileName || file.file)) || 'file');
     const size = document.createElement('div');
     size.className = 'file-size';
-    size.textContent = humanFileSize(file && file.size);
+    size.textContent = humanFileSize(file && (file.size || file.fileSize));
     main.append(name);
     if (size.textContent) main.append(size);
     card.append(icon, main);
-    if (file && (file.url || file.file || file.id)) {
+    if (file && (file.url || file.file || file.id || file.file_id || file.msgId)) {
       const link = document.createElement('a');
       link.className = 'file-download';
       link.href = fileDownloadUrl(file);
@@ -1113,6 +1181,91 @@ function appendFiles(bubble, files) {
     wrap.appendChild(card);
   }
   bubble.appendChild(wrap);
+}
+
+function mediaProxyUrl(media) {
+  if (!media) return '';
+  if (media.url) return media.url;
+  if (media.file || media.name || media.file_id) return fileDownloadUrl(media);
+  return '';
+}
+
+function appendVideos(bubble, videos) {
+  if (!Array.isArray(videos) || !videos.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-media';
+  for (const video of videos) {
+    const card = document.createElement('div');
+    card.className = 'media-card';
+    const url = mediaProxyUrl(video);
+    if (url) {
+      const player = document.createElement('video');
+      player.controls = true;
+      player.preload = 'metadata';
+      player.src = url;
+      card.appendChild(player);
+    } else {
+      const fallback = document.createElement('div');
+      fallback.className = 'media-fallback';
+      fallback.textContent = '[video unavailable]';
+      card.appendChild(fallback);
+    }
+    wrap.appendChild(card);
+  }
+  bubble.appendChild(wrap);
+}
+
+function appendRecords(bubble, records) {
+  if (!Array.isArray(records) || !records.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'msg-media';
+  for (const record of records) {
+    const card = document.createElement('div');
+    card.className = 'media-card';
+    const url = mediaProxyUrl(record);
+    if (url) {
+      const player = document.createElement('audio');
+      player.controls = true;
+      player.preload = 'metadata';
+      player.src = url;
+      card.appendChild(player);
+    } else {
+      const fallback = document.createElement('div');
+      fallback.className = 'media-fallback';
+      fallback.textContent = '[voice unavailable]';
+      card.appendChild(fallback);
+    }
+    wrap.appendChild(card);
+  }
+  bubble.appendChild(wrap);
+}
+
+function appendExtraSegments(bubble, segments) {
+  if (!Array.isArray(segments) || !segments.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'extra-segments';
+  for (const segment of segments) {
+    const item = document.createElement('div');
+    item.className = 'extra-segment';
+    const label = document.createElement('strong');
+    label.textContent = (segment && segment.label) || `[${(segment && segment.type) || 'segment'}]`;
+    item.appendChild(label);
+    if (segment && segment.text) {
+      const text = document.createElement('span');
+      text.textContent = segment.text;
+      item.appendChild(text);
+    }
+    wrap.appendChild(item);
+  }
+  bubble.appendChild(wrap);
+}
+
+function appendRecalledTag(bubble, message) {
+  if (!message || !message.recalled) return;
+  const tag = document.createElement('span');
+  tag.className = 'recalled-tag';
+  tag.textContent = 'Recalled';
+  bubble.prepend(tag);
 }
 
 function appendForwards(bubble, forwards) {
@@ -1584,23 +1737,28 @@ function clearReplyDraft() {
   updateReplyDraft();
 }
 
-function appendMessage(m, prepend = false) {
-  const scroll = $('messagesScroll');
-  const div = document.createElement('div');
+function renderMessageElement(div, m) {
+  div.replaceChildren();
   div.className = 'msg' + (m.self ? ' self' : '');
+  if (m.recalled) div.className += ' recalled';
   if (m.time) div.dataset.time = String(m.time);
+  if (m.local_id) div.dataset.localId = normalizeMessageId(m.local_id);
   const messageId = normalizeMessageId(m.message_id);
   if (messageId) {
     div.dataset.messageId = messageId;
     messageIndex.set(messageId, m);
     setStoredMessageReactions(messageId, m.reactions || []);
     refreshReplyCards(messageId);
+  } else {
+    delete div.dataset.messageId;
   }
   const t = m.time ? new Date(m.time * 1000) : null;
   const ts = t ? formatMessageTimestamp(t) : '';
   let visibleText = Array.isArray(m.images) && m.images.length ? (m.content || '').replace(/\[image\]/g, '').trim() : (m.content || '');
   if (Array.isArray(m.forwards) && m.forwards.length) visibleText = visibleText.replace(/\[forward\]/g, '').trim();
   if (Array.isArray(m.files) && m.files.length) visibleText = visibleText.replace(/\[file\]/g, '').trim();
+  if (Array.isArray(m.videos) && m.videos.length) visibleText = visibleText.replace(/\[video\]/g, '').trim();
+  if (Array.isArray(m.records) && m.records.length) visibleText = visibleText.replace(/\[voice\]/g, '').trim();
   const rendered = splitReplyTokens(visibleText);
   const senderLabel = m.sender_name || String(m.sender_id || '');
   div.appendChild(createAvatar('msg-avatar', m.sender_avatar_url || avatarUrl('user', m.sender_id), senderLabel));
@@ -1617,16 +1775,29 @@ function appendMessage(m, prepend = false) {
   time.textContent = ts;
   body.append(sender, bubble, time);
   div.appendChild(body);
+  appendRecalledTag(bubble, m);
   appendReplies(bubble, rendered.replies);
   if (rendered.replies.length) {
     const replyEls = bubble.querySelectorAll('.reply-card');
     for (let i = replyEls.length - 1; i >= 0; i--) bubble.prepend(replyEls[i]);
   }
   appendImages(bubble, m.images);
+  appendVideos(bubble, m.videos);
+  appendRecords(bubble, m.records);
   appendFiles(bubble, m.files);
   appendForwards(bubble, m.forwards);
+  appendExtraSegments(bubble, m.extra_segments);
   if (messageId) appendReactionChips(div, messageReactions.get(messageId) || []);
   bindMessageMenu(div, m);
+  for (const card of div.querySelectorAll('.reply-missing')) {
+    renderReplyCard(card);
+  }
+}
+
+function appendMessage(m, prepend = false) {
+  const scroll = $('messagesScroll');
+  const div = document.createElement('div');
+  renderMessageElement(div, m);
   if (prepend) {
     scroll.prepend(div);
   } else {
@@ -1634,9 +1805,6 @@ function appendMessage(m, prepend = false) {
     if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150) {
       scroll.scrollTop = scroll.scrollHeight;
     }
-  }
-  for (const card of div.querySelectorAll('.reply-missing')) {
-    renderReplyCard(card);
   }
 }
 
@@ -1956,6 +2124,8 @@ function connectWS() {
         loadChats();
       } else if (d.type === 'emoji_like' && d.data) {
         applyEmojiLikeEvent(d.data);
+      } else if (d.type === 'message_update' && d.data) {
+        applyMessageUpdate(d.data);
       }
     } catch {}
   };

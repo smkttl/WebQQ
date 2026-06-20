@@ -103,6 +103,7 @@ class MessageStore:
         self._group_member_details = defaultdict(list)  # chat_id -> [{user_id, names...}]
         self._message_chat_index = {}  # message_id -> chat_id
         self._pending_local_reactions = {}  # (message_id, emoji_id) -> user
+        self._pending_local_messages = defaultdict(list)  # chat_id -> optimistic messages awaiting message_sent
         self._self_user = {"user_id": "self", "name": "You"}
         data_dir.mkdir(exist_ok=True)
 
@@ -149,8 +150,10 @@ class MessageStore:
             return f"group_{msg['group_id']}"
         if mt == "private":
             if msg.get("sub_type") == "group" and msg.get("group_id"):
-                return f"temp_{msg['group_id']}_{msg['user_id']}"
-            return f"private_{msg['user_id']}"
+                user_id = msg.get("target_id") if msg.get("post_type") == "message_sent" and msg.get("target_id") else msg.get("user_id")
+                return f"temp_{msg['group_id']}_{user_id}"
+            user_id = msg.get("target_id") if msg.get("post_type") == "message_sent" and msg.get("target_id") else msg.get("user_id")
+            return f"private_{user_id}"
         return None
 
     def add(self, msg):
@@ -177,6 +180,111 @@ class MessageStore:
     def append_simplified(self, chat_id, simplified):
         self._data[chat_id].append(simplified)
         self._reindex_chat(chat_id)
+
+    def add_history_messages(self, messages):
+        added = []
+        for msg in messages:
+            key = self.chat_key(msg)
+            if not key:
+                continue
+            simplified = self._simplify(msg)
+            message_id = simplified.get("message_id")
+            if message_id is not None and self.find_chat_by_message_id(message_id):
+                continue
+            self._data[key].appendleft(simplified)
+            added.append(simplified)
+            if key not in self._chat_meta:
+                self.ensure_chat(key, simplified.get("chat_name") or key, simplified.get("type", ""))
+            self._dirty.add(key)
+            self._reindex_chat(key)
+        return added
+
+    def register_pending_local_message(self, chat_id, simplified):
+        local_id = f"local-{uuid.uuid4().hex}"
+        simplified["local_id"] = local_id
+        simplified["pending"] = True
+        self._pending_local_messages[chat_id].append(simplified)
+        self.append_simplified(chat_id, simplified)
+        return simplified
+
+    def reconcile_self_message(self, simplified):
+        chat_id = simplified.get("chat_id")
+        if not chat_id:
+            return {"message": simplified, "replaced": False}
+        pending = self._pending_local_messages.get(chat_id, [])
+        match = None
+        for item in list(pending):
+            if self._pending_matches(item, simplified):
+                match = item
+                break
+        if not match:
+            self.append_simplified(chat_id, simplified)
+            self._update_chat_meta_from_message(chat_id, simplified)
+            self._dirty.add(chat_id)
+            return {"message": simplified, "replaced": False}
+        pending.remove(match)
+        local_id = match.get("local_id")
+        merged = {**match, **simplified}
+        merged.pop("pending", None)
+        if local_id:
+            merged["local_id"] = local_id
+        for index, msg in enumerate(self._data.get(chat_id, [])):
+            if msg is match or (local_id and msg.get("local_id") == local_id):
+                self._data[chat_id][index] = merged
+                break
+        self._reindex_chat(chat_id)
+        self._update_chat_meta_from_message(chat_id, merged)
+        self._dirty.add(chat_id)
+        return {"message": merged, "replaced": True, "local_id": local_id}
+
+    def _pending_matches(self, pending, incoming):
+        try:
+            if abs(float(incoming.get("time", 0)) - float(pending.get("time", 0))) > 180:
+                return False
+        except (TypeError, ValueError):
+            pass
+        if pending.get("content") != incoming.get("content"):
+            return False
+        pending_files = pending.get("files") or []
+        incoming_files = incoming.get("files") or []
+        if pending_files or incoming_files:
+            pending_names = [str(f.get("name") or f.get("file") or "") for f in pending_files if isinstance(f, dict)]
+            incoming_names = [str(f.get("name") or f.get("file") or "") for f in incoming_files if isinstance(f, dict)]
+            return bool(set(pending_names) & set(incoming_names)) or pending.get("content") == incoming.get("content")
+        return True
+
+    def _update_chat_meta_from_message(self, chat_id, simplified):
+        if chat_id not in self._chat_meta:
+            self.ensure_chat(chat_id, simplified.get("chat_name") or chat_id, simplified.get("type", ""))
+        self._chat_meta[chat_id]["name"] = simplified.get("chat_name") or self._chat_meta[chat_id].get("name", chat_id)
+        self._chat_meta[chat_id]["avatar_url"] = chat_avatar_url(chat_id, simplified.get("type", ""), simplified.get("user_id"), simplified.get("group_id"))
+        self._chat_meta[chat_id]["last_time"] = simplified.get("time", 0)
+        self._chat_meta[chat_id]["last_text"] = (simplified.get("content", "") or "")[:50]
+
+    def mark_recalled(self, message_id, chat_id=None, operator_id=None, recalled_at=None):
+        key = str(message_id)
+        known_chat_id = chat_id or self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        if not known_chat_id:
+            return None
+        for msg in self._data.get(known_chat_id, []):
+            if str(msg.get("message_id")) == key:
+                msg["recalled"] = True
+                msg["recalled_at"] = recalled_at or int(time.time())
+                if operator_id is not None:
+                    msg["recall_operator_id"] = operator_id
+                self._dirty.add(known_chat_id)
+                return {"chat_id": known_chat_id, "message": msg}
+        return None
+
+    def oldest_message_id(self, chat_id, before=None):
+        candidates = list(self._data.get(chat_id, []))
+        if before:
+            candidates = [m for m in candidates if m.get("time", 0) < before]
+        for msg in candidates:
+            message_id = msg.get("message_id")
+            if message_id is not None:
+                return message_id
+        return None
 
     def _reindex_chat(self, chat_id):
         for message_id, indexed_chat_id in list(self._message_chat_index.items()):
@@ -356,7 +464,7 @@ class MessageStore:
             nick = sender.get("card") or sender.get("nickname") or ""
             if nick:
                 self._nicknames[str(sender["user_id"])] = nick
-        content, mentions, images, forwards, files = self._extract_text(msg)
+        content, mentions, images, forwards, files, videos, records, extra_segments = self._extract_text(msg)
         return {
             "message_id": msg.get("message_id"),
             "time": msg.get("time", int(time.time())),
@@ -368,6 +476,9 @@ class MessageStore:
             "images": images,
             "forwards": forwards,
             "files": files,
+            "videos": videos,
+            "records": records,
+            "extra_segments": extra_segments,
             "reactions": normalize_emoji_likes(msg.get("reactions") or msg.get("likes") or msg.get("like") or []),
             "chat_id": self.chat_key(msg),
             "type": chat_type,
@@ -375,6 +486,9 @@ class MessageStore:
             "user_id": msg.get("user_id"),
             "chat_name": chat_name,
             "self": (
+                msg.get("post_type") == "message_sent"
+                or msg.get("message_sent_type") == "self"
+                or
                 (msg.get("sub_type") == "friend" and msg.get("target_id") == msg.get("self_user_id"))
                 or (msg.get("self_user_id") is not None and msg.get("user_id") == msg.get("self_user_id"))
             ),
@@ -386,6 +500,9 @@ class MessageStore:
         images = []
         forwards = []
         files = []
+        videos = []
+        records = []
+        extra_segments = []
         if isinstance(segments, list):
             parts = []
             for seg in segments:
@@ -432,12 +549,38 @@ class MessageStore:
                     if file_item:
                         files.append(file_item)
                     parts.append("[file]")
-                else:
+                elif t == "video":
+                    video_item = self._simplify_media_segment(d, "video")
+                    if video_item:
+                        videos.append(video_item)
+                    parts.append("[video]")
+                elif t == "record":
+                    record_item = self._simplify_media_segment(d, "record")
+                    if record_item:
+                        records.append(record_item)
+                    parts.append("[voice]")
+                elif t == "mface":
+                    image = self._simplify_mface_segment(d)
+                    if image:
+                        images.append(image)
+                    parts.append(d.get("summary") or "[mface]")
+                elif t in ("onlinefile", "flashtransfer"):
+                    file_item = self._simplify_file_segment(d)
+                    if file_item:
+                        file_item["kind"] = t
+                        files.append(file_item)
                     parts.append(f"[{t}]")
-            return "".join(parts), mentions, images, forwards, files
+                elif t in ("json", "markdown", "music", "xml", "poke", "dice", "rps", "miniapp", "contact", "location"):
+                    extra = self._simplify_extra_segment(t, d)
+                    extra_segments.append(extra)
+                    parts.append(extra["label"])
+                else:
+                    extra_segments.append(self._simplify_extra_segment(t, d))
+                    parts.append(f"[{t}]")
+            return "".join(parts), mentions, images, forwards, files, videos, records, extra_segments
         if isinstance(segments, str):
-            return segments, mentions, images, forwards, files
-        return str(msg.get("raw_message", "")), mentions, images, forwards, files
+            return segments, mentions, images, forwards, files, videos, records, extra_segments
+        return str(msg.get("raw_message", "")), mentions, images, forwards, files, videos, records, extra_segments
 
     @staticmethod
     def _simplify_file_segment(data):
@@ -450,8 +593,64 @@ class MessageStore:
             "url": data.get("url"),
             "file": data.get("file"),
             "busid": data.get("busid") or data.get("bus_id") or data.get("busId"),
+            "kind": data.get("kind"),
         }
         return {k: v for k, v in file_item.items() if v is not None and v != ""}
+
+    @staticmethod
+    def _simplify_media_segment(data, kind):
+        if not isinstance(data, dict):
+            return None
+        item = {
+            "kind": kind,
+            "name": data.get("name") or data.get("file_name") or data.get("filename") or data.get("file"),
+            "file": data.get("file") or data.get("path"),
+            "url": data.get("url"),
+            "size": data.get("size") or data.get("file_size") or data.get("fileSize"),
+            "thumb": data.get("thumb") or data.get("thumbnail"),
+        }
+        return {k: v for k, v in item.items() if v is not None and v != ""}
+
+    @staticmethod
+    def _simplify_mface_segment(data):
+        if not isinstance(data, dict):
+            return None
+        emoji_id = data.get("emoji_id") or data.get("emojiId")
+        package_id = data.get("emoji_package_id") or data.get("emojiPackageId")
+        url = data.get("url")
+        if not url and emoji_id:
+            directory = str(emoji_id)[:2]
+            url = f"https://gxh.vip.qq.com/club/item/parcel/item/{directory}/{emoji_id}/raw300.gif"
+        return {
+            "url": url,
+            "file": data.get("file") or (f"mface-{emoji_id}.gif" if emoji_id else ""),
+            "summary": data.get("summary") or data.get("name") or "[mface]",
+            "emoji_id": emoji_id,
+            "emoji_package_id": package_id,
+        }
+
+    @staticmethod
+    def _simplify_extra_segment(segment_type, data):
+        label_map = {
+            "json": "[json card]",
+            "markdown": "[markdown]",
+            "music": "[music]",
+            "xml": "[xml]",
+            "poke": "[poke]",
+            "dice": "[dice]",
+            "rps": "[rps]",
+            "miniapp": "[mini app]",
+            "contact": "[contact]",
+            "location": "[location]",
+        }
+        text = ""
+        if isinstance(data, dict):
+            text = first_text(data.get("summary"), data.get("title"), data.get("content"), data.get("text"), data.get("data"))
+        return {
+            "type": segment_type,
+            "label": label_map.get(segment_type, f"[{segment_type}]"),
+            "text": text[:500],
+        }
 
     def _simplify_forward_segment(self, data):
         forward = {
@@ -506,7 +705,7 @@ class MessageStore:
             "message": content,
             "raw_message": content if isinstance(content, str) else "",
         }
-        text, mentions, images, forwards, files = self._extract_text(fake_msg)
+        text, mentions, images, forwards, files, videos, records, extra_segments = self._extract_text(fake_msg)
         return {
             "sender_id": node.get("user_id") or node.get("uin") or sender.get("user_id") or "",
             "sender_name": node.get("nickname") or node.get("name") or sender.get("nickname") or sender.get("card") or "",
@@ -516,6 +715,9 @@ class MessageStore:
             "images": images,
             "forwards": forwards,
             "files": files,
+            "videos": videos,
+            "records": records,
+            "extra_segments": extra_segments,
         }
 
     def get_messages(self, chat_id, limit=50, before=None):
@@ -720,6 +922,22 @@ class NapCatConnection:
             simplified = self.store.add(data)
             if simplified:
                 await self._broadcast({"type": "new_message", "data": simplified})
+        elif post_type == "message_sent":
+            await self._resolve_forward_segments(data)
+            simplified = self.store._simplify(data)
+            reconciled = self.store.reconcile_self_message(simplified)
+            if reconciled.get("replaced"):
+                await self._broadcast({
+                    "type": "message_update",
+                    "data": {
+                        "chat_id": reconciled["message"].get("chat_id"),
+                        "message_id": reconciled["message"].get("message_id"),
+                        "local_id": reconciled.get("local_id"),
+                        "message": reconciled["message"],
+                    },
+                })
+            else:
+                await self._broadcast({"type": "new_message", "data": reconciled["message"]})
         elif post_type == "notice" and data.get("notice_type") == "group_msg_emoji_like":
             message_id = data.get("message_id")
             if message_id is not None:
@@ -739,6 +957,35 @@ class NapCatConnection:
                     "type": "emoji_like",
                     "data": payload,
                 })
+        elif post_type == "notice" and data.get("notice_type") in ("friend_recall", "group_recall"):
+            message_id = data.get("message_id")
+            if message_id is not None:
+                chat_id = None
+                if data.get("notice_type") == "group_recall" and data.get("group_id"):
+                    chat_id = f"group_{data['group_id']}"
+                elif data.get("notice_type") == "friend_recall" and data.get("user_id"):
+                    chat_id = f"private_{data['user_id']}"
+                recalled = self.store.mark_recalled(
+                    message_id,
+                    chat_id=chat_id,
+                    operator_id=data.get("operator_id"),
+                    recalled_at=data.get("time"),
+                )
+                if recalled:
+                    msg = recalled["message"]
+                    await self._broadcast({
+                        "type": "message_update",
+                        "data": {
+                            "chat_id": recalled["chat_id"],
+                            "message_id": msg.get("message_id"),
+                            "message": msg,
+                            "patch": {
+                                "recalled": True,
+                                "recalled_at": msg.get("recalled_at"),
+                                "recall_operator_id": msg.get("recall_operator_id"),
+                            },
+                        },
+                    })
 
     async def _resolve_forward_segments(self, msg):
         segments = msg.get("message", [])
@@ -881,6 +1128,30 @@ class NapCatConnection:
             if reaction and reaction.get("count", 0) > 0:
                 reactions.append(reaction)
         return reactions
+
+    async def fetch_history(self, chat_id, before_message_id=None, count=50):
+        parsed = parse_chat_id(chat_id)
+        if not parsed or parsed["type"] == "temp":
+            return []
+        params = {
+            "count": max(1, min(int(count or 50), 50)),
+            "parse_mult_msg": True,
+            "disable_get_url": False,
+        }
+        if before_message_id:
+            params["message_seq"] = str(before_message_id)
+        if parsed["type"] == "group":
+            action = "get_group_msg_history"
+            params["group_id"] = str(parsed["group_id"])
+        else:
+            action = "get_friend_msg_history"
+            params["user_id"] = str(parsed["private_id"])
+        resp = await self._request(action, params, timeout=15)
+        if not resp or resp.get("status") != "ok":
+            return []
+        data = resp.get("data") or {}
+        messages = data.get("messages") if isinstance(data, dict) else []
+        return messages if isinstance(messages, list) else []
 
     @staticmethod
     def _parse_message(text, reply_to=None):
@@ -1054,7 +1325,17 @@ async def handle_messages(request):
         before = float(before_raw) if before_raw else None
     except (TypeError, ValueError):
         return web.json_response({"error": "before must be a timestamp"}, status=400)
-    return web.json_response({"messages": store.get_messages(chat_id, limit=limit, before=before)})
+    messages = store.get_messages(chat_id, limit=limit, before=before)
+    if len(messages) < limit and request.app["napcat"].ws is not None:
+        before_message_id = store.oldest_message_id(chat_id, before=before)
+        try:
+            history = await request.app["napcat"].fetch_history(chat_id, before_message_id=before_message_id, count=limit)
+            added = store.add_history_messages(history)
+            if added:
+                messages = store.get_messages(chat_id, limit=limit, before=before)
+        except Exception:
+            pass
+    return web.json_response({"messages": messages})
 
 
 async def handle_temp_chat(request):
@@ -1114,6 +1395,9 @@ async def handle_send(request):
             "images": [],
             "forwards": [],
             "files": [],
+            "videos": [],
+            "records": [],
+            "extra_segments": [],
             "reactions": [],
             "chat_id": chat_id,
             "type": parsed_chat["type"],
@@ -1122,7 +1406,7 @@ async def handle_send(request):
             "chat_name": "",
             "self": True,
         }
-        store.append_simplified(chat_id, simplified)
+        store.register_pending_local_message(chat_id, simplified)
         if chat_id in store._chat_meta:
             store._chat_meta[chat_id]["last_time"] = now
             store._chat_meta[chat_id]["last_text"] = text[:50]
@@ -1146,6 +1430,7 @@ async def handle_send_file(request):
     size = 0
     too_large = False
     try:
+        store = request.app["store"]
         reader = await request.multipart()
         while True:
             part = await reader.next()
@@ -1188,9 +1473,8 @@ async def handle_send_file(request):
             return web.json_response({"ok": False, "error": err}, status=500)
 
         now = int(time.time())
-        message_id = extract_message_id(result)
         simplified = {
-            "message_id": message_id,
+            "message_id": None,
             "time": now,
             "sender_id": "self",
             "sender_name": "You",
@@ -1200,6 +1484,9 @@ async def handle_send_file(request):
             "images": [],
             "forwards": [],
             "files": [{"name": filename, "size": size}],
+            "videos": [],
+            "records": [],
+            "extra_segments": [],
             "reactions": [],
             "chat_id": chat_id,
             "type": parsed_chat["type"],
@@ -1208,8 +1495,7 @@ async def handle_send_file(request):
             "chat_name": "",
             "self": True,
         }
-        store = request.app["store"]
-        store.append_simplified(chat_id, simplified)
+        store.register_pending_local_message(chat_id, simplified)
         if chat_id not in store._chat_meta:
             store.ensure_chat(chat_id, chat_id, parsed_chat["type"])
         store._chat_meta[chat_id]["last_time"] = now
