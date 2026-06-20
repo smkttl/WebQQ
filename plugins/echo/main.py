@@ -10,5 +10,5 @@ async def handle_event(event, ctx):
         return
     reply = content[len(prefix):].strip()
     if not reply:
-        reply = content
+        return
     await ctx.send_message(message["chat_id"], reply)

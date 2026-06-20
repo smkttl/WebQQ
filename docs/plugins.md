@@ -112,7 +112,8 @@ Message event:
     "group_id": 123456,
     "user_id": 10001,
     "chat_name": "Group name",
-    "self": false
+    "self": false,
+    "source": "user"
   },
   "raw": {}
 }
@@ -122,6 +123,7 @@ Notes:
 
 - `type: "message"` is used for incoming messages and messages sent by the user or plugins.
 - Use `message["self"]` to detect messages from the logged-in account.
+- `message["source"]` is `"user"` for WebQQ UI sends and `plugin:<id>` for messages sent through `ctx.send_message`.
 - Loop avoidance is the plugin's responsibility.
 - `chat_id` is one of `group_<group_id>`, `private_<user_id>`, or `temp_<group_id>_<user_id>`.
 - `raw` is the original NapCat event payload.

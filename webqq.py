@@ -827,7 +827,14 @@ class PluginContext:
         print(f"[plugin:{self.plugin_id}] {message}")
 
     async def send_message(self, chat_id, text, reply_to=None):
-        sent = await send_text_and_register(self.manager.napcat, self.manager.store, chat_id, text, reply_to=reply_to)
+        sent = await send_text_and_register(
+            self.manager.napcat,
+            self.manager.store,
+            chat_id,
+            text,
+            reply_to=reply_to,
+            source=f"plugin:{self.plugin_id}",
+        )
         return sent["result"]
 
     async def upload_file(self, chat_id, path, name=None):
@@ -1658,7 +1665,12 @@ async def read_json_body(request):
     return body
 
 
-async def send_text_and_register(napcat, store, chat_id, text, reply_to=None):
+def dispatch_plugin_message_later(napcat, message, raw=None):
+    if napcat.plugins:
+        asyncio.create_task(napcat.plugins.dispatch("message", {"message": message}, raw=raw))
+
+
+async def send_text_and_register(napcat, store, chat_id, text, reply_to=None, source="user"):
     parsed_chat = parse_chat_id(chat_id)
     if not parsed_chat:
         raise ValueError("invalid chat_id")
@@ -1689,6 +1701,7 @@ async def send_text_and_register(napcat, store, chat_id, text, reply_to=None):
         "user_id": parsed_chat.get("user_id") or parsed_chat.get("private_id"),
         "chat_name": "",
         "self": True,
+        "source": source,
     }
     store.register_pending_local_message(chat_id, simplified)
     if chat_id in store._chat_meta:
@@ -1700,8 +1713,7 @@ async def send_text_and_register(napcat, store, chat_id, text, reply_to=None):
         store._chat_meta[chat_id]["last_text"] = text[:50]
     store._dirty.add(chat_id)
     await napcat._broadcast({"type": "new_message", "data": simplified})
-    if napcat.plugins:
-        await napcat.plugins.dispatch("message", {"message": simplified}, raw=None)
+    dispatch_plugin_message_later(napcat, simplified, raw=None)
     return {"result": result, "message": simplified}
 
 
