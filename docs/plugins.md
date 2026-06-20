@@ -157,6 +157,19 @@ Request event:
 }
 ```
 
+Failed optimistic send event:
+
+```python
+{
+  "type": "message_send_failed",
+  "message": {},
+  "error": "not connected",
+  "raw": null
+}
+```
+
+This event is emitted when a locally registered optimistic send later fails. WebQQ also marks the message with `send_error` so the UI can show a failed-send tag.
+
 ## Context API
 
 `ctx` is a `PluginContext` with these attributes and helpers:
