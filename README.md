@@ -55,7 +55,7 @@ Messages are stored under `data/` as one JSON file per chat (`data/group_12345.j
 
 ## Plugins
 
-Install plugins by copying a folder into `plugins/`, then open **Plugins** in the web UI to refresh, enable/disable, edit config, or restart a plugin. The bundled `plugins/echo/` plugin is a minimal example using `{"prefix": "/echo", "respond_to_self": false, "echo_empty_payload": false}`.
+Install plugins by copying a folder into `plugins/`, then open **Plugins** in the web UI to refresh, enable/disable, edit config, or restart a plugin. The bundled `plugins/echo/` plugin is a minimal example using `{"prefix": "/echo", "respond_to_self": false, "echo_empty_payload": false, "self_response_delay_seconds": 0.35}`.
 
 See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plugin context API.
 

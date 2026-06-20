@@ -1012,6 +1012,7 @@ class PluginManager:
             result = state["handler"](event, state["ctx"])
             if asyncio.iscoroutine(result):
                 await result
+            state["error"] = ""
         except Exception:
             state["error"] = traceback.format_exc(limit=5)
             print(f"[plugin:{plugin_id}] handler failed:\n{state['error']}")

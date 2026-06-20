@@ -1,5 +1,6 @@
 {
   "prefix": "/echo",
   "respond_to_self": false,
-  "echo_empty_payload": false
+  "echo_empty_payload": false,
+  "self_response_delay_seconds": 0.35
 }

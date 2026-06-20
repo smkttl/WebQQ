@@ -52,13 +52,16 @@ The bundled `plugins/echo/` plugin is a complete example. Its config is:
 {
   "prefix": "/echo",
   "respond_to_self": false,
-  "echo_empty_payload": false
+  "echo_empty_payload": false,
+  "self_response_delay_seconds": 0.35
 }
 ```
 
 For the echo plugin, `respond_to_self: false` skips messages sent by the logged-in account. Set `respond_to_self: true` to let the plugin parse `/echo` messages sent by yourself too.
 
 Set `echo_empty_payload: true` to make `/echo` reply with `/echo` instead of stopping. Combined with `respond_to_self: true`, this intentionally allows recursive echo behavior.
+
+`self_response_delay_seconds` adds a short pause before responding to messages sent by the logged-in account. This helps avoid NapCat/QQ send failures during recursive self-echo tests.
 
 ## Entry Points
 
