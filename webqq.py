@@ -222,6 +222,11 @@ class MessageStore:
 
     def reconcile_self_message(self, simplified):
         chat_id = simplified.get("chat_id")
+        if self._is_ambiguous_self_private_echo(simplified):
+            chat_id = self._matching_pending_chat_id(simplified)
+            if not chat_id:
+                return {"message": simplified, "replaced": False, "ignored": True}
+            self._copy_chat_identity(simplified, self._pending_local_messages[chat_id][0])
         if not chat_id:
             return {"message": simplified, "replaced": False}
         pending = self._pending_local_messages.get(chat_id, [])
@@ -249,6 +254,31 @@ class MessageStore:
         self._update_chat_meta_from_message(chat_id, merged)
         self._dirty.add(chat_id)
         return {"message": merged, "replaced": True, "local_id": local_id}
+
+    def _is_ambiguous_self_private_echo(self, simplified):
+        self_id = str(self._self_user.get("user_id") or "")
+        chat_id = str(simplified.get("chat_id") or "")
+        sender_id = str(simplified.get("sender_id") or "")
+        user_id = str(simplified.get("user_id") or "")
+        return (
+            bool(self_id)
+            and simplified.get("type") == "private"
+            and chat_id == f"private_{self_id}"
+            and sender_id == self_id
+            and user_id == self_id
+        )
+
+    def _matching_pending_chat_id(self, simplified):
+        for chat_id, pending in self._pending_local_messages.items():
+            for item in list(pending):
+                if self._pending_matches(item, simplified):
+                    return chat_id
+        return None
+
+    @staticmethod
+    def _copy_chat_identity(target, source):
+        for key in ("chat_id", "type", "group_id", "user_id", "chat_name"):
+            target[key] = source.get(key)
 
     def _pending_matches(self, pending, incoming):
         try:
@@ -1241,6 +1271,8 @@ class NapCatConnection:
             await self._resolve_forward_segments(data)
             simplified = self.store._simplify(data)
             reconciled = self.store.reconcile_self_message(simplified)
+            if reconciled.get("ignored"):
+                return
             if reconciled.get("replaced"):
                 await self._broadcast({
                     "type": "message_update",
