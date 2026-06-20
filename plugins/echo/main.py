@@ -2,7 +2,7 @@ async def handle_event(event, ctx):
     if event.get("type") != "message":
         return
     message = event.get("message") or {}
-    if message.get("self"):
+    if message.get("self") and not ctx.config.get("respond_to_self"):
         return
     content = message.get("content") or ""
     prefix = str(ctx.config.get("prefix") or "/echo")

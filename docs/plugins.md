@@ -50,9 +50,12 @@ The bundled `plugins/echo/` plugin is a complete example. Its config is:
 
 ```json
 {
-  "prefix": "/echo"
+  "prefix": "/echo",
+  "respond_to_self": false
 }
 ```
+
+For the echo plugin, `respond_to_self: false` skips messages sent by the logged-in account. Set `respond_to_self: true` to let the plugin parse `/echo` messages sent by yourself too.
 
 ## Entry Points
 

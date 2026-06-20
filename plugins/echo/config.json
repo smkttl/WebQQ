@@ -1,3 +1,4 @@
 {
-  "prefix": "/echo"
+  "prefix": "/echo",
+  "respond_to_self": false
 }
