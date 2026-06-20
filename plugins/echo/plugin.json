@@ -1,0 +1,8 @@
+{
+  "id": "echo",
+  "name": "Echo",
+  "version": "1.0.0",
+  "description": "Replies with the text after the configured prefix.",
+  "entry": "main.py",
+  "enabled_by_default": true
+}

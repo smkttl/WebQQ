@@ -8,6 +8,8 @@ import hmac
 import tempfile
 import mimetypes
 import base64
+import importlib.util
+import traceback
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from collections import defaultdict, deque
 from pathlib import Path
@@ -19,9 +21,11 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 STATIC_DIR = Path(__file__).parent / "static"
 DATA_DIR = Path(__file__).parent / "data"
 AVATAR_DIR = DATA_DIR / "avatars"
+PLUGIN_DIR = Path(__file__).parent / "plugins"
 MAX_MESSAGES = 1000
 MAX_FILE_UPLOAD = 100 * 1024 * 1024
 AVATAR_CACHE_TTL = 7 * 24 * 60 * 60
+REVOKE_WINDOW_SECONDS = 2 * 60
 REACTION_EMOJI_IDS = tuple(str(i) for i in (
     4, 5, 8, 9, 10, 12, 14, 16, 21, 23, 24, 25, 26, 27, 28, 29, 30, 32,
     33, 34, 38, 39, 41, 42, 43, 49, 53, 60, 63, 66, 74, 75, 76, 78, 79,
@@ -43,6 +47,7 @@ DEFAULT_CONFIG = {
     "fail2ban_max_failures": 5,
     "fail2ban_window_seconds": 300,
     "fail2ban_ban_seconds": 1800,
+    "plugins": {"enabled": {}},
 }
 
 
@@ -89,6 +94,14 @@ def load_config():
             json.dump(cfg, f, indent=2, ensure_ascii=False)
         print(f"[config] created {CONFIG_PATH} with defaults")
     return cfg
+
+
+def save_config(cfg):
+    tmp = CONFIG_PATH.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, CONFIG_PATH)
 
 
 class MessageStore:
@@ -299,17 +312,21 @@ class MessageStore:
 
     def mark_recalled(self, message_id, chat_id=None, operator_id=None, recalled_at=None):
         key = str(message_id)
-        known_chat_id = chat_id or self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        indexed_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        known_chat_id = chat_id if chat_id in self._data else indexed_chat_id
+        if chat_id and indexed_chat_id and chat_id != indexed_chat_id:
+            known_chat_id = indexed_chat_id
         if not known_chat_id:
             return None
         for msg in self._data.get(known_chat_id, []):
             if str(msg.get("message_id")) == key:
+                already_recalled = bool(msg.get("recalled"))
                 msg["recalled"] = True
                 msg["recalled_at"] = recalled_at or int(time.time())
                 if operator_id is not None:
                     msg["recall_operator_id"] = operator_id
                 self._dirty.add(known_chat_id)
-                return {"chat_id": known_chat_id, "message": msg}
+                return {"chat_id": known_chat_id, "message": msg, "already_recalled": already_recalled}
         return None
 
     def oldest_message_id(self, chat_id, before=None):
@@ -479,6 +496,18 @@ class MessageStore:
                 if str(msg.get("message_id")) == key:
                     self._message_chat_index[key] = chat_id
                     return chat_id
+        return None
+
+    def find_message(self, message_id, chat_id=None):
+        key = str(message_id)
+        chat_ids = [chat_id] if chat_id in self._data else []
+        indexed = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        if indexed and indexed not in chat_ids:
+            chat_ids.append(indexed)
+        for cid in chat_ids or list(self._data.keys()):
+            for msg in self._data.get(cid, []):
+                if str(msg.get("message_id")) == key:
+                    return {"chat_id": cid, "message": msg}
         return None
 
     def _simplify(self, msg):
@@ -788,11 +817,249 @@ class MessageStore:
         )
 
 
+class PluginContext:
+    def __init__(self, manager, plugin_id, config):
+        self.manager = manager
+        self.plugin_id = plugin_id
+        self.config = config
+
+    def log(self, message):
+        print(f"[plugin:{self.plugin_id}] {message}")
+
+    async def send_message(self, chat_id, text, reply_to=None):
+        return await self.manager.napcat.send_message(chat_id, text, reply_to=reply_to)
+
+    async def upload_file(self, chat_id, path, name=None):
+        return await self.manager.napcat.upload_file(chat_id, path, name or os.path.basename(path))
+
+    async def set_msg_emoji_like(self, message_id, emoji_id, enabled=True):
+        return await self.manager.napcat.set_msg_emoji_like(message_id, emoji_id, enabled=enabled)
+
+    async def mark_chat_read(self, chat_id):
+        return await self.manager.napcat.mark_chat_read(chat_id)
+
+    async def fetch_history(self, chat_id, before_message_id=None, count=50):
+        return await self.manager.napcat.fetch_history(chat_id, before_message_id=before_message_id, count=count)
+
+    def get_messages(self, chat_id, limit=50, before=None):
+        return self.manager.store.get_messages(chat_id, limit=limit, before=before)
+
+    def get_chats(self):
+        return self.manager.store.get_chats()
+
+    async def napcat(self, action, params=None, timeout=10):
+        return await self.manager.napcat._request(action, params or {}, timeout=timeout)
+
+
+class PluginManager:
+    def __init__(self, plugin_dir, config, store, napcat=None):
+        self.plugin_dir = Path(plugin_dir)
+        self.config = config
+        self.store = store
+        self.napcat = napcat
+        self._plugins = {}
+        self._enabled = self.config.setdefault("plugins", {}).setdefault("enabled", {})
+        self.plugin_dir.mkdir(exist_ok=True)
+
+    def set_napcat(self, napcat):
+        self.napcat = napcat
+
+    def scan(self):
+        discovered = {}
+        for manifest_path in sorted(self.plugin_dir.glob("*/plugin.json")):
+            plugin_id = manifest_path.parent.name
+            state = self._plugins.get(plugin_id, {})
+            state.update({
+                "id": plugin_id,
+                "path": manifest_path.parent,
+                "manifest_path": manifest_path,
+                "manifest": {},
+                "module": state.get("module"),
+                "handler": state.get("handler"),
+                "ctx": state.get("ctx"),
+                "loaded": False,
+                "error": "",
+                "config_error": "",
+            })
+            try:
+                with open(manifest_path, encoding="utf-8") as f:
+                    manifest = json.load(f)
+                if not isinstance(manifest, dict):
+                    raise ValueError("plugin.json must be an object")
+                manifest_id = str(manifest.get("id") or plugin_id)
+                if manifest_id != plugin_id:
+                    raise ValueError("plugin.json id must match folder name")
+                state["manifest"] = manifest
+            except Exception as e:
+                state["error"] = str(e)
+            discovered[plugin_id] = state
+        self._plugins = discovered
+        return self.list_plugins()
+
+    def list_plugins(self):
+        if not self._plugins:
+            self.scan()
+        return [self._public_state(state) for state in self._plugins.values()]
+
+    def _public_state(self, state):
+        manifest = state.get("manifest") or {}
+        plugin_id = state.get("id", "")
+        enabled = self.is_enabled(plugin_id)
+        return {
+            "id": plugin_id,
+            "name": manifest.get("name") or plugin_id,
+            "version": manifest.get("version", ""),
+            "description": manifest.get("description", ""),
+            "enabled": enabled,
+            "loaded": bool(state.get("loaded")) and enabled,
+            "error": state.get("error", ""),
+            "config_error": state.get("config_error", ""),
+        }
+
+    def is_enabled(self, plugin_id):
+        if plugin_id in self._enabled:
+            return bool(self._enabled[plugin_id])
+        manifest = (self._plugins.get(plugin_id) or {}).get("manifest") or {}
+        return bool(manifest.get("enabled_by_default", False))
+
+    def set_enabled(self, plugin_id, enabled):
+        self._require_plugin(plugin_id)
+        self._enabled[plugin_id] = bool(enabled)
+        save_config(self.config)
+        if enabled:
+            self.load_plugin(plugin_id)
+        else:
+            self.unload_plugin(plugin_id)
+        return self._public_state(self._plugins[plugin_id])
+
+    def restart_plugin(self, plugin_id):
+        self._require_plugin(plugin_id)
+        self.unload_plugin(plugin_id)
+        if self.is_enabled(plugin_id):
+            self.load_plugin(plugin_id)
+        return self._public_state(self._plugins[plugin_id])
+
+    def load_enabled(self):
+        self.scan()
+        for plugin_id in list(self._plugins):
+            if self.is_enabled(plugin_id):
+                self.load_plugin(plugin_id)
+
+    def unload_plugin(self, plugin_id):
+        state = self._plugins.get(plugin_id)
+        if not state:
+            return
+        state["module"] = None
+        state["handler"] = None
+        state["ctx"] = None
+        state["loaded"] = False
+
+    def load_plugin(self, plugin_id):
+        state = self._require_plugin(plugin_id)
+        manifest = state.get("manifest") or {}
+        entry = manifest.get("entry") or "main.py"
+        entry_path = (state["path"] / entry).resolve()
+        try:
+            if not str(entry_path).startswith(str(state["path"].resolve())):
+                raise ValueError("entry must stay inside plugin folder")
+            if not entry_path.is_file():
+                raise FileNotFoundError(f"entry not found: {entry}")
+            config = self.read_plugin_config(plugin_id)["config"]
+            module_name = f"webqq_plugin_{plugin_id}_{uuid.uuid4().hex}"
+            spec = importlib.util.spec_from_file_location(module_name, entry_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            ctx = PluginContext(self, plugin_id, config)
+            handler = getattr(module, "handle_event", None)
+            setup = getattr(module, "setup", None)
+            if setup:
+                handler = setup(ctx)
+                if hasattr(handler, "handle_event"):
+                    handler = handler.handle_event
+            if not callable(handler):
+                raise ValueError("plugin must expose handle_event(event, ctx) or setup(ctx)")
+            state.update({"module": module, "handler": handler, "ctx": ctx, "loaded": True, "error": "", "config_error": ""})
+        except Exception as e:
+            state.update({"module": None, "handler": None, "ctx": None, "loaded": False, "error": str(e)})
+            print(f"[plugin:{plugin_id}] load failed: {e}")
+        return self._public_state(state)
+
+    async def dispatch(self, event_type, payload, raw=None):
+        if not self.napcat:
+            return
+        event = {"type": event_type, **payload, "raw": raw}
+        tasks = []
+        for plugin_id, state in list(self._plugins.items()):
+            if not self.is_enabled(plugin_id):
+                continue
+            if not state.get("loaded"):
+                self.load_plugin(plugin_id)
+            if state.get("loaded") and callable(state.get("handler")):
+                tasks.append(asyncio.create_task(self._run_handler(plugin_id, state, event)))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_handler(self, plugin_id, state, event):
+        try:
+            result = state["handler"](event, state["ctx"])
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            state["error"] = traceback.format_exc(limit=5)
+            print(f"[plugin:{plugin_id}] handler failed:\n{state['error']}")
+
+    def read_plugin_config_text(self, plugin_id):
+        state = self._require_plugin(plugin_id)
+        path = state["path"] / "config.json"
+        if not path.exists():
+            return "{}"
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def read_plugin_config(self, plugin_id):
+        state = self._require_plugin(plugin_id)
+        text = self.read_plugin_config_text(plugin_id)
+        try:
+            config = json.loads(text or "{}")
+            if not isinstance(config, dict):
+                raise ValueError("config.json must be an object")
+            state["config_error"] = ""
+            return {"text": text, "config": config, "error": ""}
+        except Exception as e:
+            state["config_error"] = str(e)
+            raise
+
+    def write_plugin_config(self, plugin_id, text):
+        state = self._require_plugin(plugin_id)
+        try:
+            parsed = json.loads(text or "{}")
+            if not isinstance(parsed, dict):
+                raise ValueError("config JSON must be an object")
+        except Exception as e:
+            state["config_error"] = str(e)
+            raise
+        path = state["path"] / "config.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(parsed, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        state["config_error"] = ""
+        return self.restart_plugin(plugin_id)
+
+    def _require_plugin(self, plugin_id):
+        if not self._plugins:
+            self.scan()
+        state = self._plugins.get(plugin_id)
+        if not state:
+            raise KeyError(f"unknown plugin: {plugin_id}")
+        return state
+
+
 class NapCatConnection:
-    def __init__(self, ws_url, token, store):
+    def __init__(self, ws_url, token, store, plugins=None):
         self.ws_url = ws_url
         self.token = token
         self.store = store
+        self.plugins = plugins
         self.session = None
         self.ws = None
         self._pending = {}
@@ -958,6 +1225,8 @@ class NapCatConnection:
             simplified = self.store.add(data)
             if simplified:
                 await self._broadcast({"type": "new_message", "data": simplified})
+                if self.plugins:
+                    await self.plugins.dispatch("message", {"message": simplified}, raw=data)
         elif post_type == "message_sent":
             await self._resolve_forward_segments(data)
             simplified = self.store._simplify(data)
@@ -974,6 +1243,8 @@ class NapCatConnection:
                 })
             else:
                 await self._broadcast({"type": "new_message", "data": reconciled["message"]})
+            if self.plugins:
+                await self.plugins.dispatch("message", {"message": reconciled["message"]}, raw=data)
         elif post_type == "notice" and data.get("notice_type") == "group_msg_emoji_like":
             message_id = data.get("message_id")
             if message_id is not None:
@@ -993,6 +1264,8 @@ class NapCatConnection:
                     "type": "emoji_like",
                     "data": payload,
                 })
+            if self.plugins:
+                await self.plugins.dispatch("notice", {"notice": data}, raw=data)
         elif post_type == "notice" and data.get("notice_type") in ("friend_recall", "group_recall"):
             message_id = data.get("message_id")
             if message_id is not None:
@@ -1022,21 +1295,28 @@ class NapCatConnection:
                             },
                         },
                     })
-                    system = self.store.add_system_message(
-                        recalled["chat_id"],
-                        recall_notice_text(data),
-                        notice_type=data.get("notice_type", ""),
-                        operator_id=data.get("operator_id"),
-                        target_id=data.get("user_id"),
-                    )
-                    if system:
-                        await self._broadcast({"type": "new_message", "data": system})
+                    if not recalled.get("already_recalled"):
+                        system = self.store.add_system_message(
+                            recalled["chat_id"],
+                            recall_notice_text(data),
+                            notice_type=data.get("notice_type", ""),
+                            operator_id=data.get("operator_id"),
+                            target_id=data.get("user_id"),
+                        )
+                        if system:
+                            await self._broadcast({"type": "new_message", "data": system})
+            if self.plugins:
+                await self.plugins.dispatch("notice", {"notice": data}, raw=data)
         elif post_type == "notice":
             system = self._notice_to_system_message(data)
             if system:
                 await self._broadcast({"type": "new_message", "data": system})
+            if self.plugins:
+                await self.plugins.dispatch("notice", {"notice": data, "system_message": system}, raw=data)
         elif post_type == "request":
             await self._handle_request(data)
+            if self.plugins:
+                await self.plugins.dispatch("request", {"request": data}, raw=data)
 
     def _notice_to_system_message(self, data):
         chat_id = notice_chat_id(data)
@@ -1190,6 +1470,9 @@ class NapCatConnection:
             "emoji_id": str(emoji_id),
             "set": bool(enabled),
         })
+
+    async def delete_msg(self, message_id):
+        return await self._request("delete_msg", {"message_id": int(message_id)}, timeout=10)
 
     async def fetch_emoji_likes(self, message_id, chat_id="", emoji_ids=None):
         reactions = []
@@ -1638,6 +1921,52 @@ async def handle_message_emoji_like(request):
     return web.json_response({"ok": True, **payload})
 
 
+async def handle_message_revoke(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    message_id = str(body.get("message_id", "")).strip()
+    chat_id = str(body.get("chat_id", "")).strip()
+    if not is_int_string(message_id):
+        return web.json_response({"ok": False, "error": "message_id is required"}, status=400)
+    found = request.app["store"].find_message(message_id, chat_id=chat_id if parse_chat_id(chat_id) else None)
+    if not found:
+        return web.json_response({"ok": False, "error": "message is not in local history"}, status=404)
+    message = found["message"]
+    if not message.get("self"):
+        return web.json_response({"ok": False, "error": "only your own messages can be revoked"}, status=400)
+    try:
+        age = time.time() - float(message.get("time", 0))
+    except (TypeError, ValueError):
+        age = REVOKE_WINDOW_SECONDS + 1
+    if age > REVOKE_WINDOW_SECONDS:
+        return web.json_response({"ok": False, "error": "message is too old to revoke"}, status=400)
+    result = await request.app["napcat"].delete_msg(message_id)
+    if not result or result.get("status") != "ok":
+        err = result.get("wording", result.get("message", "revoke failed")) if result else "not connected"
+        return web.json_response({"ok": False, "error": err}, status=500)
+    recalled = request.app["store"].mark_recalled(
+        message_id,
+        chat_id=chat_id if parse_chat_id(chat_id) else None,
+        operator_id=request.app["store"]._self_user.get("user_id"),
+        recalled_at=int(time.time()),
+    )
+    payload = {"message_id": message_id}
+    if recalled:
+        msg = recalled["message"]
+        payload.update({
+            "chat_id": recalled["chat_id"],
+            "message": msg,
+            "patch": {
+                "recalled": True,
+                "recalled_at": msg.get("recalled_at"),
+                "recall_operator_id": msg.get("recall_operator_id"),
+            },
+        })
+        await request.app["napcat"]._broadcast({"type": "message_update", "data": payload})
+    return web.json_response({"ok": True, **payload})
+
+
 async def handle_message_emoji_likes(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -1885,6 +2214,104 @@ async def handle_status(request):
         "napcat_connected": napcat.ws is not None,
         "chats_count": len(request.app["store"]._data),
     })
+
+
+def plugin_error_response(error, status=400):
+    return web.json_response({"ok": False, "error": str(error)}, status=status)
+
+
+async def handle_plugins(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({"plugins": request.app["plugins"].list_plugins()})
+
+
+async def handle_plugins_refresh(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    request.app["plugins"].scan()
+    request.app["plugins"].load_enabled()
+    return web.json_response({"ok": True, "plugins": request.app["plugins"].list_plugins()})
+
+
+async def handle_plugin_enable(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    plugin_id = request.match_info.get("plugin_id", "")
+    try:
+        plugin = request.app["plugins"].set_enabled(plugin_id, True)
+        return web.json_response({"ok": True, "plugin": plugin})
+    except KeyError as e:
+        return plugin_error_response(e, status=404)
+    except Exception as e:
+        return plugin_error_response(e, status=400)
+
+
+async def handle_plugin_disable(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    plugin_id = request.match_info.get("plugin_id", "")
+    try:
+        plugin = request.app["plugins"].set_enabled(plugin_id, False)
+        return web.json_response({"ok": True, "plugin": plugin})
+    except KeyError as e:
+        return plugin_error_response(e, status=404)
+    except Exception as e:
+        return plugin_error_response(e, status=400)
+
+
+async def handle_plugin_restart(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    plugin_id = request.match_info.get("plugin_id", "")
+    try:
+        plugin = request.app["plugins"].restart_plugin(plugin_id)
+        return web.json_response({"ok": True, "plugin": plugin})
+    except KeyError as e:
+        return plugin_error_response(e, status=404)
+    except Exception as e:
+        return plugin_error_response(e, status=400)
+
+
+async def handle_plugin_config_get(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    plugin_id = request.match_info.get("plugin_id", "")
+    try:
+        manager = request.app["plugins"]
+        text = manager.read_plugin_config_text(plugin_id)
+        error = ""
+        parsed = None
+        try:
+            parsed = json.loads(text or "{}")
+            if not isinstance(parsed, dict):
+                raise ValueError("config.json must be an object")
+            manager._plugins[plugin_id]["config_error"] = ""
+        except Exception as e:
+            error = str(e)
+            manager._plugins[plugin_id]["config_error"] = error
+        return web.json_response({"ok": not error, "text": text, "config": parsed, "error": error})
+    except KeyError as e:
+        return plugin_error_response(e, status=404)
+    except Exception as e:
+        return plugin_error_response(e, status=400)
+
+
+async def handle_plugin_config_put(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    plugin_id = request.match_info.get("plugin_id", "")
+    body = await read_json_body(request)
+    text = body.get("text")
+    if not isinstance(text, str):
+        return web.json_response({"ok": False, "error": "text is required"}, status=400)
+    try:
+        plugin = request.app["plugins"].write_plugin_config(plugin_id, text)
+        return web.json_response({"ok": True, "plugin": plugin})
+    except KeyError as e:
+        return plugin_error_response(e, status=404)
+    except Exception as e:
+        return plugin_error_response(e, status=400)
 
 
 async def handle_nicknames(request):
@@ -2305,12 +2732,16 @@ async def main():
     config = load_config()
     store = MessageStore(maxlen=MAX_MESSAGES)
     store.load_all()
-    napcat = NapCatConnection(config["ws_url"], config.get("napcat_token", ""), store)
+    plugins = PluginManager(PLUGIN_DIR, config, store)
+    napcat = NapCatConnection(config["ws_url"], config.get("napcat_token", ""), store, plugins=plugins)
+    plugins.set_napcat(napcat)
+    plugins.load_enabled()
 
     app = web.Application(client_max_size=MAX_FILE_UPLOAD + 1024 * 1024, middlewares=[ban_middleware])
     app["config"] = config
     app["store"] = store
     app["napcat"] = napcat
+    app["plugins"] = plugins
     app["ban_tracker"] = BanTracker(
         max_failures=config.get("fail2ban_max_failures", DEFAULT_CONFIG["fail2ban_max_failures"]),
         window_seconds=config.get("fail2ban_window_seconds", DEFAULT_CONFIG["fail2ban_window_seconds"]),
@@ -2324,9 +2755,17 @@ async def main():
     app.router.add_post("/api/temp-chat", handle_temp_chat)
     app.router.add_post("/api/send", handle_send)
     app.router.add_post("/api/send-file", handle_send_file)
+    app.router.add_post("/api/message/revoke", handle_message_revoke)
     app.router.add_post("/api/message/emoji-like", handle_message_emoji_like)
     app.router.add_get("/api/message/emoji-likes", handle_message_emoji_likes)
     app.router.add_get("/api/status", handle_status)
+    app.router.add_get("/api/plugins", handle_plugins)
+    app.router.add_post("/api/plugins/refresh", handle_plugins_refresh)
+    app.router.add_post("/api/plugins/{plugin_id}/enable", handle_plugin_enable)
+    app.router.add_post("/api/plugins/{plugin_id}/disable", handle_plugin_disable)
+    app.router.add_post("/api/plugins/{plugin_id}/restart", handle_plugin_restart)
+    app.router.add_get("/api/plugins/{plugin_id}/config", handle_plugin_config_get)
+    app.router.add_put("/api/plugins/{plugin_id}/config", handle_plugin_config_put)
     app.router.add_get("/api/nicknames", handle_nicknames)
     app.router.add_get("/api/group-members", handle_group_members)
     app.router.add_post("/api/mark-read", handle_mark_read)

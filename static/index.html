@@ -22,6 +22,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .status-bar .dot{width:8px;height:8px;border-radius:50%;margin-right:8px}
 .status-bar .dot.ok{background:#4caf50}
 .status-bar .dot.err{background:var(--accent)}
+.status-spacer{flex:1}
+.status-button{height:24px;padding:0 8px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--fg);font-size:12px;cursor:pointer}
+.status-button:hover{background:var(--bg3)}
 .main{flex:1 1 auto;min-height:0;display:flex;overflow:hidden}
 .sidebar{width:260px;flex:0 0 260px;min-height:0;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden}
 .sidebar-header{padding:12px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600}
@@ -143,6 +146,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .modal-box p{margin-bottom:18px;font-size:14px;line-height:1.5}
 .modal-box button{padding:8px 28px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
 .modal-box button:hover{opacity:.85}
+.plugin-modal{max-width:760px;text-align:left;padding:18px}
+.plugin-head{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+.plugin-head h2{flex:1;font-size:16px;font-weight:600}
+.plugin-toolbar{display:flex;gap:8px;margin-bottom:12px}
+.plugin-toolbar button,.plugin-row button,.plugin-config-actions button{padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg3);color:var(--fg);font-size:12px;cursor:pointer}
+.plugin-layout{display:grid;grid-template-columns:260px 1fr;gap:12px;min-height:360px}
+.plugin-list{border:1px solid var(--border);border-radius:6px;overflow-y:auto;max-height:60vh}
+.plugin-row{display:block;width:100%;padding:10px;border:0;border-bottom:1px solid var(--border);background:transparent;color:var(--fg);text-align:left;cursor:pointer}
+.plugin-row:last-child{border-bottom:0}
+.plugin-row.active,.plugin-row:hover{background:var(--bg3)}
+.plugin-row-title{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+.plugin-pill{margin-left:auto;padding:1px 6px;border-radius:999px;border:1px solid var(--border);color:var(--fg2);font-size:11px;font-weight:400}
+.plugin-row-desc{margin-top:4px;color:var(--fg2);font-size:12px;line-height:1.35}
+.plugin-detail{min-width:0}
+.plugin-status{margin-bottom:8px;color:var(--fg2);font-size:12px;line-height:1.4;white-space:pre-wrap}
+.plugin-error{color:var(--accent)}
+.plugin-config{width:100%;min-height:260px;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;line-height:1.45;resize:vertical;outline:none}
+.plugin-config:focus{border-color:var(--accent)}
+.plugin-config-actions{display:flex;gap:8px;margin-top:8px}
+@media (max-width:700px){.plugin-layout{grid-template-columns:1fr}.plugin-list{max-height:180px}}
 .member-modal{max-width:420px;text-align:left;padding:20px}
 .member-modal-head{display:flex;align-items:center;gap:8px;margin-bottom:12px}
 .member-modal-head h2{flex:1;min-width:0;font-size:16px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -212,6 +235,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="status-bar">
   <span class="dot" id="statusDot"></span>
   <span id="statusText">Connecting...</span>
+  <span class="status-spacer"></span>
+  <button class="status-button" id="pluginsButton" type="button">Plugins</button>
 </div>
 
 <div class="main">
@@ -245,6 +270,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="msg-menu" id="msgMenu">
   <button type="button" id="msgMenuCopy">Copy</button>
   <button type="button" id="msgMenuReply">Reply</button>
+  <button type="button" id="msgMenuRevoke">Revoke</button>
   <button type="button" id="msgMenuTempChat">Temp Chat</button>
   <button type="button" id="msgMenuFaceReply">Face Reply</button>
 </div>
@@ -272,6 +298,10 @@ let userScrollActive = false;
 let imageDimensions = new Map();
 let chatLoadToken = 0;
 let loadingChatId = null;
+let plugins = [];
+let selectedPluginId = '';
+let pluginConfigText = '';
+const revokeWindowSeconds = 120;
 const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
   '66','79','111','114','118','144','147','173','182','187','266','283','289','294','297',
@@ -334,6 +364,194 @@ function showModal(msg) {
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `<div class="modal-box"><p>${esc(msg)}</p><button onclick="this.closest('.modal-overlay').remove()">OK</button></div>`;
   document.body.appendChild(overlay);
+}
+
+function showPluginsPanel() {
+  let overlay = $('pluginsOverlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'pluginsOverlay';
+    overlay.innerHTML = `
+      <div class="modal-box plugin-modal">
+        <div class="plugin-head">
+          <h2>Plugins</h2>
+          <button type="button" id="pluginsClose">Close</button>
+        </div>
+        <div class="plugin-toolbar">
+          <button type="button" id="pluginsRefresh">Refresh</button>
+        </div>
+        <div class="plugin-layout">
+          <div class="plugin-list" id="pluginList"></div>
+          <div class="plugin-detail">
+            <div class="plugin-status" id="pluginStatus">Select a plugin</div>
+            <textarea class="plugin-config" id="pluginConfig" spellcheck="false"></textarea>
+            <div class="plugin-config-actions">
+              <button type="button" id="pluginSave">Save config & restart</button>
+              <button type="button" id="pluginRestart">Restart</button>
+              <button type="button" id="pluginToggle">Enable</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    $('pluginsClose').addEventListener('click', () => overlay.remove());
+    $('pluginsRefresh').addEventListener('click', refreshPlugins);
+    $('pluginSave').addEventListener('click', saveSelectedPluginConfig);
+    $('pluginRestart').addEventListener('click', restartSelectedPlugin);
+    $('pluginToggle').addEventListener('click', toggleSelectedPlugin);
+  }
+  loadPlugins();
+}
+
+async function loadPlugins() {
+  try {
+    const r = await api('/api/plugins');
+    const d = await r.json();
+    plugins = d.plugins || [];
+    if (!selectedPluginId && plugins.length) selectedPluginId = plugins[0].id;
+    if (selectedPluginId && !plugins.some(p => p.id === selectedPluginId)) selectedPluginId = plugins[0] ? plugins[0].id : '';
+    renderPluginList();
+    if (selectedPluginId) await loadPluginConfig(selectedPluginId);
+    else renderPluginDetail(null);
+  } catch (e) {
+    showToast('Failed to load plugins');
+  }
+}
+
+function renderPluginList() {
+  const list = $('pluginList');
+  if (!list) return;
+  list.replaceChildren();
+  if (!plugins.length) {
+    const empty = document.createElement('div');
+    empty.className = 'plugin-row-desc';
+    empty.style.padding = '12px';
+    empty.textContent = 'No plugins found';
+    list.appendChild(empty);
+    return;
+  }
+  for (const plugin of plugins) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'plugin-row' + (plugin.id === selectedPluginId ? ' active' : '');
+    const title = document.createElement('div');
+    title.className = 'plugin-row-title';
+    const name = document.createElement('span');
+    name.textContent = plugin.name || plugin.id;
+    const pill = document.createElement('span');
+    pill.className = 'plugin-pill';
+    pill.textContent = plugin.enabled ? (plugin.loaded ? 'On' : 'Error') : 'Off';
+    title.append(name, pill);
+    const desc = document.createElement('div');
+    desc.className = 'plugin-row-desc';
+    desc.textContent = plugin.description || plugin.id;
+    row.append(title, desc);
+    row.addEventListener('click', async () => {
+      selectedPluginId = plugin.id;
+      renderPluginList();
+      await loadPluginConfig(plugin.id);
+    });
+    list.appendChild(row);
+  }
+}
+
+async function loadPluginConfig(pluginId) {
+  const plugin = plugins.find(p => p.id === pluginId);
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(pluginId)}/config`);
+    const d = await r.json();
+    pluginConfigText = d.text || '{}';
+    renderPluginDetail(plugin, d.error || '');
+  } catch {
+    pluginConfigText = '{}';
+    renderPluginDetail(plugin, 'Failed to load config');
+  }
+}
+
+function renderPluginDetail(plugin, configError = '') {
+  const status = $('pluginStatus');
+  const config = $('pluginConfig');
+  const toggle = $('pluginToggle');
+  const restart = $('pluginRestart');
+  const save = $('pluginSave');
+  if (!status || !config || !toggle) return;
+  const disabled = !plugin;
+  config.disabled = disabled;
+  toggle.disabled = disabled;
+  restart.disabled = disabled;
+  save.disabled = disabled;
+  if (!plugin) {
+    status.textContent = 'Select a plugin';
+    config.value = '';
+    return;
+  }
+  const lines = [
+    `${plugin.name || plugin.id} ${plugin.version || ''}`.trim(),
+    plugin.enabled ? (plugin.loaded ? 'Enabled and loaded' : 'Enabled but not loaded') : 'Disabled',
+  ];
+  if (plugin.error) lines.push(`Error: ${plugin.error}`);
+  if (plugin.config_error || configError) lines.push(`Config: ${plugin.config_error || configError}`);
+  status.textContent = lines.join('\n');
+  status.className = 'plugin-status' + ((plugin.error || plugin.config_error || configError) ? ' plugin-error' : '');
+  config.value = pluginConfigText;
+  toggle.textContent = plugin.enabled ? 'Disable' : 'Enable';
+}
+
+async function refreshPlugins() {
+  try {
+    const r = await api('/api/plugins/refresh', {method: 'POST'});
+    const d = await r.json();
+    plugins = d.plugins || [];
+    renderPluginList();
+    if (selectedPluginId) await loadPluginConfig(selectedPluginId);
+  } catch {
+    showToast('Plugin refresh failed');
+  }
+}
+
+async function toggleSelectedPlugin() {
+  const plugin = plugins.find(p => p.id === selectedPluginId);
+  if (!plugin) return;
+  const action = plugin.enabled ? 'disable' : 'enable';
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(plugin.id)}/${action}`, {method: 'POST'});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'toggle failed');
+    await loadPlugins();
+  } catch (e) {
+    showModal(e.message || 'Plugin toggle failed');
+  }
+}
+
+async function restartSelectedPlugin() {
+  if (!selectedPluginId) return;
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(selectedPluginId)}/restart`, {method: 'POST'});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'restart failed');
+    await loadPlugins();
+  } catch (e) {
+    showModal(e.message || 'Plugin restart failed');
+  }
+}
+
+async function saveSelectedPluginConfig() {
+  if (!selectedPluginId) return;
+  const text = $('pluginConfig').value;
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(selectedPluginId)}/config`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text})
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'config save failed');
+    pluginConfigText = text;
+    await loadPlugins();
+  } catch (e) {
+    showModal(e.message || 'Config save failed');
+  }
 }
 
 function showReactionUsers(reaction) {
@@ -1406,6 +1624,7 @@ function showMessageMenu(message, x, y) {
   selectedMenuMessage = message;
   const menu = $('msgMenu');
   $('msgMenuTempChat').style.display = canStartTempChat(message) ? 'block' : 'none';
+  $('msgMenuRevoke').style.display = canRevokeMessage(message) ? 'block' : 'none';
   menu.classList.add('show');
   menu.style.left = '0px';
   menu.style.top = '0px';
@@ -1414,6 +1633,13 @@ function showMessageMenu(message, x, y) {
   const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+}
+
+function canRevokeMessage(message) {
+  const id = normalizeMessageId(message && message.message_id);
+  if (!(message && message.self && !message.recalled && /^\d+$/.test(id))) return false;
+  const time = Number(message.time || 0);
+  return time > 0 && ((Date.now() / 1000) - time) <= revokeWindowSeconds;
 }
 
 function canStartTempChat(message) {
@@ -1511,6 +1737,36 @@ function replyToSelectedMessage() {
   const input = $('sendInput');
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);
+}
+
+async function revokeSelectedMessage() {
+  const message = selectedMenuMessage;
+  const id = normalizeMessageId(message && message.message_id);
+  if (!canRevokeMessage(message)) {
+    hideMessageMenu();
+    showToast('Cannot revoke this message');
+    return;
+  }
+  hideMessageMenu();
+  try {
+    const r = await api('/api/message/revoke', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message_id: id, chat_id: message.chat_id || currentChat || ''})
+    });
+    const d = await readJsonResponse(r);
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    if (d.message) {
+      applyMessageUpdate({
+        chat_id: d.chat_id || message.chat_id || currentChat || '',
+        message_id: id,
+        message: d.message,
+        patch: d.patch || {recalled: true}
+      });
+    }
+  } catch (e) {
+    showModal(e.message || 'Revoke failed');
+  }
 }
 
 async function startTempChatFromSelectedMessage() {
@@ -2078,6 +2334,7 @@ $('sendInput').addEventListener('keyup', e => {
 
 $('msgMenuCopy').addEventListener('click', copySelectedMessage);
 $('msgMenuReply').addEventListener('click', replyToSelectedMessage);
+$('msgMenuRevoke').addEventListener('click', revokeSelectedMessage);
 $('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage);
 $('msgMenuFaceReply').addEventListener('click', showFaceReplyPicker);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
@@ -2122,6 +2379,7 @@ $('fileInput').addEventListener('change', e => {
 });
 
 $('backButton').addEventListener('click', showChatList);
+$('pluginsButton').addEventListener('click', showPluginsPanel);
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

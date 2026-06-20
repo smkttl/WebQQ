@@ -6,5 +6,10 @@
   "flush_interval": 15,
   "fail2ban_max_failures": 5,
   "fail2ban_window_seconds": 300,
-  "fail2ban_ban_seconds": 1800
+  "fail2ban_ban_seconds": 1800,
+  "plugins": {
+    "enabled": {
+      "echo": true
+    }
+  }
 }
