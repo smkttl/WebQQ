@@ -1,4 +1,5 @@
 {
   "prefix": "/echo",
-  "respond_to_self": false
+  "respond_to_self": false,
+  "echo_empty_payload": false
 }
