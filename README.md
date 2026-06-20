@@ -10,6 +10,9 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Token-based web login
 - Automatic NapCat reconnection
 - Chat list with friend/group name resolution
+- Marks private/group chats as read when opened
+- Auto-approves friend requests and group invitations for the logged-in account
+- Group lifecycle notices and recall tags are shown in chat history
 
 ## Requirements
 
@@ -56,8 +59,28 @@ Messages are stored under `data/` as one JSON file per chat (`data/group_12345.j
 | GET    | `/api/chats`                       | List chats               |
 | GET    | `/api/messages?chat_id=X&limit=50` | Get messages (paginated) |
 | POST   | `/api/send`                        | Send a message           |
+| POST   | `/api/mark-read`                   | Mark a chat as read      |
 | GET    | `/api/status`                      | Connection status        |
 | WS     | `/ws`                              | Real-time message feed   |
+
+## NapCat Behavior
+
+- Recalled messages remain visible and replyable, with a recalled tag and a system notice.
+- Friend requests are approved automatically.
+- Group invitations for the logged-in account are approved automatically.
+- Group add requests from other users joining groups you manage are ignored.
+- Opening a private or group chat marks that chat as read in NapCat.
+
+## TODO
+
+- Rich sending for images, video, voice, JSON/Markdown cards, music, contacts, locations, dice/RPS, and merged forwards.
+- Request-management UI for reviewing and manually approving or rejecting pending requests.
+- Group file management: folders, delete/move/rename/transfer, file-system info, and root/folder listings.
+- Group notice and essence-message management.
+- Online file receive/refuse/cancel workflows.
+- Poke, input-status, user-status, and profile-like features.
+- Expanded media helpers: OCR, custom face fetch, record conversion, private file URLs, and richer file streaming controls.
+- Bot/system controls: status/version details, restart/exit, cache cleanup, packet/rkey/clientkey/credentials diagnostics.
 
 ## License
 

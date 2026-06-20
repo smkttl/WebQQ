@@ -261,6 +261,42 @@ class MessageStore:
         self._chat_meta[chat_id]["last_time"] = simplified.get("time", 0)
         self._chat_meta[chat_id]["last_text"] = (simplified.get("content", "") or "")[:50]
 
+    def add_system_message(self, chat_id, text, notice_type="", sub_type="", **extra):
+        parsed = parse_chat_id(chat_id)
+        if not parsed or not text:
+            return None
+        now = int(time.time())
+        simplified = {
+            "message_id": f"system-{now}-{uuid.uuid4().hex[:8]}",
+            "time": now,
+            "sender_id": "system",
+            "sender_name": "System",
+            "sender_avatar_url": "",
+            "content": text,
+            "mentions": {},
+            "images": [],
+            "forwards": [],
+            "files": [],
+            "videos": [],
+            "records": [],
+            "extra_segments": [],
+            "reactions": [],
+            "chat_id": chat_id,
+            "type": parsed["type"],
+            "group_id": parsed.get("group_id"),
+            "user_id": parsed.get("user_id") or parsed.get("private_id"),
+            "chat_name": self._chat_meta.get(chat_id, {}).get("name", chat_id),
+            "self": False,
+            "system": True,
+            "notice_type": notice_type,
+            "sub_type": sub_type,
+            **{k: v for k, v in extra.items() if v is not None},
+        }
+        self.append_simplified(chat_id, simplified)
+        self._update_chat_meta_from_message(chat_id, simplified)
+        self._dirty.add(chat_id)
+        return simplified
+
     def mark_recalled(self, message_id, chat_id=None, operator_id=None, recalled_at=None):
         key = str(message_id)
         known_chat_id = chat_id or self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
@@ -986,6 +1022,52 @@ class NapCatConnection:
                             },
                         },
                     })
+                    system = self.store.add_system_message(
+                        recalled["chat_id"],
+                        recall_notice_text(data),
+                        notice_type=data.get("notice_type", ""),
+                        operator_id=data.get("operator_id"),
+                        target_id=data.get("user_id"),
+                    )
+                    if system:
+                        await self._broadcast({"type": "new_message", "data": system})
+        elif post_type == "notice":
+            system = self._notice_to_system_message(data)
+            if system:
+                await self._broadcast({"type": "new_message", "data": system})
+        elif post_type == "request":
+            await self._handle_request(data)
+
+    def _notice_to_system_message(self, data):
+        chat_id = notice_chat_id(data)
+        if not chat_id:
+            return None
+        text = notice_text(data)
+        if not text:
+            return None
+        return self.store.add_system_message(
+            chat_id,
+            text,
+            notice_type=data.get("notice_type", ""),
+            sub_type=data.get("sub_type", ""),
+            operator_id=data.get("operator_id"),
+            target_id=data.get("user_id") or data.get("target_id"),
+        )
+
+    async def _handle_request(self, data):
+        request_type = data.get("request_type")
+        flag = data.get("flag")
+        if not flag:
+            return
+        if request_type == "friend":
+            resp = await self._request("set_friend_add_request", {"flag": str(flag), "approve": True}, timeout=10)
+            if not resp or resp.get("status") != "ok":
+                print(f"[napcat] failed to auto-approve friend request: {resp}")
+            return
+        if request_type == "group" and data.get("sub_type") == "invite":
+            resp = await self._request("set_group_add_request", {"flag": str(flag), "approve": True}, timeout=10)
+            if not resp or resp.get("status") != "ok":
+                print(f"[napcat] failed to auto-approve group invite: {resp}")
 
     async def _resolve_forward_segments(self, msg):
         segments = msg.get("message", [])
@@ -1152,6 +1234,14 @@ class NapCatConnection:
         data = resp.get("data") or {}
         messages = data.get("messages") if isinstance(data, dict) else []
         return messages if isinstance(messages, list) else []
+
+    async def mark_chat_read(self, chat_id):
+        parsed = parse_chat_id(chat_id)
+        if not parsed or parsed["type"] == "temp":
+            return None
+        if parsed["type"] == "group":
+            return await self._request("mark_group_msg_as_read", {"group_id": str(parsed["group_id"])}, timeout=5)
+        return await self._request("mark_private_msg_as_read", {"user_id": str(parsed["private_id"])}, timeout=5)
 
     @staticmethod
     def _parse_message(text, reply_to=None):
@@ -1676,6 +1766,76 @@ def normalize_emoji_like_users(users):
     return result
 
 
+def notice_chat_id(data):
+    notice_type = data.get("notice_type")
+    if notice_type in ("group_increase", "group_decrease", "group_admin", "group_card", "group_ban"):
+        return f"group_{data['group_id']}" if data.get("group_id") else None
+    if notice_type == "notify" and data.get("sub_type") in ("group_name", "title") and data.get("group_id"):
+        return f"group_{data['group_id']}"
+    return None
+
+
+def recall_notice_text(data):
+    operator = first_text(data.get("operator_id"), data.get("user_id"), "Someone")
+    if data.get("notice_type") == "group_recall":
+        target = first_text(data.get("user_id"))
+        return f"Message recalled by {operator}" + (f" for {target}." if target and target != operator else ".")
+    return f"Message recalled by {operator}."
+
+
+def notice_text(data):
+    notice_type = data.get("notice_type")
+    sub_type = data.get("sub_type", "")
+    user = first_text(data.get("user_id"), "Someone")
+    operator = first_text(data.get("operator_id"))
+    if notice_type == "group_increase":
+        if sub_type == "invite" and operator:
+            return f"{user} joined the group by invitation from {operator}."
+        return f"{user} joined the group."
+    if notice_type == "group_decrease":
+        if sub_type == "leave":
+            return f"{user} left the group."
+        if sub_type == "kick_me":
+            return "You were removed from the group."
+        if sub_type == "disband":
+            return "The group was disbanded."
+        return f"{user} was removed from the group" + (f" by {operator}." if operator else ".")
+    if notice_type == "group_admin":
+        return f"{user} is now an admin." if sub_type == "set" else f"{user} is no longer an admin."
+    if notice_type == "group_card":
+        old = first_text(data.get("card_old"), "(empty)")
+        new = first_text(data.get("card_new"), "(empty)")
+        return f"{user} changed group card: {old} -> {new}."
+    if notice_type == "notify" and sub_type == "group_name":
+        return f"Group name changed to {first_text(data.get('name_new'), 'a new name')}."
+    if notice_type == "notify" and sub_type == "title":
+        return f"{user} received title: {first_text(data.get('title'), '(empty)')}."
+    if notice_type == "group_ban":
+        duration = first_text(data.get("duration"))
+        if sub_type == "lift_ban" or duration == "0":
+            return f"{user} was unmuted" + (f" by {operator}." if operator else ".")
+        if duration == "-1":
+            return "All members were muted" + (f" by {operator}." if operator else ".")
+        return f"{user} was muted" + (f" by {operator}" if operator else "") + (f" for {format_duration(duration)}." if duration else ".")
+    return ""
+
+
+def format_duration(seconds):
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return str(seconds)
+    if total < 0:
+        return "an unknown duration"
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m"
+    if total < 86400:
+        return f"{total // 3600}h"
+    return f"{total // 86400}d"
+
+
 def first_text(*values):
     for value in values:
         if value is None:
@@ -1751,6 +1911,19 @@ async def handle_group_members(request):
     if group_id.isdigit():
         await request.app["napcat"]._fetch_group_members(int(group_id))
     return web.json_response({"members": store._group_member_details.get(chat_id, [])})
+
+
+async def handle_mark_read(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = str(body.get("chat_id", "")).strip()
+    if not parse_chat_id(chat_id):
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    result = await request.app["napcat"].mark_chat_read(chat_id)
+    if result and result.get("status") not in (None, "ok"):
+        return web.json_response({"ok": False, "error": result.get("message") or result.get("wording") or "mark read failed"}, status=500)
+    return web.json_response({"ok": True})
 
 
 def image_url_allowed(url):
@@ -2156,6 +2329,7 @@ async def main():
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/nicknames", handle_nicknames)
     app.router.add_get("/api/group-members", handle_group_members)
+    app.router.add_post("/api/mark-read", handle_mark_read)
     app.router.add_get("/api/avatar", handle_avatar)
     app.router.add_get("/api/image", handle_image_proxy)
     app.router.add_get("/api/image/full", handle_image_full)
