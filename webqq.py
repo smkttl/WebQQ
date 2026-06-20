@@ -1075,6 +1075,7 @@ class NapCatConnection:
         self._pending = {}
         self._stream_pending = {}
         self._subscribers = []
+        self._plugin_tasks = set()
 
     async def start(self):
         self.session = aiohttp.ClientSession()
@@ -1235,8 +1236,7 @@ class NapCatConnection:
             simplified = self.store.add(data)
             if simplified:
                 await self._broadcast({"type": "new_message", "data": simplified})
-                if self.plugins:
-                    await self.plugins.dispatch("message", {"message": simplified}, raw=data)
+                self._dispatch_plugins("message", {"message": simplified}, raw=data)
         elif post_type == "message_sent":
             await self._resolve_forward_segments(data)
             simplified = self.store._simplify(data)
@@ -1253,8 +1253,7 @@ class NapCatConnection:
                 })
             else:
                 await self._broadcast({"type": "new_message", "data": reconciled["message"]})
-            if self.plugins:
-                await self.plugins.dispatch("message", {"message": reconciled["message"]}, raw=data)
+            self._dispatch_plugins("message", {"message": reconciled["message"]}, raw=data)
         elif post_type == "notice" and data.get("notice_type") == "group_msg_emoji_like":
             message_id = data.get("message_id")
             if message_id is not None:
@@ -1274,8 +1273,7 @@ class NapCatConnection:
                     "type": "emoji_like",
                     "data": payload,
                 })
-            if self.plugins:
-                await self.plugins.dispatch("notice", {"notice": data}, raw=data)
+            self._dispatch_plugins("notice", {"notice": data}, raw=data)
         elif post_type == "notice" and data.get("notice_type") in ("friend_recall", "group_recall"):
             message_id = data.get("message_id")
             if message_id is not None:
@@ -1315,18 +1313,22 @@ class NapCatConnection:
                         )
                         if system:
                             await self._broadcast({"type": "new_message", "data": system})
-            if self.plugins:
-                await self.plugins.dispatch("notice", {"notice": data}, raw=data)
+            self._dispatch_plugins("notice", {"notice": data}, raw=data)
         elif post_type == "notice":
             system = self._notice_to_system_message(data)
             if system:
                 await self._broadcast({"type": "new_message", "data": system})
-            if self.plugins:
-                await self.plugins.dispatch("notice", {"notice": data, "system_message": system}, raw=data)
+            self._dispatch_plugins("notice", {"notice": data, "system_message": system}, raw=data)
         elif post_type == "request":
             await self._handle_request(data)
-            if self.plugins:
-                await self.plugins.dispatch("request", {"request": data}, raw=data)
+            self._dispatch_plugins("request", {"request": data}, raw=data)
+
+    def _dispatch_plugins(self, event_type, payload, raw=None):
+        if not self.plugins:
+            return
+        task = asyncio.create_task(self.plugins.dispatch(event_type, payload, raw=raw))
+        self._plugin_tasks.add(task)
+        task.add_done_callback(self._plugin_tasks.discard)
 
     def _notice_to_system_message(self, data):
         chat_id = notice_chat_id(data)
