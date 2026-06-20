@@ -1070,6 +1070,8 @@ function humanFileSize(size) {
 function fileDownloadUrl(file) {
   const params = new URLSearchParams();
   if (currentChat) params.set('chat_id', currentChat);
+  const token = document.cookie.match(/(?:^|;\s*)token=([^;]*)/)?.[1] || '';
+  if (token) params.set('token', token);
   for (const [key, value] of Object.entries(file || {})) {
     if (['id', 'name', 'url', 'file', 'busid'].includes(key) && value !== undefined && value !== null && value !== '') {
       params.set(key, String(value));

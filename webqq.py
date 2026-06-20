@@ -7,7 +7,8 @@ import uuid
 import hmac
 import tempfile
 import mimetypes
-from urllib.parse import quote, urlparse
+import base64
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -557,6 +558,7 @@ class NapCatConnection:
         self.session = None
         self.ws = None
         self._pending = {}
+        self._stream_pending = {}
         self._subscribers = []
 
     async def start(self):
@@ -653,8 +655,60 @@ class NapCatConnection:
             self._pending.pop(echo, None)
             return None
 
+    async def _stream_file(self, file_ref, timeout=120):
+        if not self.ws or not file_ref:
+            return None
+        echo = f"download_file_stream-{uuid.uuid4().hex[:10]}"
+        queue = asyncio.Queue()
+        self._stream_pending[echo] = queue
+        await self.ws.send_json({
+            "action": "download_file_stream",
+            "params": {"file": file_ref, "chunk_size": 256 * 1024},
+            "echo": echo,
+        })
+        chunks = {}
+        info = {}
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    return None
+                payload = data.get("data") or {}
+                if data.get("status") != "ok" or not isinstance(payload, dict):
+                    return None
+                data_type = payload.get("data_type")
+                if data_type == "file_info":
+                    info = payload
+                elif data_type == "file_chunk":
+                    try:
+                        index = int(payload.get("index", len(chunks)))
+                        chunks[index] = base64.b64decode(payload.get("data", ""))
+                    except Exception:
+                        return None
+                elif data_type == "file_complete":
+                    return {
+                        "name": info.get("file_name") or "",
+                        "size": info.get("file_size") or payload.get("total_bytes"),
+                        "body": b"".join(chunks[i] for i in sorted(chunks)),
+                    }
+                elif payload.get("type") == "error":
+                    return None
+        finally:
+            self._stream_pending.pop(echo, None)
+
+    async def stream_file_candidates(self, candidates):
+        for candidate in candidates:
+            result = await self._stream_file(candidate)
+            if result:
+                return result
+        return None
+
     async def _handle(self, data):
         echo = data.get("echo")
+        if echo and echo in self._stream_pending:
+            await self._stream_pending[echo].put(data)
+            return
         if echo and echo in self._pending:
             fut = self._pending.pop(echo)
             if not fut.done():
@@ -761,17 +815,24 @@ class NapCatConnection:
             }, timeout=60)
         raise ValueError("file sending is not supported for temporary chats")
 
-    async def resolve_file_urls(self, file_id="", file_path="", busid="", url="", chat_id=""):
+    async def resolve_file_locations(self, file_id="", file_path="", busid="", url="", chat_id="", filename=""):
         urls = []
-        if file_url_allowed(url):
-            urls.append(url)
+        paths = []
+        normalized_url = normalize_file_url(url, filename)
+        if file_url_allowed(normalized_url):
+            urls.append(normalized_url)
         candidates = []
         if file_id:
             candidates.append({"file_id": file_id})
+            candidates.append({"file_hash": file_id})
+            candidates.append({"file_uuid": file_id})
         if file_path:
             candidates.append({"file": file_path})
+            candidates.append({"file_name": file_path})
         if file_id and busid:
             candidates.append({"file_id": file_id, "busid": busid})
+            candidates.append({"file_hash": file_id, "busid": busid})
+            candidates.append({"file_uuid": file_id, "busid": busid})
         parsed = parse_chat_id(chat_id)
         for params in candidates:
             if parsed and parsed["type"] == "group":
@@ -781,11 +842,18 @@ class NapCatConnection:
                 actions.append("get_group_file_url")
             for action in actions:
                 resp = await self._request(action, params, timeout=10)
-                data = resp.get("data") if resp and resp.get("status") == "ok" else {}
+                if not resp or resp.get("status") != "ok":
+                    continue
+                data = resp.get("data") or {}
                 for candidate in extract_file_urls(data):
+                    candidate = normalize_file_url(candidate, filename)
                     if file_url_allowed(candidate):
                         urls.append(candidate)
-        return list(dict.fromkeys(urls))
+                paths.extend(extract_file_paths(data))
+        return {
+            "urls": list(dict.fromkeys(urls)),
+            "paths": list(dict.fromkeys(paths)),
+        }
 
     async def set_msg_emoji_like(self, message_id, emoji_id, enabled=True):
         return await self._request("set_msg_emoji_like", {
@@ -1417,6 +1485,19 @@ def file_url_allowed(url):
     return parsed.scheme in ("http", "https") and bool(parsed.hostname)
 
 
+def normalize_file_url(url, filename=""):
+    if not isinstance(url, str) or not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return ""
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if filename and any(key == "fname" and value == "" for key, value in query):
+        query = [(key, safe_download_name(filename) if key == "fname" and value == "" else value) for key, value in query]
+        return urlunparse(parsed._replace(query=urlencode(query)))
+    return url
+
+
 def avatar_cache_paths(avatar_type, avatar_id):
     base = AVATAR_DIR / avatar_type
     return base / f"{avatar_id}.img", base / f"{avatar_id}.json"
@@ -1540,11 +1621,15 @@ def content_disposition(filename):
 def extract_file_urls(payload):
     urls = []
     if isinstance(payload, dict):
-        for key in ("url", "file", "download_url", "downloadUrl"):
+        for key in (
+            "url", "file", "download_url", "downloadUrl", "downloadURL",
+            "download_addr", "downloadAddr", "download", "link", "download_link",
+            "downloadLink", "dlink", "dLink",
+        ):
             value = payload.get(key)
             if isinstance(value, str):
                 urls.append(value)
-        for key in ("data", "file_info", "fileInfo"):
+        for key in ("data", "file_info", "fileInfo", "info", "item", "items", "list"):
             urls.extend(extract_file_urls(payload.get(key)))
     elif isinstance(payload, list):
         for item in payload:
@@ -1552,14 +1637,35 @@ def extract_file_urls(payload):
     return urls
 
 
+def extract_file_paths(payload):
+    paths = []
+    if isinstance(payload, dict):
+        for key in ("file", "path", "downloadPath", "download_path"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.startswith("/") and "\x00" not in value:
+                paths.append(value)
+        for key in ("data", "file_info", "fileInfo", "info", "item", "items", "list"):
+            paths.extend(extract_file_paths(payload.get(key)))
+    elif isinstance(payload, list):
+        for item in payload:
+            paths.extend(extract_file_paths(item))
+    return paths
+
+
 async def fetch_first_file(urls, filename):
     async with aiohttp.ClientSession() as session:
         last_status = 502
         for file_url in urls:
             try:
-                async with session.get(file_url, timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                headers = {
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://im.qq.com/",
+                    "Accept": "*/*",
+                }
+                async with session.get(file_url, timeout=60, headers=headers, allow_redirects=True) as resp:
                     last_status = resp.status
                     if resp.status != 200:
+                        print(f"[file] upstream returned {resp.status} for {urlparse(file_url).hostname}")
                         continue
                     content_type = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0]
                     headers = {
@@ -1571,24 +1677,85 @@ async def fetch_first_file(urls, filename):
                         headers["Content-Length"] = length
                     return web.Response(body=await resp.read(), content_type=content_type, headers=headers)
             except Exception:
+                print(f"[file] upstream fetch failed for {urlparse(file_url).hostname}")
                 continue
         return web.json_response({"error": "file fetch failed"}, status=last_status)
+
+
+async def serve_first_local_file(paths, filename):
+    for path in paths:
+        try:
+            if not os.access(path, os.R_OK):
+                continue
+            real_path = Path(path).resolve()
+            if not real_path.is_file():
+                continue
+            content_type = mimetypes.guess_type(safe_download_name(filename))[0] or "application/octet-stream"
+            return web.FileResponse(
+                real_path,
+                headers={
+                    "Cache-Control": "private, max-age=300",
+                    "Content-Disposition": content_disposition(filename),
+                    "Content-Type": content_type,
+                },
+            )
+        except Exception:
+            print(f"[file] local file fallback failed for {Path(path).name}")
+            continue
+    return None
+
+
+def stream_file_response(streamed, filename):
+    if not streamed or not streamed.get("body"):
+        return None
+    response_name = safe_download_name(filename or streamed.get("name") or "file")
+    content_type = mimetypes.guess_type(response_name)[0] or "application/octet-stream"
+    headers = {
+        "Cache-Control": "private, max-age=300",
+        "Content-Disposition": content_disposition(response_name),
+        "Content-Length": str(len(streamed["body"])),
+    }
+    return web.Response(body=streamed["body"], content_type=content_type, headers=headers)
 
 
 async def handle_file_proxy(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     filename = safe_download_name(request.query.get("name", "file"))
-    urls = await request.app["napcat"].resolve_file_urls(
+    locations = await request.app["napcat"].resolve_file_locations(
         file_id=request.query.get("id", ""),
         file_path=request.query.get("file", ""),
         busid=request.query.get("busid", ""),
         url=request.query.get("url", ""),
         chat_id=request.query.get("chat_id", ""),
+        filename=filename,
     )
+    urls = locations["urls"]
+    stream_candidates = [
+        value for value in (
+            request.query.get("id", ""),
+            request.query.get("file", ""),
+            request.query.get("name", ""),
+        ) if value
+    ]
     if not urls:
+        local_response = await serve_first_local_file(locations["paths"], filename)
+        if local_response:
+            return local_response
+        streamed = await request.app["napcat"].stream_file_candidates(stream_candidates)
+        stream_response = stream_file_response(streamed, filename)
+        if stream_response:
+            return stream_response
+        print(f"[file] no download url for chat={request.query.get('chat_id', '')} id={request.query.get('id', '')} file={request.query.get('file', '')}")
         return web.json_response({"error": "file url unavailable"}, status=400)
-    return await fetch_first_file(urls, filename)
+    response = await fetch_first_file(urls, filename)
+    if response.status < 400:
+        return response
+    local_response = await serve_first_local_file(locations["paths"], filename)
+    if local_response:
+        return local_response
+    streamed = await request.app["napcat"].stream_file_candidates(stream_candidates)
+    return stream_file_response(streamed, filename) or response
 
 
 async def resolve_image_urls(request, url, file, refresh=False):
