@@ -11,6 +11,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Automatic NapCat reconnection
 - Chat list with friend/group name resolution
 - Marks private/group chats as read when opened
+- Folder-copy plugin system with per-plugin config and web UI controls
 - Auto-approves friend requests and group invitations for the logged-in account
 - Group lifecycle notices and recall tags are shown in chat history
 
@@ -43,6 +44,7 @@ Configuration is stored in `config.json` (gitignored). A template is provided in
 | `web_port`       | `8080`                                                 | Port for the web UI server                        |
 | `web_token`      | *(empty)*                                              | Password for browser login. Empty = no auth required |
 | `flush_interval` | `15`                                                   | Seconds between message-to-disk flushes           |
+| `plugins.enabled` | `{}`                                                  | Per-plugin enable/disable overrides                |
 
 - `config.json` is auto-created from defaults on first run if missing.
 - `config.json.example` tracks the schema and should be committed to git.
@@ -50,6 +52,12 @@ Configuration is stored in `config.json` (gitignored). A template is provided in
 ## Data Storage
 
 Messages are stored under `data/` as one JSON file per chat (`data/group_12345.json`, `data/private_67890.json`). Each file holds up to 1000 messages. The `data/` directory is gitignored.
+
+## Plugins
+
+Install plugins by copying a folder into `plugins/`, then open **Plugins** in the web UI to refresh, enable/disable, edit config, or restart a plugin. The bundled `plugins/echo/` plugin is a minimal example using `{"prefix": "/echo"}`.
+
+See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plugin context API.
 
 ## API
 
@@ -59,8 +67,10 @@ Messages are stored under `data/` as one JSON file per chat (`data/group_12345.j
 | GET    | `/api/chats`                       | List chats               |
 | GET    | `/api/messages?chat_id=X&limit=50` | Get messages (paginated) |
 | POST   | `/api/send`                        | Send a message           |
+| POST   | `/api/message/revoke`              | Revoke a recent self message |
 | POST   | `/api/mark-read`                   | Mark a chat as read      |
 | GET    | `/api/status`                      | Connection status        |
+| GET    | `/api/plugins`                     | List plugin status       |
 | WS     | `/ws`                              | Real-time message feed   |
 
 ## NapCat Behavior
