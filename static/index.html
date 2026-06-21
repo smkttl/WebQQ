@@ -39,13 +39,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .avatar-fallback{position:relative;z-index:0}
 .chat-main{flex:1;min-width:0}
 .chat-item .name{font-size:14px;margin-bottom:2px}
+.chat-item .chat-id{font-size:11px;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:2px}
 .chat-item .preview{font-size:12px;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-item .time{font-size:11px;color:var(--fg2);margin-left:auto;align-self:flex-start;white-space:nowrap}
 .messages-area{flex:1 1 auto;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 .messages-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
 .back-button{display:none;width:32px;height:32px;flex:0 0 32px;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--fg);font-size:22px;line-height:1;cursor:pointer}
 .back-button:hover{background:var(--bg3)}
-.chat-title-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-title-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;overflow:hidden}
+.chat-title-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-title-id{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg2);font-size:12px;font-weight:400;line-height:1.2}
 .header-icon-button{display:none;width:32px;height:32px;flex:0 0 32px;align-items:center;justify-content:center;border:0;border-radius:6px;background:transparent;color:var(--fg);font-size:18px;line-height:1;cursor:pointer}
 .header-icon-button:hover{background:var(--bg3)}
 .messages-scroll{flex:1 1 auto;min-height:0;overflow-y:auto;padding:12px 16px}
@@ -249,7 +252,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <div class="messages-area" id="messagesArea" style="display:none">
     <div class="messages-header">
       <button class="back-button" id="backButton" type="button" aria-label="Back to chats">‹</button>
-      <div class="chat-title-text" id="chatTitle">-</div>
+      <div class="chat-title-text">
+        <div class="chat-title-name" id="chatTitle">-</div>
+        <div class="chat-title-id" id="chatIdText"></div>
+      </div>
       <button class="header-icon-button" id="memberListButton" type="button" title="Group members" aria-label="Group members">👥</button>
     </div>
     <div class="messages-scroll" id="messagesScroll"></div>
@@ -744,13 +750,16 @@ function renderChats(chats) {
     const name = document.createElement('div');
     name.className = 'name';
     name.textContent = nameText;
+    const id = document.createElement('div');
+    id.className = 'chat-id';
+    id.textContent = c.chat_id;
     const preview = document.createElement('div');
     preview.className = 'preview';
     preview.textContent = c.last_text || '';
     const time = document.createElement('span');
     time.className = 'time';
     time.textContent = ts;
-    main.append(name, preview);
+    main.append(name, id, preview);
     div.append(main, time);
     div.onclick = () => selectChat(c.chat_id, c.name);
     el.appendChild(div);
@@ -789,6 +798,7 @@ async function selectChat(chatId, name) {
   $('emptyState').style.display = 'none';
   $('messagesArea').style.display = 'flex';
   $('chatTitle').textContent = name || chatId;
+  $('chatIdText').textContent = chatId;
   updateHeaderActions();
   messageIndex = new Map();
   loadedMessages = [];
