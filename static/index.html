@@ -697,6 +697,7 @@ function updateHeaderActions() {
 async function init() {
   await loadFaceManifest();
   await loadNicknames();
+  loadPlugins();
   updateStatus();
   loadChats();
   connectWS();
