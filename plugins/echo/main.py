@@ -28,3 +28,15 @@ async def handle_event(event, ctx):
         await ctx.send_message(message["chat_id"], reply)
     except Exception as e:
         ctx.log(f"send failed: {e}")
+
+
+async def handle_portal_message(message, ctx):
+    text = str(message.get("text") or "").strip()
+    if not text:
+        if not ctx.config.get("echo_empty_payload"):
+            return
+        text = str(ctx.config.get("prefix") or "/echo")
+    try:
+        await ctx.send_message(message["chat_id"], text, reply_to=message.get("reply_to"))
+    except Exception as e:
+        ctx.log(f"portal send failed: {e}")

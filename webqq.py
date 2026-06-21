@@ -915,6 +915,7 @@ class PluginManager:
                 "manifest": {},
                 "module": state.get("module"),
                 "handler": state.get("handler"),
+                "portal_handler": state.get("portal_handler"),
                 "ctx": state.get("ctx"),
                 "loaded": False,
                 "error": "",
@@ -951,6 +952,7 @@ class PluginManager:
             "description": manifest.get("description", ""),
             "enabled": enabled,
             "loaded": bool(state.get("loaded")) and enabled,
+            "portal_receiver": bool(enabled and state.get("loaded") and callable(state.get("portal_handler"))),
             "error": state.get("error", ""),
             "config_error": state.get("config_error", ""),
         }
@@ -990,6 +992,7 @@ class PluginManager:
             return
         state["module"] = None
         state["handler"] = None
+        state["portal_handler"] = None
         state["ctx"] = None
         state["loaded"] = False
 
@@ -1010,18 +1013,51 @@ class PluginManager:
             spec.loader.exec_module(module)
             ctx = PluginContext(self, plugin_id, config)
             handler = getattr(module, "handle_event", None)
+            portal_handler = getattr(module, "handle_portal_message", None)
             setup = getattr(module, "setup", None)
             if setup:
-                handler = setup(ctx)
-                if hasattr(handler, "handle_event"):
-                    handler = handler.handle_event
+                instance = setup(ctx)
+                if callable(instance):
+                    handler = instance
+                if hasattr(instance, "handle_event"):
+                    handler = instance.handle_event
+                if hasattr(instance, "handle_portal_message"):
+                    portal_handler = instance.handle_portal_message
             if not callable(handler):
                 raise ValueError("plugin must expose handle_event(event, ctx) or setup(ctx)")
-            state.update({"module": module, "handler": handler, "ctx": ctx, "loaded": True, "error": "", "config_error": ""})
+            state.update({
+                "module": module,
+                "handler": handler,
+                "portal_handler": portal_handler if callable(portal_handler) else None,
+                "ctx": ctx,
+                "loaded": True,
+                "error": "",
+                "config_error": "",
+            })
         except Exception as e:
-            state.update({"module": None, "handler": None, "ctx": None, "loaded": False, "error": str(e)})
+            state.update({"module": None, "handler": None, "portal_handler": None, "ctx": None, "loaded": False, "error": str(e)})
             print(f"[plugin:{plugin_id}] load failed: {e}")
         return self._public_state(state)
+
+    async def dispatch_portal_message(self, plugin_id, message):
+        state = self._require_plugin(plugin_id)
+        if not self.is_enabled(plugin_id):
+            raise ValueError("plugin is disabled")
+        if not state.get("loaded"):
+            self.load_plugin(plugin_id)
+            state = self._require_plugin(plugin_id)
+        handler = state.get("portal_handler")
+        if not state.get("loaded") or not callable(handler):
+            raise ValueError("plugin does not accept portal messages")
+        try:
+            result = handler(message, state["ctx"])
+            if asyncio.iscoroutine(result):
+                await result
+            state["error"] = ""
+        except Exception:
+            state["error"] = traceback.format_exc(limit=5)
+            print(f"[plugin:{plugin_id}] portal handler failed:\n{state['error']}")
+            raise
 
     async def dispatch(self, event_type, payload, raw=None):
         if not self.napcat:
@@ -2423,6 +2459,41 @@ async def handle_plugin_config_put(request):
         return plugin_error_response(e, status=400)
 
 
+async def handle_plugin_portal_message(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    plugin_id = request.match_info.get("plugin_id", "")
+    body = await read_json_body(request)
+    chat_id = body.get("chat_id")
+    text = body.get("text")
+    reply_to = body.get("reply_to")
+    if not isinstance(chat_id, str) or not chat_id:
+        return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+    parsed_chat = parse_chat_id(chat_id)
+    if not parsed_chat:
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    if not isinstance(text, str):
+        return web.json_response({"ok": False, "error": "text is required"}, status=400)
+    if reply_to is not None:
+        reply_to = str(reply_to).strip()
+        if not reply_to.isdigit():
+            return web.json_response({"ok": False, "error": "invalid reply_to"}, status=400)
+    message = {
+        "chat_id": chat_id,
+        "chat_type": parsed_chat["type"],
+        "text": text,
+        "reply_to": reply_to,
+        "source": "ui_portal",
+    }
+    try:
+        await request.app["plugins"].dispatch_portal_message(plugin_id, message)
+        return web.json_response({"ok": True})
+    except KeyError as e:
+        return plugin_error_response(e, status=404)
+    except Exception as e:
+        return plugin_error_response(e, status=400)
+
+
 async def handle_nicknames(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -2875,6 +2946,7 @@ async def main():
     app.router.add_post("/api/plugins/{plugin_id}/restart", handle_plugin_restart)
     app.router.add_get("/api/plugins/{plugin_id}/config", handle_plugin_config_get)
     app.router.add_put("/api/plugins/{plugin_id}/config", handle_plugin_config_put)
+    app.router.add_post("/api/plugins/{plugin_id}/portal-message", handle_plugin_portal_message)
     app.router.add_get("/api/nicknames", handle_nicknames)
     app.router.add_get("/api/group-members", handle_group_members)
     app.router.add_post("/api/mark-read", handle_mark_read)

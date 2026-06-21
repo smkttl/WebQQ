@@ -120,6 +120,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .send-bar{flex:0 0 auto;display:flex;padding:8px 12px calc(8px + env(safe-area-inset-bottom));border-top:1px solid var(--border);background:var(--bg2);position:relative}
 .send-bar .attach-button{flex:0 0 40px;width:40px;height:40px;margin:0 8px 0 0;padding:0;display:flex;align-items:center;justify-content:center;border:none;border-radius:6px;background:var(--bg3);color:#fff;font-size:18px;line-height:1;cursor:pointer}
 .send-bar .attach-button:hover{opacity:.85}
+.portal-select{flex:0 0 auto;max-width:150px;margin:0 8px 0 0;padding:0 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:13px;outline:none}
+.portal-select:focus{border-color:var(--accent)}
 .send-bar input{flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);font-size:14px;outline:none}
 .send-bar input:focus{border-color:var(--accent)}
 .send-bar button{margin-left:8px;padding:10px 20px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-size:14px;cursor:pointer}
@@ -267,6 +269,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
         <button id="replyDraftCancel" type="button" aria-label="Cancel reply">×</button>
       </div>
       <button class="attach-button" id="attachButton" type="button" title="Attach file" aria-label="Attach file">📎</button>
+      <select class="portal-select" id="portalSelect" title="Send target" aria-label="Send target">
+        <option value="">Normal</option>
+      </select>
       <input class="file-input" type="file" id="fileInput">
       <input type="text" id="sendInput" placeholder="Type a message... (@ to mention)" autocomplete="off">
       <button onclick="doSend()">Send</button>
@@ -309,6 +314,7 @@ let loadingChatId = null;
 let plugins = [];
 let selectedPluginId = '';
 let pluginConfigText = '';
+let selectedPortalPluginId = '';
 const revokeWindowSeconds = 120;
 const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
@@ -417,6 +423,7 @@ async function loadPlugins() {
     const r = await api('/api/plugins');
     const d = await r.json();
     plugins = d.plugins || [];
+    renderPortalOptions();
     if (!selectedPluginId && plugins.length) selectedPluginId = plugins[0].id;
     if (selectedPluginId && !plugins.some(p => p.id === selectedPluginId)) selectedPluginId = plugins[0] ? plugins[0].id : '';
     renderPluginList();
@@ -425,6 +432,33 @@ async function loadPlugins() {
   } catch (e) {
     showToast('Failed to load plugins');
   }
+}
+
+function portalPlugins() {
+  return plugins.filter(p => p && p.enabled && p.loaded && p.portal_receiver);
+}
+
+function renderPortalOptions() {
+  const select = $('portalSelect');
+  if (!select) return;
+  const receivers = portalPlugins();
+  if (selectedPortalPluginId && !receivers.some(p => p.id === selectedPortalPluginId)) {
+    selectedPortalPluginId = '';
+  }
+  select.replaceChildren();
+  const normal = document.createElement('option');
+  normal.value = '';
+  normal.textContent = 'Normal';
+  select.appendChild(normal);
+  for (const plugin of receivers) {
+    const option = document.createElement('option');
+    option.value = plugin.id;
+    option.textContent = plugin.name || plugin.id;
+    select.appendChild(option);
+  }
+  select.value = selectedPortalPluginId;
+  select.disabled = receivers.length === 0;
+  select.title = receivers.length ? 'Send target' : 'No plugin receivers available';
 }
 
 function renderPluginList() {
@@ -511,6 +545,7 @@ async function refreshPlugins() {
     const r = await api('/api/plugins/refresh', {method: 'POST'});
     const d = await r.json();
     plugins = d.plugins || [];
+    renderPortalOptions();
     renderPluginList();
     if (selectedPluginId) await loadPluginConfig(selectedPluginId);
   } catch {
@@ -2111,8 +2146,12 @@ async function doSend() {
   hideAtDropdown();
   hideEmojiDropdown();
   const replyTo = pendingReply && pendingReply.id;
+  const portalPluginId = selectedPortalPluginId;
   try {
-    const r = await api('/api/send', {
+    const path = portalPluginId
+      ? `/api/plugins/${encodeURIComponent(portalPluginId)}/portal-message`
+      : '/api/send';
+    const r = await api(path, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({chat_id: currentChat, text, reply_to: replyTo || undefined})
@@ -2362,6 +2401,9 @@ $('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage)
 $('msgMenuFaceReply').addEventListener('click', showFaceReplyPicker);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
 $('memberListButton').addEventListener('click', showMemberList);
+$('portalSelect').addEventListener('change', e => {
+  selectedPortalPluginId = e.target.value;
+});
 document.addEventListener('pointerdown', e => {
   if (!$('msgMenu').contains(e.target) && !$('emojiDropdown').contains(e.target)) hideMessageMenu();
 });

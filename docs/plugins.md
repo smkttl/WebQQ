@@ -74,6 +74,13 @@ async def handle_event(event, ctx):
     ...
 ```
 
+Optional portal receiver:
+
+```python
+async def handle_portal_message(message, ctx):
+    await ctx.send_message(message["chat_id"], message["text"])
+```
+
 Setup function:
 
 ```python
@@ -86,9 +93,13 @@ class Plugin:
 
     async def handle_event(self, event, ctx):
         ...
+
+    async def handle_portal_message(self, message, ctx):
+        ...
 ```
 
 `handle_event` may be sync or async. Exceptions are caught and shown in the Plugins panel without stopping WebQQ or other plugins.
+`handle_portal_message` may also be sync or async. If a plugin does not expose this receiver, the chat composer will not allow sending portal messages to it.
 
 ## Events
 
@@ -169,6 +180,20 @@ Failed optimistic send event:
 ```
 
 This event is emitted when a locally registered optimistic send later fails. WebQQ also marks the message with `send_error` so the UI can show a failed-send tag.
+
+Portal message:
+
+```python
+{
+  "chat_id": "group_123456",
+  "chat_type": "group",
+  "text": "message typed in the WebQQ composer",
+  "reply_to": "123456789",
+  "source": "ui_portal"
+}
+```
+
+Portal messages are sent from the WebQQ UI directly to one selected plugin. They are not sent to QQ and are not added to chat history unless the plugin sends its own message through `ctx.send_message`.
 
 ## Context API
 
