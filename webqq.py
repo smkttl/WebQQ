@@ -886,6 +886,9 @@ class PluginContext:
     def get_chats(self):
         return self.manager.store.get_chats()
 
+    def get_self_user(self):
+        return dict(self.manager.store._self_user)
+
     async def napcat(self, action, params=None, timeout=10):
         return await self.manager.napcat._request(action, params or {}, timeout=timeout)
 
@@ -2484,6 +2487,7 @@ async def handle_plugin_portal_message(request):
         "text": text,
         "reply_to": reply_to,
         "source": "ui_portal",
+        "self_user": dict(request.app["store"]._self_user),
     }
     try:
         await request.app["plugins"].dispatch_portal_message(plugin_id, message)

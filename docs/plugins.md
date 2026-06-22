@@ -189,7 +189,8 @@ Portal message:
   "chat_type": "group",
   "text": "message typed in the WebQQ composer",
   "reply_to": "123456789",
-  "source": "ui_portal"
+  "source": "ui_portal",
+  "self_user": {"user_id": "10001", "name": "You"}
 }
 ```
 
@@ -218,6 +219,7 @@ await ctx.fetch_history(chat_id, before_message_id=None, count=50)
 Local reads:
 
 ```python
+ctx.get_self_user()
 ctx.get_messages(chat_id, limit=50, before=None)
 ctx.get_chats()
 ```
