@@ -122,7 +122,7 @@ class MessageStore:
         self.maxlen = maxlen
         self._data = defaultdict(lambda: deque(maxlen=maxlen))
         self._chat_meta = {}
-        self._data_dir = data_dir
+        self._data_dir = Path(data_dir)
         self._dirty = set()
         self._nicknames = {}  # uid -> nickname
         self._group_members = defaultdict(dict)  # chat_id -> {uid: nickname}
@@ -133,7 +133,7 @@ class MessageStore:
         self._pending_local_reactions = {}  # (message_id, emoji_id) -> user
         self._pending_local_messages = defaultdict(list)  # chat_id -> optimistic messages awaiting message_sent
         self._self_user = {"user_id": "self", "name": "You"}
-        data_dir.mkdir(exist_ok=True)
+        self._data_dir.mkdir(exist_ok=True)
 
     def _chat_path(self, chat_id):
         return self._data_dir / f"{chat_id}.json"
