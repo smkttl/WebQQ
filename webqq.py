@@ -204,12 +204,25 @@ class MessageStore:
         last = msgs[-1]
         self._chat_meta[chat_id] = {
             "chat_id": chat_id,
-            "name": last.get("chat_name") or self._chat_meta.get(chat_id, {}).get("name") or chat_id,
+            "name": self._message_chat_display_name(chat_id, last),
             "type": last.get("type", ""),
             "last_time": last.get("time", 0),
             "last_text": (last.get("content", "") or "")[:50],
             "avatar_url": chat_avatar_url(chat_id, last.get("type", ""), last.get("user_id"), last.get("group_id")),
         }
+
+    def _message_chat_display_name(self, chat_id, message):
+        parsed = parse_chat_id(chat_id)
+        if parsed and parsed["type"] == "private":
+            uid = str(parsed["private_id"])
+            chat_name = str(message.get("chat_name") or "")
+            sender_name = str(message.get("sender_name") or "")
+            if chat_name.startswith("群临时会话") or chat_name.endswith(" / 临时会话") or chat_name.endswith(" / 群临时会话"):
+                chat_name = ""
+            if sender_name in ("临时会话", "群临时会话"):
+                sender_name = ""
+            return self._nicknames.get(uid) or chat_name or sender_name or uid
+        return message.get("chat_name") or self._chat_meta.get(chat_id, {}).get("name") or chat_id
 
     def remember_private_user(self, user_id):
         if user_id is not None:
@@ -385,14 +398,15 @@ class MessageStore:
     def _update_chat_meta_from_message(self, chat_id, simplified):
         chat_id = canonical_chat_id(chat_id)
         if chat_id not in self._chat_meta:
-            self.ensure_chat(chat_id, simplified.get("chat_name") or chat_id, simplified.get("type", ""))
+            self.ensure_chat(chat_id, self._message_chat_display_name(chat_id, simplified), simplified.get("type", ""))
         current_name = self._chat_meta[chat_id].get("name", chat_id)
         is_known_private_temp = (
             chat_id.startswith("private_")
             and str(simplified.get("user_id") or "") in self._known_private_users
             and simplified.get("temp_group_id")
         )
-        self._chat_meta[chat_id]["name"] = current_name if is_known_private_temp else (simplified.get("chat_name") or current_name)
+        display_name = self._message_chat_display_name(chat_id, simplified)
+        self._chat_meta[chat_id]["name"] = current_name if is_known_private_temp else (display_name or current_name)
         self._chat_meta[chat_id]["avatar_url"] = chat_avatar_url(chat_id, simplified.get("type", ""), simplified.get("user_id"), simplified.get("group_id"))
         self._chat_meta[chat_id]["last_time"] = simplified.get("time", 0)
         self._chat_meta[chat_id]["last_text"] = (simplified.get("content", "") or "")[:50]
@@ -654,8 +668,12 @@ class MessageStore:
                 temp_group_id = msg.get("group_id")
                 temp_group_name = msg.get("group_name", "")
                 sender_name = sender.get("card") or sender.get("nickname") or str(msg.get("user_id", ""))
-                group_name = msg.get("group_name", "")
-                chat_name = f"{group_name} / {sender_name}" if group_name else f"群临时会话: {sender_name}"
+                if sender_name in ("临时会话", "群临时会话"):
+                    chat_name = str(msg.get("user_id", ""))
+                elif temp_group_name:
+                    chat_name = f"{temp_group_name} / {sender_name}"
+                else:
+                    chat_name = sender_name
             else:
                 chat_name = sender.get("nickname", str(msg.get("user_id", "")))
         if sender.get("user_id"):
@@ -2032,15 +2050,19 @@ async def handle_temp_chat(request):
         return web.json_response({"ok": False, "error": "group_id and user_id are required"}, status=400)
     name = str(body.get("name", "")).strip()
     group_name = str(body.get("group_name", "")).strip()
+    sender_name = str(body.get("sender_name", "")).strip()
+    if name.startswith("群临时会话") or name.endswith(" / 临时会话") or name.endswith(" / 群临时会话"):
+        name = ""
+    if sender_name in ("临时会话", "群临时会话"):
+        sender_name = ""
     if not name:
-        sender_name = str(body.get("sender_name", "")).strip() or user_id
-        name = f"{group_name} / {sender_name}" if group_name else f"群临时会话: {sender_name}"
+        name = sender_name or user_id
     chat_id = f"private_{user_id}"
     store = request.app["store"]
     store.remember_temp_context(user_id, group_id, group_name)
     display_name = store._chat_meta.get(chat_id, {}).get("name") or store._nicknames.get(user_id) or name
     store.ensure_chat(chat_id, display_name, "private", user_id=int(user_id), temp_group_id=int(group_id), temp_group_name=group_name)
-    return web.json_response({"ok": True, "chat_id": chat_id, "name": name})
+    return web.json_response({"ok": True, "chat_id": chat_id, "name": display_name})
 
 
 async def handle_send(request):
