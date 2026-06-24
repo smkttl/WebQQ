@@ -3,3 +3,5 @@ data/
 __pycache__/
 *.pyc
 .env
+plugins/*/config.json
+!plugins/*/config.json.example
