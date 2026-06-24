@@ -142,7 +142,7 @@ Notes:
 - Use `message["self"]` to detect messages from the logged-in account.
 - `message["source"]` is `"user"` for WebQQ UI sends and `plugin:<id>` for messages sent through `ctx.send_message`.
 - Loop avoidance is the plugin's responsibility.
-- `chat_id` is one of `group_<group_id>`, `private_<user_id>`, or `temp_<group_id>_<user_id>`.
+- `chat_id` is one of `group_<group_id>` or `private_<user_id>`. Legacy `temp_<group_id>_<user_id>` IDs are accepted by WebQQ APIs as aliases for `private_<user_id>`, but new plugin events use the canonical private ID.
 - `raw` is the original NapCat event payload.
 
 Notice event:

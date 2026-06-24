@@ -862,7 +862,7 @@ async function selectChat(chatId, name) {
 }
 
 function markCurrentChatRead(chatId) {
-  if (!chatId || chatId.startsWith('temp_')) return;
+  if (!chatId) return;
   api('/api/mark-read', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -2165,10 +2165,6 @@ async function doSend() {
 
 async function doSendFile(file) {
   if (!currentChat || !file) return;
-  if (currentChat.startsWith('temp_')) {
-    showModal('File sending is not supported for temporary chats.');
-    return;
-  }
   if (file.size > 100 * 1024 * 1024) {
     showModal('File is larger than 100 MB.');
     return;
@@ -2431,10 +2427,6 @@ $('sendInput').addEventListener('blur', () => {
 
 $('attachButton').addEventListener('click', () => {
   if (!currentChat) return;
-  if (currentChat.startsWith('temp_')) {
-    showModal('File sending is not supported for temporary chats.');
-    return;
-  }
   $('fileInput').click();
 });
 

@@ -62,6 +62,15 @@ def parse_chat_id(chat_id):
     return None
 
 
+def canonical_chat_id(chat_id):
+    parsed = parse_chat_id(chat_id)
+    if not parsed:
+        return chat_id
+    if parsed["type"] == "temp":
+        return f"private_{parsed['user_id']}"
+    return chat_id
+
+
 def avatar_url_for(avatar_type, avatar_id):
     if str(avatar_id).isdigit() and avatar_type in ("user", "group"):
         return f"/api/avatar?type={avatar_type}&id={avatar_id}"
@@ -114,6 +123,8 @@ class MessageStore:
         self._nicknames = {}  # uid -> nickname
         self._group_members = defaultdict(dict)  # chat_id -> {uid: nickname}
         self._group_member_details = defaultdict(list)  # chat_id -> [{user_id, names...}]
+        self._known_private_users = set()
+        self._private_temp_contexts = {}  # uid -> {group_id, group_name}
         self._message_chat_index = {}  # message_id -> chat_id
         self._pending_local_reactions = {}  # (message_id, emoji_id) -> user
         self._pending_local_messages = defaultdict(list)  # chat_id -> optimistic messages awaiting message_sent
@@ -125,25 +136,99 @@ class MessageStore:
 
     def load_all(self):
         for fp in self._data_dir.glob("*.json"):
-            chat_id = fp.stem
+            source_chat_id = fp.stem
+            chat_id = canonical_chat_id(source_chat_id)
             try:
                 with open(fp, encoding="utf-8") as f:
                     msgs = json.load(f)
                 if isinstance(msgs, list):
-                    self._data[chat_id] = deque(msgs[-self.maxlen:], maxlen=self.maxlen)
+                    for msg in msgs[-self.maxlen:]:
+                        if isinstance(msg, dict):
+                            normalized = self._normalize_loaded_message(source_chat_id, msg)
+                            self._append_dedup(chat_id, normalized)
+                    self._sort_and_trim_chat(chat_id)
                     self._reindex_chat(chat_id)
-                    if msgs:
-                        last = msgs[-1]
-                        self._chat_meta[chat_id] = {
-                            "chat_id": chat_id,
-                            "name": last.get("chat_name", chat_id),
-                            "type": last.get("type", ""),
-                            "last_time": last.get("time", 0),
-                            "last_text": (last.get("content", "") or "")[:50],
-                            "avatar_url": chat_avatar_url(chat_id, last.get("type", ""), last.get("user_id"), last.get("group_id")),
-                        }
+                    self._refresh_chat_meta(chat_id)
             except Exception:
                 pass
+
+    def _normalize_loaded_message(self, source_chat_id, msg):
+        normalized = dict(msg)
+        source_parsed = parse_chat_id(source_chat_id)
+        original_chat_id = normalized.get("chat_id") or source_chat_id
+        parsed = parse_chat_id(original_chat_id) or source_parsed
+        if parsed and parsed["type"] == "temp":
+            normalized.setdefault("temp_group_id", parsed["group_id"])
+            if normalized.get("group_name"):
+                normalized.setdefault("temp_group_name", normalized.get("group_name"))
+            self.remember_temp_context(parsed["user_id"], parsed["group_id"], normalized.get("group_name") or normalized.get("temp_group_name") or "")
+            normalized["chat_id"] = f"private_{parsed['user_id']}"
+            normalized["type"] = "private"
+            normalized["user_id"] = parsed["user_id"]
+        elif parsed and parsed["type"] == "private":
+            normalized["chat_id"] = f"private_{parsed['private_id']}"
+            normalized["type"] = "private"
+            normalized["user_id"] = normalized.get("user_id") or parsed["private_id"]
+        else:
+            normalized["chat_id"] = canonical_chat_id(original_chat_id)
+        return normalized
+
+    @staticmethod
+    def _dedup_key(msg):
+        message_id = msg.get("message_id")
+        if message_id is not None:
+            return ("id", str(message_id))
+        return (
+            "fallback",
+            str(msg.get("time", "")),
+            str(msg.get("sender_id", "")),
+            str(msg.get("content", "")),
+        )
+
+    def _append_dedup(self, chat_id, msg):
+        key = self._dedup_key(msg)
+        for existing in self._data.get(chat_id, []):
+            if self._dedup_key(existing) == key:
+                return False
+        self._data[chat_id].append(msg)
+        return True
+
+    def _sort_and_trim_chat(self, chat_id):
+        items = sorted(self._data.get(chat_id, []), key=lambda item: (item.get("time", 0), str(item.get("message_id", ""))))
+        self._data[chat_id] = deque(items[-self.maxlen:], maxlen=self.maxlen)
+
+    def _refresh_chat_meta(self, chat_id):
+        msgs = self._data.get(chat_id)
+        if not msgs:
+            return
+        last = msgs[-1]
+        self._chat_meta[chat_id] = {
+            "chat_id": chat_id,
+            "name": last.get("chat_name") or self._chat_meta.get(chat_id, {}).get("name") or chat_id,
+            "type": last.get("type", ""),
+            "last_time": last.get("time", 0),
+            "last_text": (last.get("content", "") or "")[:50],
+            "avatar_url": chat_avatar_url(chat_id, last.get("type", ""), last.get("user_id"), last.get("group_id")),
+        }
+
+    def remember_private_user(self, user_id):
+        if user_id is not None:
+            self._known_private_users.add(str(user_id))
+
+    def remember_temp_context(self, user_id, group_id, group_name=""):
+        if user_id is None or group_id is None:
+            return
+        uid = str(user_id)
+        context = {"group_id": int(group_id)}
+        if group_name:
+            context["group_name"] = str(group_name)
+        self._private_temp_contexts[uid] = context
+
+    def private_send_context(self, user_id):
+        uid = str(user_id)
+        if uid in self._known_private_users:
+            return {}
+        return dict(self._private_temp_contexts.get(uid) or {})
 
     def flush(self, chat_id=None):
         targets = [chat_id] if chat_id else list(self._dirty)
@@ -162,10 +247,11 @@ class MessageStore:
         if mt == "group":
             return f"group_{msg['group_id']}"
         if mt == "private":
-            if msg.get("sub_type") == "group" and msg.get("group_id"):
-                user_id = msg.get("target_id") if msg.get("post_type") == "message_sent" and msg.get("target_id") else msg.get("user_id")
-                return f"temp_{msg['group_id']}_{user_id}"
             user_id = msg.get("target_id") if msg.get("post_type") == "message_sent" and msg.get("target_id") else msg.get("user_id")
+            if msg.get("sub_type") == "group" and msg.get("group_id"):
+                self.remember_temp_context(user_id, msg.get("group_id"), msg.get("group_name", ""))
+            else:
+                self.remember_private_user(user_id)
             return f"private_{user_id}"
         return None
 
@@ -297,14 +383,22 @@ class MessageStore:
         return True
 
     def _update_chat_meta_from_message(self, chat_id, simplified):
+        chat_id = canonical_chat_id(chat_id)
         if chat_id not in self._chat_meta:
             self.ensure_chat(chat_id, simplified.get("chat_name") or chat_id, simplified.get("type", ""))
-        self._chat_meta[chat_id]["name"] = simplified.get("chat_name") or self._chat_meta[chat_id].get("name", chat_id)
+        current_name = self._chat_meta[chat_id].get("name", chat_id)
+        is_known_private_temp = (
+            chat_id.startswith("private_")
+            and str(simplified.get("user_id") or "") in self._known_private_users
+            and simplified.get("temp_group_id")
+        )
+        self._chat_meta[chat_id]["name"] = current_name if is_known_private_temp else (simplified.get("chat_name") or current_name)
         self._chat_meta[chat_id]["avatar_url"] = chat_avatar_url(chat_id, simplified.get("type", ""), simplified.get("user_id"), simplified.get("group_id"))
         self._chat_meta[chat_id]["last_time"] = simplified.get("time", 0)
         self._chat_meta[chat_id]["last_text"] = (simplified.get("content", "") or "")[:50]
 
     def add_system_message(self, chat_id, text, notice_type="", sub_type="", **extra):
+        chat_id = canonical_chat_id(chat_id)
         parsed = parse_chat_id(chat_id)
         if not parsed or not text:
             return None
@@ -341,6 +435,7 @@ class MessageStore:
         return simplified
 
     def mark_recalled(self, message_id, chat_id=None, operator_id=None, recalled_at=None):
+        chat_id = canonical_chat_id(chat_id)
         key = str(message_id)
         indexed_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
         known_chat_id = chat_id if chat_id in self._data else indexed_chat_id
@@ -360,6 +455,7 @@ class MessageStore:
         return None
 
     def oldest_message_id(self, chat_id, before=None):
+        chat_id = canonical_chat_id(chat_id)
         candidates = list(self._data.get(chat_id, []))
         if before:
             candidates = [m for m in candidates if m.get("time", 0) < before]
@@ -379,12 +475,14 @@ class MessageStore:
                 self._message_chat_index[str(message_id)] = chat_id
 
     def remember_local_reaction(self, message_id, emoji_id, chat_id=None):
+        chat_id = canonical_chat_id(chat_id)
         key = (str(message_id), str(emoji_id))
         self._pending_local_reactions[key] = dict(self._self_user)
         if chat_id and chat_id in self._data:
             self._message_chat_index.setdefault(str(message_id), chat_id)
 
     def add_local_reaction(self, message_id, emoji_id, chat_id=None):
+        chat_id = canonical_chat_id(chat_id)
         key = str(message_id)
         emoji_id = str(emoji_id)
         known_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
@@ -529,6 +627,7 @@ class MessageStore:
         return None
 
     def find_message(self, message_id, chat_id=None):
+        chat_id = canonical_chat_id(chat_id)
         key = str(message_id)
         chat_ids = [chat_id] if chat_id in self._data else []
         indexed = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
@@ -545,11 +644,15 @@ class MessageStore:
         chat_name = ""
         mt = msg.get("message_type", "")
         chat_type = mt
+        temp_group_id = None
+        temp_group_name = ""
         if mt == "group":
             chat_name = msg.get("group_name", "")
         if mt == "private":
             if msg.get("sub_type") == "group" and msg.get("group_id"):
-                chat_type = "temp"
+                chat_type = "private"
+                temp_group_id = msg.get("group_id")
+                temp_group_name = msg.get("group_name", "")
                 sender_name = sender.get("card") or sender.get("nickname") or str(msg.get("user_id", ""))
                 group_name = msg.get("group_name", "")
                 chat_name = f"{group_name} / {sender_name}" if group_name else f"群临时会话: {sender_name}"
@@ -578,6 +681,8 @@ class MessageStore:
             "chat_id": self.chat_key(msg),
             "type": chat_type,
             "group_id": msg.get("group_id"),
+            "temp_group_id": temp_group_id,
+            "temp_group_name": temp_group_name,
             "user_id": msg.get("user_id"),
             "chat_name": chat_name,
             "self": (
@@ -816,6 +921,7 @@ class MessageStore:
         }
 
     def get_messages(self, chat_id, limit=50, before=None):
+        chat_id = canonical_chat_id(chat_id)
         msgs = list(self._data.get(chat_id, []))
         if before:
             msgs = [m for m in msgs if m["time"] < before]
@@ -1190,6 +1296,7 @@ class NapCatConnection:
                     uid = f.get("user_id")
                     if uid:
                         name = f.get("nickname", "") or f.get("remark", "") or str(uid)
+                        self.store.remember_private_user(uid)
                         self.store.ensure_chat(f"private_{uid}", name, "private")
                         self.store._nicknames[str(uid)] = name
         except Exception:
@@ -1480,7 +1587,11 @@ class NapCatConnection:
         if parsed["type"] == "group":
             return await self._request("send_group_msg", {"group_id": parsed["group_id"], "message": message})
         if parsed["type"] == "private":
-            return await self._request("send_private_msg", {"user_id": parsed["private_id"], "message": message})
+            params = {"user_id": parsed["private_id"], "message": message}
+            context = self.store.private_send_context(parsed["private_id"])
+            if context.get("group_id"):
+                params["group_id"] = context["group_id"]
+            return await self._request("send_private_msg", params)
         return await self._request("send_private_msg", {
             "user_id": parsed["user_id"],
             "group_id": parsed["group_id"],
@@ -1500,12 +1611,21 @@ class NapCatConnection:
                 "name": name,
             }, timeout=60)
         if parsed["type"] == "private":
-            return await self._request("upload_private_file", {
+            params = {
                 "user_id": parsed["private_id"],
                 "file": path,
                 "name": name,
-            }, timeout=60)
-        raise ValueError("file sending is not supported for temporary chats")
+            }
+            context = self.store.private_send_context(parsed["private_id"])
+            if context.get("group_id"):
+                params["group_id"] = context["group_id"]
+            return await self._request("upload_private_file", params, timeout=60)
+        return await self._request("upload_private_file", {
+            "user_id": parsed["user_id"],
+            "group_id": parsed["group_id"],
+            "file": path,
+            "name": name,
+        }, timeout=60)
 
     async def resolve_file_locations(self, file_id="", file_path="", busid="", url="", chat_id="", filename=""):
         urls = []
@@ -1579,8 +1699,10 @@ class NapCatConnection:
 
     async def fetch_history(self, chat_id, before_message_id=None, count=50):
         parsed = parse_chat_id(chat_id)
-        if not parsed or parsed["type"] == "temp":
+        if not parsed:
             return []
+        if parsed["type"] == "temp":
+            parsed = {"type": "private", "private_id": parsed["user_id"]}
         params = {
             "count": max(1, min(int(count or 50), 50)),
             "parse_mult_msg": True,
@@ -1603,8 +1725,10 @@ class NapCatConnection:
 
     async def mark_chat_read(self, chat_id):
         parsed = parse_chat_id(chat_id)
-        if not parsed or parsed["type"] == "temp":
+        if not parsed:
             return None
+        if parsed["type"] == "temp":
+            parsed = {"type": "private", "private_id": parsed["user_id"]}
         if parsed["type"] == "group":
             return await self._request("mark_group_msg_as_read", {"group_id": str(parsed["group_id"])}, timeout=5)
         return await self._request("mark_private_msg_as_read", {"user_id": str(parsed["private_id"])}, timeout=5)
@@ -1785,6 +1909,8 @@ def update_chat_after_local_send(store, chat_id, parsed_chat, text, now=None):
 
 
 async def send_text_and_register(napcat, store, chat_id, text, reply_to=None, source="user", optimistic=False):
+    upstream_chat_id = chat_id
+    chat_id = canonical_chat_id(chat_id)
     parsed_chat = parse_chat_id(chat_id)
     if not parsed_chat:
         raise ValueError("invalid chat_id")
@@ -1795,7 +1921,7 @@ async def send_text_and_register(napcat, store, chat_id, text, reply_to=None, so
         update_chat_after_local_send(store, chat_id, parsed_chat, text, now=simplified["time"])
         await napcat._broadcast({"type": "new_message", "data": simplified})
         dispatch_plugin_message_later(napcat, simplified, raw=None)
-    result = await napcat.send_message(chat_id, text, reply_to=reply_to)
+    result = await napcat.send_message(upstream_chat_id, text, reply_to=reply_to)
     if not result or result.get("status") != "ok":
         err = result.get("wording", result.get("message", "send failed")) if result else "not connected"
         if simplified:
@@ -1873,7 +1999,7 @@ async def handle_messages(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     store = request.app["store"]
-    chat_id = request.query.get("chat_id", "")
+    chat_id = canonical_chat_id(request.query.get("chat_id", ""))
     try:
         limit = max(1, min(int(request.query.get("limit", "50")), 200))
     except (TypeError, ValueError):
@@ -1909,9 +2035,11 @@ async def handle_temp_chat(request):
     if not name:
         sender_name = str(body.get("sender_name", "")).strip() or user_id
         name = f"{group_name} / {sender_name}" if group_name else f"群临时会话: {sender_name}"
-    chat_id = f"temp_{group_id}_{user_id}"
+    chat_id = f"private_{user_id}"
     store = request.app["store"]
-    store.ensure_chat(chat_id, name, "temp", group_id=int(group_id), user_id=int(user_id), group_name=group_name)
+    store.remember_temp_context(user_id, group_id, group_name)
+    display_name = store._chat_meta.get(chat_id, {}).get("name") or store._nicknames.get(user_id) or name
+    store.ensure_chat(chat_id, display_name, "private", user_id=int(user_id), temp_group_id=int(group_id), temp_group_name=group_name)
     return web.json_response({"ok": True, "chat_id": chat_id, "name": name})
 
 
@@ -1979,8 +2107,8 @@ async def handle_send_file(request):
             return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
         if not parsed_chat:
             return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
-        if parsed_chat["type"] not in ("group", "private"):
-            return web.json_response({"ok": False, "error": "file sending is not supported for temporary chats"}, status=400)
+        canonical_id = canonical_chat_id(chat_id)
+        canonical_parsed = parse_chat_id(canonical_id)
         if not temp_path:
             return web.json_response({"ok": False, "error": "file is required"}, status=400)
         if too_large:
@@ -2009,19 +2137,19 @@ async def handle_send_file(request):
             "records": [],
             "extra_segments": [],
             "reactions": [],
-            "chat_id": chat_id,
-            "type": parsed_chat["type"],
-            "group_id": parsed_chat.get("group_id"),
-            "user_id": parsed_chat.get("user_id") or parsed_chat.get("private_id"),
+            "chat_id": canonical_id,
+            "type": canonical_parsed["type"],
+            "group_id": canonical_parsed.get("group_id"),
+            "user_id": canonical_parsed.get("user_id") or canonical_parsed.get("private_id"),
             "chat_name": "",
             "self": True,
         }
-        store.register_pending_local_message(chat_id, simplified)
-        if chat_id not in store._chat_meta:
-            store.ensure_chat(chat_id, chat_id, parsed_chat["type"])
-        store._chat_meta[chat_id]["last_time"] = now
-        store._chat_meta[chat_id]["last_text"] = "[file]"
-        store._dirty.add(chat_id)
+        store.register_pending_local_message(canonical_id, simplified)
+        if canonical_id not in store._chat_meta:
+            store.ensure_chat(canonical_id, canonical_id, canonical_parsed["type"])
+        store._chat_meta[canonical_id]["last_time"] = now
+        store._chat_meta[canonical_id]["last_text"] = "[file]"
+        store._dirty.add(canonical_id)
         await napcat._broadcast({"type": "new_message", "data": simplified})
         return web.json_response({"ok": True, "data": result})
     except Exception as e:
@@ -2041,6 +2169,7 @@ async def handle_message_emoji_like(request):
     message_id = str(body.get("message_id", "")).strip()
     emoji_id = str(body.get("emoji_id", "")).strip()
     chat_id = str(body.get("chat_id", "")).strip()
+    chat_id = canonical_chat_id(chat_id)
     if not is_int_string(message_id):
         return web.json_response({"ok": False, "error": "message_id is required"}, status=400)
     if not emoji_id.isdigit():
@@ -2075,6 +2204,7 @@ async def handle_message_revoke(request):
     body = await read_json_body(request)
     message_id = str(body.get("message_id", "")).strip()
     chat_id = str(body.get("chat_id", "")).strip()
+    chat_id = canonical_chat_id(chat_id)
     if not is_int_string(message_id):
         return web.json_response({"ok": False, "error": "message_id is required"}, status=400)
     found = request.app["store"].find_message(message_id, chat_id=chat_id if parse_chat_id(chat_id) else None)
@@ -2119,7 +2249,7 @@ async def handle_message_emoji_likes(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     message_id = str(request.query.get("message_id", "")).strip()
-    chat_id = request.query.get("chat_id", "")
+    chat_id = canonical_chat_id(request.query.get("chat_id", ""))
     emoji_id = str(request.query.get("emoji_id", "")).strip()
     if not is_int_string(message_id):
         return web.json_response({"error": "message_id is required"}, status=400)
@@ -2475,6 +2605,8 @@ async def handle_plugin_portal_message(request):
     parsed_chat = parse_chat_id(chat_id)
     if not parsed_chat:
         return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    chat_id = canonical_chat_id(chat_id)
+    parsed_chat = parse_chat_id(chat_id)
     if not isinstance(text, str):
         return web.json_response({"ok": False, "error": "text is required"}, status=400)
     if reply_to is not None:
