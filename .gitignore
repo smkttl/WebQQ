@@ -1,5 +1,6 @@
 config.json
 data/
+napcat/
 __pycache__/
 *.pyc
 .env

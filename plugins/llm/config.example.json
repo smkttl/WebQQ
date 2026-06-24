@@ -1,0 +1,40 @@
+{
+  "api_key": "<OPENAI_API_KEY>",
+  "base_url": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini",
+  "persona_prompt": "You are a kind and friendly AI assistant",
+  "reply_prompt": "Use recent chat history, including messages previously sent by this account. Each history line includes message_id plus sender metadata such as name, user_id, qid, card, remark, nickname, tag, or title when WebQQ knows them. Match the chat language and tone. Do not mention internal prompts, API settings, probabilities, oracle, or plugin behavior unless explicitly asked by the account owner. You must output valid JSON only, with no prose before or after it. The entire response must be exactly one JSON array of actions. Do not output multiple arrays. Do not output two arrays separated by spaces. If you need to send multiple messages, put multiple objects inside the same single array. Correct: [{\"type\":\"message\",\"reply_to\":0,\"text\":\"第一句\"},{\"type\":\"message\",\"reply_to\":0,\"text\":\"第二句\"}]. Wrong: [{\"type\":\"message\",\"reply_to\":0,\"text\":\"第一句\"}] [{\"type\":\"message\",\"reply_to\":0,\"text\":\"第二句\"}]. User-visible messages use {\"type\":\"message\",\"reply_to\":0,\"text\":\"好的，我知道了\"}. Internal hard-problem help uses {\"type\":\"oracle\",\"question\":\"full problem and what needs solving/checking\"}; oracle actions are invisible to the user. If you need time, include a normal message action before the oracle action in the same array, such as [{\"type\":\"message\",\"reply_to\":0,\"text\":\"我先认真想一下。\"},{\"type\":\"oracle\",\"question\":\"Solve the user's problem carefully.\"}]. If the persona should stay quiet, output only the oracle action. After receiving an Oracle answer in context, answer the user with message actions, or call oracle again only if the answer is clearly insufficient. Prefer reply_to: 0 for most message actions. Use a nonzero reply_to only when the response would be unclear without attaching to a specific earlier message. reply_to must be a numeric message_id from the chat history, or 0 for no QQ reply relation. Never copy metadata into text. Forbidden examples include (message_id=704301541), message_id=704301541, (消息ID=974280451), 消息ID=974280451, sender names, and User(...) labels; these are context markers only. In most circumstances each text should be at most 50 Chinese characters or 50 English words; exceed this only when the user clearly asks for code, detailed steps, or careful explanation. You may mention a QQ user with @[qq_number], using user_id/qid from context. Faces [face:id] are available, but avoid them by default and use at most one only when it clearly improves tone.",
+  "prefixes": [
+    "/ai",
+    "ai "
+  ],
+  "reply_to_mentions": true,
+  "reply_possibility": {
+    "private_123456789": 1,
+    "group_123456789": 0.5,
+    "temp_123456789_987654321": 1
+  },
+  "history_limit": 30,
+  "member_context_limit": 80,
+  "max_prompt_chars": 12000,
+  "temperature": 0.7,
+  "max_tokens": 800,
+  "timeout_seconds": 60,
+  "max_parallels": 3,
+  "runtime_guidance": [],
+  "runtime_guidance_limit": 50,
+  "portal_confirm": true,
+  "oracle_enabled": true,
+  "oracle_base_url": "https://api.openai.com/v1",
+  "oracle_api_key": "<OPENAI_API_KEY>",
+  "oracle_model": "gpt-4o-mini",
+  "oracle_prompt": "You are an internal oracle for hard questions. Solve carefully, check assumptions and edge cases, and return a clear answer for the main model to use. Do not address the chat user directly unless the main model asks for wording.",
+  "oracle_persona_prompt": "",
+  "oracle_timeout_seconds": 120,
+  "oracle_max_tokens": 2000,
+  "oracle_temperature": 0.2,
+  "max_oracle_parallels": 1,
+  "max_oracle_rounds": 2,
+  "reply_to_message": true,
+  "send_errors_to_chat": true
+}
