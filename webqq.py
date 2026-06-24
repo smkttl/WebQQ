@@ -93,6 +93,10 @@ def chat_avatar_url(chat_id, chat_type="", user_id=None, group_id=None):
     return ""
 
 
+def is_placeholder_name(value):
+    return str(value or "").strip() in ("临时会话", "群临时会话")
+
+
 def load_config():
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -169,6 +173,12 @@ class MessageStore:
             normalized["chat_id"] = f"private_{parsed['private_id']}"
             normalized["type"] = "private"
             normalized["user_id"] = normalized.get("user_id") or parsed["private_id"]
+            if normalized.get("temp_group_id"):
+                self.remember_temp_context(
+                    parsed["private_id"],
+                    normalized.get("temp_group_id"),
+                    normalized.get("temp_group_name") or "",
+                )
         else:
             normalized["chat_id"] = canonical_chat_id(original_chat_id)
         return normalized
@@ -209,7 +219,27 @@ class MessageStore:
             "last_time": last.get("time", 0),
             "last_text": (last.get("content", "") or "")[:50],
             "avatar_url": chat_avatar_url(chat_id, last.get("type", ""), last.get("user_id"), last.get("group_id")),
+            **{
+                k: last.get(k)
+                for k in ("user_id", "group_id", "temp_group_id", "temp_group_name")
+                if last.get(k) is not None
+            },
         }
+
+    def refresh_private_temp_names_for_group(self, group_id):
+        group_id = int(group_id)
+        for chat_id, meta in list(self._chat_meta.items()):
+            parsed = parse_chat_id(chat_id)
+            if not parsed or parsed["type"] != "private":
+                continue
+            uid = str(parsed["private_id"])
+            context = self._private_temp_contexts.get(uid) or {}
+            meta_group_id = meta.get("temp_group_id")
+            if context.get("group_id") != group_id and meta_group_id != group_id:
+                continue
+            name = self._temp_group_member_name(uid, {"temp_group_id": group_id})
+            if name:
+                meta["name"] = name
 
     def _message_chat_display_name(self, chat_id, message):
         parsed = parse_chat_id(chat_id)
@@ -219,10 +249,41 @@ class MessageStore:
             sender_name = str(message.get("sender_name") or "")
             if chat_name.startswith("群临时会话") or chat_name.endswith(" / 临时会话") or chat_name.endswith(" / 群临时会话"):
                 chat_name = ""
-            if sender_name in ("临时会话", "群临时会话"):
+            if is_placeholder_name(sender_name):
                 sender_name = ""
-            return self._nicknames.get(uid) or chat_name or sender_name or uid
+            group_member_name = self._temp_group_member_name(uid, message)
+            return self._nicknames.get(uid) or group_member_name or chat_name or sender_name or uid
         return message.get("chat_name") or self._chat_meta.get(chat_id, {}).get("name") or chat_id
+
+    def _temp_group_member_name(self, user_id, message=None):
+        uid = str(user_id)
+        group_id = None
+        if isinstance(message, dict):
+            group_id = message.get("temp_group_id") or message.get("group_id")
+        if not group_id:
+            group_id = (self._private_temp_contexts.get(uid) or {}).get("group_id")
+        if group_id:
+            name = self._group_members.get(f"group_{group_id}", {}).get(uid)
+            if name and not is_placeholder_name(name):
+                return name
+        return ""
+
+    def resolve_display_name(self, user_id, fallback="", group_id=None):
+        uid = str(user_id or "")
+        if not uid:
+            return fallback if not is_placeholder_name(fallback) else ""
+        if uid == str(self._self_user.get("user_id") or ""):
+            name = self._self_user.get("name")
+            if name and not is_placeholder_name(name):
+                return name
+        if group_id:
+            name = self._group_members.get(f"group_{group_id}", {}).get(uid)
+            if name and not is_placeholder_name(name):
+                return name
+        name = self._nicknames.get(uid)
+        if name and not is_placeholder_name(name):
+            return name
+        return "" if is_placeholder_name(fallback) else fallback
 
     def remember_private_user(self, user_id):
         if user_id is not None:
@@ -668,7 +729,7 @@ class MessageStore:
                 temp_group_id = msg.get("group_id")
                 temp_group_name = msg.get("group_name", "")
                 sender_name = sender.get("card") or sender.get("nickname") or str(msg.get("user_id", ""))
-                if sender_name in ("临时会话", "群临时会话"):
+                if is_placeholder_name(sender_name):
                     chat_name = str(msg.get("user_id", ""))
                 elif temp_group_name:
                     chat_name = f"{temp_group_name} / {sender_name}"
@@ -752,8 +813,8 @@ class MessageStore:
                 elif t == "face":
                     parts.append(f"[face:{d.get('id', '')}]")
                 elif t == "at":
-                    qq = d.get("qq", "")
-                    nick = self._nicknames.get(qq, qq)
+                    qq = str(d.get("qq", ""))
+                    nick = self.resolve_display_name(qq, d.get("name") or qq, group_id=msg.get("group_id"))
                     mentions[qq] = nick
                     parts.append(f"@[{qq}]")
                 elif t == "reply":
@@ -1349,6 +1410,7 @@ class NapCatConnection:
                             self.store._nicknames[uid] = nick
                 self.store._group_members[f"group_{group_id}"] = members
                 self.store._group_member_details[f"group_{group_id}"] = details
+                self.store.refresh_private_temp_names_for_group(group_id)
         except Exception:
             pass
 
@@ -2053,14 +2115,17 @@ async def handle_temp_chat(request):
     sender_name = str(body.get("sender_name", "")).strip()
     if name.startswith("群临时会话") or name.endswith(" / 临时会话") or name.endswith(" / 群临时会话"):
         name = ""
-    if sender_name in ("临时会话", "群临时会话"):
+    if is_placeholder_name(sender_name):
         sender_name = ""
     if not name:
         name = sender_name or user_id
     chat_id = f"private_{user_id}"
     store = request.app["store"]
     store.remember_temp_context(user_id, group_id, group_name)
-    display_name = store._chat_meta.get(chat_id, {}).get("name") or store._nicknames.get(user_id) or name
+    display_name = store.resolve_display_name(user_id, group_id=group_id) or name
+    current_name = store._chat_meta.get(chat_id, {}).get("name")
+    if current_name and current_name != user_id and not is_placeholder_name(current_name):
+        display_name = current_name
     store.ensure_chat(chat_id, display_name, "private", user_id=int(user_id), temp_group_id=int(group_id), temp_group_name=group_name)
     return web.json_response({"ok": True, "chat_id": chat_id, "name": display_name})
 
