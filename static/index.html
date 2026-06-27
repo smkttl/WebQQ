@@ -315,6 +315,8 @@ let plugins = [];
 let selectedPluginId = '';
 let pluginConfigText = '';
 let selectedPortalPluginId = '';
+const faceManifestUrl = 'https://koishi.js.org/QFace/assets/qq_emoji/_index.json';
+const faceAssetBaseUrl = 'https://koishi.js.org/QFace/';
 const revokeWindowSeconds = 120;
 const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
@@ -708,10 +710,38 @@ async function init() {
 
 async function loadFaceManifest() {
   try {
-    const r = await api('/faces/manifest.json');
+    const r = await fetch(faceManifestUrl, {mode: 'cors'});
+    if (!r.ok) return;
     const d = await r.json();
-    if (d && d.faces) faceManifest = d;
+    faceManifest = normalizeFaceManifest(d);
   } catch {}
+}
+
+function normalizeFaceManifest(data) {
+  const faces = {};
+  const reaction_ids = [];
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      const id = String(item && item.emojiId !== undefined ? item.emojiId : '');
+      if (!id) continue;
+      const assets = Array.isArray(item.assets) ? item.assets : [];
+      const png = assets.find(asset => Number(asset && asset.type) === 0) || assets.find(asset => Number(asset && asset.type) === 2);
+      const apng = assets.find(asset => Number(asset && asset.type) === 2) || assets.find(asset => Number(asset && asset.type) === 0);
+      const info = {
+        type: Number(item.emojiType || 0),
+        name: String(item.describe || '').replace(/^\//, '') || id,
+      };
+      if (png && png.path) info.png = new URL(png.path, faceAssetBaseUrl).href;
+      if (apng && apng.path) info.gif = new URL(apng.path, faceAssetBaseUrl).href;
+      faces[id] = info;
+      reaction_ids.push(id);
+    }
+    return {version: 1, source: 'koishi.js.org/QFace/assets/qq_emoji/_index.json', faces, reaction_ids};
+  }
+  if (data && typeof data === 'object' && data.faces) {
+    return data;
+  }
+  return {version: 1, source: '', faces: {}, reaction_ids: []};
 }
 
 async function updateStatus() {
@@ -996,7 +1026,7 @@ function faceText(id) {
 }
 
 function faceAssetUrl(info, kind) {
-  return info && info[kind] ? `/faces/${info[kind]}` : '';
+  return info && info[kind] ? info[kind] : '';
 }
 
 function faceHtml(id) {

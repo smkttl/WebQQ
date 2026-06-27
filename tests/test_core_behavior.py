@@ -116,6 +116,35 @@ class ApiExtractionTests(unittest.TestCase):
         self.assertTrue(callable(api.read_json_body))
 
 
+class FaceManifestTests(unittest.TestCase):
+    def test_koishi_face_manifest_normalization_shape(self):
+        sample = [
+            {
+                "emojiId": "4",
+                "describe": "/得意",
+                "emojiType": 0,
+                "assets": [
+                    {"type": 0, "path": "assets/qq_emoji/4/png/4.png"},
+                    {"type": 2, "path": "assets/qq_emoji/4/apng/4.png"},
+                ],
+            }
+        ]
+        normalized = {
+            "version": 1,
+            "source": "koishi.js.org/QFace/assets/qq_emoji/_index.json",
+            "faces": {
+                "4": {
+                    "type": 0,
+                    "name": "得意",
+                    "png": "https://koishi.js.org/QFace/assets/qq_emoji/4/png/4.png",
+                    "gif": "https://koishi.js.org/QFace/assets/qq_emoji/4/apng/4.png",
+                }
+            },
+            "reaction_ids": ["4"],
+        }
+        self.assertEqual(normalized["faces"]["4"]["name"], sample[0]["describe"].lstrip("/"))
+
+
 class MessageStoreTests(unittest.TestCase):
     def test_temp_history_loads_as_private_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
