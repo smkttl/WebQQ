@@ -90,8 +90,7 @@ class NapCatConnection:
                         details.append(detail)
                         if nick != uid:
                             self.store._nicknames[uid] = nick
-                self.store._group_members[f"group_{group_id}"] = members
-                self.store._group_member_details[f"group_{group_id}"] = details
+                self.store.set_group_members(group_id, members, details)
                 self.store.refresh_private_temp_names_for_group(group_id)
         except Exception:
             pass

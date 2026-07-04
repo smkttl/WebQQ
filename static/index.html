@@ -315,6 +315,8 @@ let plugins = [];
 let selectedPluginId = '';
 let pluginConfigText = '';
 let selectedPortalPluginId = '';
+let selfUser = {user_id: '', name: ''};
+const loadedGroupMembersByChat = new Map();
 const faceManifestUrl = 'https://koishi.js.org/QFace/assets/qq_emoji/_index.json';
 const faceAssetBaseUrl = 'https://koishi.js.org/QFace/';
 const revokeWindowSeconds = 120;
@@ -748,6 +750,7 @@ async function updateStatus() {
   try {
     const r = await api('/api/status');
     const d = await r.json();
+    if (d.self_user) selfUser = d.self_user;
     $('statusDot').className = 'dot ' + (d.napcat_connected ? 'ok' : 'err');
     $('statusText').textContent = d.napcat_connected
       ? `Connected · ${d.chats_count} chats`
@@ -877,6 +880,9 @@ async function selectChat(chatId, name) {
   try {
     await loadNicknames();
     if (token !== chatLoadToken || currentChat !== chatId) return;
+    if (chatId.startsWith('group_')) {
+      await loadGroupMembers(chatId);
+    }
     await loadMessages(chatId);
     if (token !== chatLoadToken || currentChat !== chatId) return;
     const chats = (await (await api('/api/chats')).json()).chats || [];
@@ -888,6 +894,19 @@ async function selectChat(chatId, name) {
     loadingChatId = null;
     showMessagesError('Failed to load messages');
     loadChats();
+  }
+}
+
+async function loadGroupMembers(chatId) {
+  try {
+    const r = await api(`/api/group-members?chat_id=${encodeURIComponent(chatId)}`);
+    if (!r.ok) return [];
+    const d = await r.json();
+    const members = Array.isArray(d.members) ? d.members : [];
+    loadedGroupMembersByChat.set(chatId, new Map(members.map(m => [normalizeMessageId(m.user_id || m.uid), String(m.role || '').toLowerCase()])));
+    return members;
+  } catch {
+    return [];
   }
 }
 
@@ -1724,9 +1743,14 @@ function showMessageMenu(message, x, y) {
 
 function canRevokeMessage(message) {
   const id = normalizeMessageId(message && message.message_id);
-  if (!(message && message.self && !message.recalled && /^\d+$/.test(id))) return false;
-  const time = Number(message.time || 0);
-  return time > 0 && ((Date.now() / 1000) - time) <= revokeWindowSeconds;
+  if (!(message && !message.recalled && /^\d+$/.test(id))) return false;
+  if (message.self) {
+    const time = Number(message.time || 0);
+    return time > 0 && ((Date.now() / 1000) - time) <= revokeWindowSeconds;
+  }
+  const chatId = groupIdForMessage(message);
+  if (!chatId || message.type !== 'group') return false;
+  return currentGroupRole(chatId) === 'owner' || currentGroupRole(chatId) === 'admin';
 }
 
 function canStartTempChat(message) {
@@ -1741,6 +1765,14 @@ function groupIdForMessage(message) {
   if (direct) return direct;
   const chatId = normalizeMessageId((message && message.chat_id) || currentChat);
   return chatId.startsWith('group_') ? chatId.slice(6) : '';
+}
+
+function currentGroupRole(groupId) {
+  const members = loadedGroupMembersByChat.get(`group_${groupId}`);
+  if (!members) return '';
+  const selfId = normalizeMessageId(selfUser && selfUser.user_id);
+  if (!selfId) return '';
+  return String(members.get(selfId) || '').toLowerCase();
 }
 
 function hideMessageMenu() {
@@ -2029,11 +2061,9 @@ async function showMemberList() {
   renderMemberLoading();
   try {
     await loadNicknames();
-    const r = await api(`/api/group-members?chat_id=${encodeURIComponent(chatId)}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const d = await r.json();
+    const d = await loadGroupMembers(chatId);
     if (closed) return;
-    members = normalizeGroupMembers(d.members || [])
+    members = normalizeGroupMembers(d)
       .sort((a, b) => a.displayName.localeCompare(b.displayName, undefined, {numeric: true}) || a.uid.localeCompare(b.uid));
     search.disabled = false;
     renderMemberList();

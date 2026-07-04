@@ -1,6 +1,7 @@
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from webqq_app.app import configured_web_port
@@ -8,6 +9,7 @@ from webqq_app.auth import BanTracker
 import webqq_app.api as api
 from webqq_app.common import (
     canonical_chat_id,
+    simplify_group_member,
     normalize_emoji_like_response,
     normalize_emoji_likes,
     notice_text,
@@ -115,6 +117,10 @@ class ApiExtractionTests(unittest.TestCase):
     def test_json_body_helper_is_available_to_api_handlers(self):
         self.assertTrue(callable(api.read_json_body))
 
+    def test_group_member_role_is_normalized(self):
+        self.assertEqual(simplify_group_member({"user_id": 1, "role": 4})["role"], "owner")
+        self.assertEqual(simplify_group_member({"user_id": 1, "is_owner": True})["role"], "owner")
+
 
 class FaceManifestTests(unittest.TestCase):
     def test_koishi_face_manifest_normalization_shape(self):
@@ -179,6 +185,81 @@ class MessageStoreTests(unittest.TestCase):
             messages = store.get_messages("private_1", limit=10)
             self.assertEqual(len(messages), 1)
             self.assertEqual(messages[0]["message_id"], 10)
+
+    def test_group_role_lookup_supports_admin_revoke(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(10001, "Me")
+            store.set_group_members(
+                123,
+                {"10001": "Me", "10002": "Other"},
+                [{"user_id": "10001", "role": "admin"}, {"user_id": "10002", "role": "member"}],
+            )
+            self.assertEqual(store.current_group_role(123), "admin")
+            self.assertEqual(store.get_group_member_role(123, 10002), "member")
+
+
+class RevokeHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_admin_can_revoke_other_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(10001, "Me")
+            store.set_group_members(123, {"10001": "Me", "10002": "Other"}, [{"user_id": "10001", "role": "admin"}])
+            message = {
+                "message_id": "88",
+                "time": int(time.time()),
+                "self": False,
+            }
+            store._data["group_123"].append(message)
+            store._reindex_chat("group_123")
+            app = {
+                "store": store,
+                "napcat": SimpleNamespace(delete_msg=lambda *_: None),
+            }
+            async def delete_msg(message_id):
+                return {"status": "ok"}
+            async def broadcast(_):
+                return None
+            app["napcat"] = SimpleNamespace(delete_msg=delete_msg, _broadcast=broadcast)
+            app["config"] = {"web_token": ""}
+            request = SimpleNamespace(
+                app=app,
+                query={},
+                cookies={},
+            )
+            async def request_json():
+                return {"message_id": "88", "chat_id": "group_123"}
+            request.json = request_json
+            request.headers = {}
+            request.remote = ""
+            response = await api.handle_message_revoke(request)
+            self.assertEqual(response.status, 200)
+
+    async def test_group_member_cannot_revoke_other_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(10001, "Me")
+            store.set_group_members(123, {"10001": "Me", "10002": "Other"}, [{"user_id": "10001", "role": "member"}])
+            message = {
+                "message_id": "88",
+                "time": int(time.time()),
+                "self": False,
+            }
+            store._data["group_123"].append(message)
+            store._reindex_chat("group_123")
+            async def delete_msg(message_id):
+                return {"status": "ok"}
+            app = {
+                "config": {"web_token": ""},
+                "store": store,
+                "napcat": SimpleNamespace(delete_msg=delete_msg, _broadcast=lambda _: None),
+            }
+            request = SimpleNamespace(app=app, query={}, cookies={}, headers={}, remote="")
+            async def request_json():
+                return {"message_id": "88", "chat_id": "group_123"}
+            request.json = request_json
+            response = await api.handle_message_revoke(request)
+            self.assertEqual(response.status, 400)
 
 
 if __name__ == "__main__":

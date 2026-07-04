@@ -10,6 +10,7 @@ class MessageStore:
         self._nicknames = {}  # uid -> nickname
         self._group_members = defaultdict(dict)  # chat_id -> {uid: nickname}
         self._group_member_details = defaultdict(list)  # chat_id -> [{user_id, names...}]
+        self._group_member_roles = defaultdict(dict)  # chat_id -> {uid: role}
         self._known_private_users = set()
         self._private_temp_contexts = {}  # uid -> {group_id, group_name}
         self._message_chat_index = {}  # message_id -> chat_id
@@ -123,6 +124,30 @@ class MessageStore:
             name = self._temp_group_member_name(uid, {"temp_group_id": group_id})
             if name:
                 meta["name"] = name
+
+    def set_group_members(self, group_id, members, details=None):
+        chat_id = f"group_{int(group_id)}"
+        self._group_members[chat_id] = dict(members or {})
+        self._group_member_details[chat_id] = list(details or [])
+        self._group_member_roles[chat_id] = {
+            str(item.get("user_id") or item.get("uid")): str(item.get("role") or "")
+            for item in self._group_member_details[chat_id]
+            if isinstance(item, dict) and (item.get("user_id") or item.get("uid"))
+        }
+
+    def get_group_member_role(self, group_id, user_id):
+        chat_id = f"group_{int(group_id)}"
+        uid = str(user_id or "")
+        if not uid:
+            return ""
+        role = self._group_member_roles.get(chat_id, {}).get(uid, "")
+        return role if role in ("owner", "admin", "member") else ""
+
+    def current_group_role(self, group_id):
+        self_id = str(self._self_user.get("user_id") or "")
+        if not self_id:
+            return ""
+        return self.get_group_member_role(group_id, self_id)
 
     def _message_chat_display_name(self, chat_id, message):
         parsed = parse_chat_id(chat_id)
@@ -630,6 +655,7 @@ class MessageStore:
             "time": msg.get("time", int(time.time())),
             "sender_id": msg.get("user_id"),
             "sender_name": sender.get("card", "") or sender.get("nickname", "") or str(msg.get("user_id", "")),
+            "sender_role": sender.get("role", ""),
             "sender_avatar_url": avatar_url_for("user", msg.get("user_id")),
             "content": content,
             "mentions": mentions,

@@ -252,22 +252,31 @@ async def handle_message_revoke(request):
     if not found:
         return web.json_response({"ok": False, "error": "message is not in local history"}, status=404)
     message = found["message"]
-    if not message.get("self"):
-        return web.json_response({"ok": False, "error": "only your own messages can be revoked"}, status=400)
-    try:
-        age = time.time() - float(message.get("time", 0))
-    except (TypeError, ValueError):
-        age = REVOKE_WINDOW_SECONDS + 1
-    if age > REVOKE_WINDOW_SECONDS:
-        return web.json_response({"ok": False, "error": "message is too old to revoke"}, status=400)
+    store = request.app["store"]
+    parsed_chat = parse_chat_id(found["chat_id"])
+    if message.get("self"):
+        allowed = True
+    elif parsed_chat and parsed_chat["type"] == "group":
+        allowed = store.current_group_role(parsed_chat["group_id"]) in ("owner", "admin")
+    else:
+        allowed = False
+    if not allowed:
+        return web.json_response({"ok": False, "error": "insufficient permission to revoke this message"}, status=400)
+    if message.get("self"):
+        try:
+            age = time.time() - float(message.get("time", 0))
+        except (TypeError, ValueError):
+            age = REVOKE_WINDOW_SECONDS + 1
+        if age > REVOKE_WINDOW_SECONDS:
+            return web.json_response({"ok": False, "error": "message is too old to revoke"}, status=400)
     result = await request.app["napcat"].delete_msg(message_id)
     if not result or result.get("status") != "ok":
         err = result.get("wording", result.get("message", "revoke failed")) if result else "not connected"
         return web.json_response({"ok": False, "error": err}, status=500)
-    recalled = request.app["store"].mark_recalled(
+    recalled = store.mark_recalled(
         message_id,
         chat_id=chat_id if parse_chat_id(chat_id) else None,
-        operator_id=request.app["store"]._self_user.get("user_id"),
+        operator_id=store._self_user.get("user_id"),
         recalled_at=int(time.time()),
     )
     payload = {"message_id": message_id}
@@ -304,6 +313,7 @@ async def handle_status(request):
     return web.json_response({
         "napcat_connected": napcat.ws is not None,
         "chats_count": len(request.app["store"]._data),
+        "self_user": dict(request.app["store"]._self_user),
     })
 
 

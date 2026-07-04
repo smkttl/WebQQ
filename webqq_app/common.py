@@ -330,6 +330,27 @@ def simplify_group_member(member, fallback_name=""):
     name = first_text(member.get("name"), member.get("user_name"), member.get("username"))
     nick = first_text(member.get("nick"), member.get("nickname"))
     qid = first_text(member.get("qid"), member.get("q_id"))
+    role = first_text(
+        member.get("role"),
+        member.get("member_role"),
+        member.get("group_role"),
+        member.get("authority"),
+    )
+    is_owner = bool(member.get("is_owner") or member.get("owner"))
+    is_admin = bool(member.get("is_admin") or member.get("admin"))
+    if is_owner and not role:
+        role = "owner"
+    elif is_admin and not role:
+        role = "admin"
+    else:
+        role = {
+            "4": "owner",
+            "3": "admin",
+            "2": "member",
+            "owner": "owner",
+            "admin": "admin",
+            "member": "member",
+        }.get(str(role).strip(), str(role).strip())
     display = first_text(card, remark, name, nickname, nick, fallback_name, uid)
     return {
         "user_id": uid,
@@ -341,6 +362,7 @@ def simplify_group_member(member, fallback_name=""):
         "nick": nick,
         "nickname": nickname,
         "qid": qid,
+        "role": role,
     }
 def image_url_allowed(url):
     parsed = urlparse(url)
