@@ -724,8 +724,10 @@ function normalizeFaceManifest(data) {
   const reaction_ids = [];
   if (Array.isArray(data)) {
     for (const item of data) {
-      const id = String(item && item.emojiId !== undefined ? item.emojiId : '');
-      if (!id) continue;
+      const rawId = String(item && item.emojiId !== undefined ? item.emojiId : '');
+      const qcid = String(item && item.qcid !== undefined ? item.qcid : '');
+      const id = /^\d+$/.test(rawId) ? rawId : (/^\d+$/.test(qcid) ? qcid : rawId);
+      if (!id || !/^\d+$/.test(id)) continue;
       const assets = Array.isArray(item.assets) ? item.assets : [];
       const png = assets.find(asset => Number(asset && asset.type) === 0) || assets.find(asset => Number(asset && asset.type) === 2);
       const apng = assets.find(asset => Number(asset && asset.type) === 2) || assets.find(asset => Number(asset && asset.type) === 0);
@@ -733,6 +735,8 @@ function normalizeFaceManifest(data) {
         type: Number(item.emojiType || 0),
         name: String(item.describe || '').replace(/^\//, '') || id,
       };
+      if (rawId && rawId !== id && !/^\d+$/.test(rawId)) info.unicode = rawId;
+      if (qcid && qcid !== id) info.qcid = qcid;
       if (png && png.path) info.png = new URL(png.path, faceAssetBaseUrl).href;
       if (apng && apng.path) info.gif = new URL(apng.path, faceAssetBaseUrl).href;
       faces[id] = info;
@@ -1802,10 +1806,15 @@ function showFaceReplyPicker() {
 
 async function sendFaceReply(messageId, emojiId) {
   messageId = normalizeMessageId(messageId);
+  emojiId = normalizeMessageId(emojiId);
   hideEmojiDropdown();
   hideMessageMenu();
   if (!messageId) {
     showToast('Cannot react: message id unavailable');
+    return;
+  }
+  if (!/^\d+$/.test(emojiId)) {
+    showToast('Cannot react: emoji id unavailable');
     return;
   }
   try {
