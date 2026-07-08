@@ -1,0 +1,8 @@
+{
+  "id": "recent",
+  "name": "Recent Senders",
+  "version": "1.0.0",
+  "description": "Ranks group senders who spoke within the recent activity window.",
+  "entry": "main.py",
+  "enabled_by_default": true
+}
