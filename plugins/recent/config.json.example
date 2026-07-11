@@ -1,5 +1,6 @@
 {
   "command": "/recent rank",
+  "random_command": "/recent random",
   "max_rank": 20,
   "title": "Recent senders in the last 1000 messages:"
 }
