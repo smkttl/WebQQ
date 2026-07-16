@@ -942,8 +942,8 @@ class WerewolfPlugin:
             return
         if any(player.get("virtual") for player in game["players"]):
             real_count = sum(1 for player in game["players"] if not player.get("virtual"))
-            if real_count < 2:
-                await self._safe_send(game["chat_id"], f"包含 AI 的游戏至少需要 2 名真实玩家，当前只有 {real_count} 名。")
+            if real_count < 1:
+                await self._safe_send(game["chat_id"], "包含 AI 的游戏至少需要 1 名真实玩家。")
                 return
 
         if not args:

@@ -1260,16 +1260,31 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["players"][2]["name"], "AI Alice")
         self.assertNotEqual(game["players"][2]["user_id"], first_ai_id)
 
-    async def test_ai_game_requires_two_real_players(self):
+    async def test_one_real_player_and_five_ai_can_start(self):
         self.use_virtual_plugin()
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=[
+            '{"ok":true}',
+            '{"action":"link","seats":[1,2]}',
+            '{"action":"guard","seat":1}',
+            '{"action":"inspect","seat":2}',
+            '{"action":"pass"}',
+            '{"action":"pass"}',
+        ])
         await self.group(1, "/wolf 创建", "Host")
         await self.group(1, "/wolf 添加AI 5", "Host")
-
-        await self.group(1, "/wolf 配置", "Host")
+        await self.group(
+            1,
+            "/wolf 配置 村民=1 狼人=1 预言家=1 女巫=1 守卫=1 丘比特=1 "
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+        await self.group(1, "/wolf 开始", "Host")
 
         game = self.plugin.state["games"]["group_123"]
-        self.assertEqual(game["phase"], "lobby")
-        self.assertIn("至少需要 2 名真实玩家", self.ctx.sent[-1]["text"])
+        self.assertEqual(len([player for player in game["players"] if not player["virtual"]]), 1)
+        self.assertEqual(len([player for player in game["players"] if player["virtual"]]), 5)
+        self.assertEqual(game["phase"], "discussion")
+        self.assertTrue(all(player["identity_delivered"] for player in game["players"]))
 
     async def test_two_real_players_and_four_ai_can_start(self):
         self.use_virtual_plugin()
