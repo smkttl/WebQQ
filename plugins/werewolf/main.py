@@ -62,6 +62,18 @@ WITCH_SELF_NAMES = {
     "always": "任意夜晚可以自救",
 }
 
+COMMAND_NAMES = {
+    "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "角色", "平票",
+    "女巫自救", "女巫双药", "胜利", "开始", "结束发言", "状态", "推进", "重发", "取消",
+    "清理", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "救", "毒", "救毒",
+    "过", "开枪", "不开枪", "投票", "弃票",
+}
+COMPACT_ARGUMENT_COMMANDS = {
+    "添加AI", "删除AI", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
+    "连结", "守护", "刀", "查验", "毒", "救毒", "开枪", "投票",
+}
+COMPACT_COMMAND_ORDER = sorted(COMPACT_ARGUMENT_COMMANDS, key=len, reverse=True)
+
 
 def setup(ctx):
     return WerewolfPlugin(ctx)
@@ -169,7 +181,18 @@ class WerewolfPlugin:
                 self._refresh_player_name(chat_id, sender_id, message.get("sender_name"))
 
             content = str(message.get("content") or "").strip()
-            is_command = content == self.prefix or content.startswith(self.prefix + " ")
+            command_text = ""
+            command = ""
+            args = []
+            prefix_suffix = ""
+            if content.startswith(self.prefix):
+                prefix_suffix = content[len(self.prefix):]
+                command_text = prefix_suffix.strip()
+                command, args = self._parse_command_text(command_text)
+            is_command = (
+                content == self.prefix
+                or (content.startswith(self.prefix) and (prefix_suffix[:1].isspace() or command in COMMAND_NAMES))
+            )
             if not is_command:
                 game = self.state["games"].get(chat_id) if chat_type == "group" else None
                 if game and game.get("phase") == "discussion":
@@ -187,10 +210,6 @@ class WerewolfPlugin:
             if message_id:
                 self._remember_message_id(message_id)
 
-            command_text = content[len(self.prefix):].strip()
-            parts = command_text.split()
-            command = parts[0] if parts else "帮助"
-            args = parts[1:]
             if chat_type == "group" and chat_id.startswith("group_"):
                 await self._handle_group(message, command, args)
                 game = self.state["games"].get(chat_id)
@@ -206,6 +225,47 @@ class WerewolfPlugin:
         self.state["processed_ids"].append(str(message_id))
         self.state["processed_ids"] = self.state["processed_ids"][-500:]
         self._save()
+
+    @classmethod
+    def _parse_command_text(cls, command_text):
+        text = str(command_text or "").strip()
+        if not text:
+            return "帮助", []
+
+        first, separator, remainder = text.partition(" ")
+        if first in COMMAND_NAMES:
+            return first, cls._tokenize_command_args(first, remainder if separator else "")
+
+        for command in COMPACT_COMMAND_ORDER:
+            if text.startswith(command) and len(text) > len(command):
+                remainder = text[len(command):].strip()
+                if remainder:
+                    return command, cls._tokenize_command_args(command, remainder)
+
+        parts = text.split()
+        return parts[0], parts[1:]
+
+    @staticmethod
+    def _tokenize_command_args(command, remainder):
+        text = str(remainder or "").strip()
+        if not text:
+            return []
+        if command == "狼聊":
+            return [text]
+
+        text = re.sub(r"^[：:]+\s*", "", text)
+        text = re.sub(r"[,，、]+", " ", text)
+        tokens = re.findall(r"[<＜][^<>＜＞]+[>＞]|\S+", text)
+        normalized = []
+        for token in tokens:
+            value = token.strip()
+            if len(value) >= 2 and value[0] in "<＜" and value[-1] in ">＞":
+                value = value[1:-1].strip()
+            value = value.strip(":：")
+            if re.fullmatch(r"[0-9０-９]+号", value):
+                value = value[:-1]
+            normalized.append(value)
+        return normalized
 
     def _refresh_player_name(self, chat_id, user_id, name):
         game = self.state["games"].get(chat_id)

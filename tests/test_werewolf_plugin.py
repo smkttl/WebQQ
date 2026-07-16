@@ -159,6 +159,31 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/ww 创建", context.sent[0]["text"])
         self.assertNotIn("/wolf", context.sent[0]["text"])
 
+    def test_command_parser_accepts_compact_and_decorated_seats(self):
+        cases = {
+            "毒4": ("毒", ["4"]),
+            "毒 <4>": ("毒", ["4"]),
+            "毒< 4 >": ("毒", ["4"]),
+            "连结<2><5>": ("连结", ["2", "5"]),
+            "连结2，5": ("连结", ["2", "5"]),
+            "投票：４号": ("投票", ["４"]),
+            "女巫自救1": ("女巫自救", ["1"]),
+            "添加AI4": ("添加AI", ["4"]),
+            "狼聊今晚考虑4号": ("狼聊", ["今晚考虑4号"]),
+        }
+        for command_text, expected in cases.items():
+            with self.subTest(command_text=command_text):
+                self.assertEqual(self.plugin._parse_command_text(command_text), expected)
+
+    async def test_compact_command_is_routed_as_a_command(self):
+        await self.group(1, "/wolf创建", "Host")
+        game = self.plugin.state["games"]["group_123"]
+
+        await self.group(1, "/wolf添加AI4", "Host")
+
+        self.assertEqual(len(game["players"]), 1)
+        self.assertIn("AI 玩家未启用", self.ctx.sent[-1]["text"])
+
     async def test_start_introduces_rules_settings_commands_and_night_roster(self):
         game = await self.configured_six_player_game(start=True)
 
