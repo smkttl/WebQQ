@@ -3,6 +3,7 @@
   "min_players": 6,
   "max_players": 12,
   "day_ready_threshold": 0.6,
+  "admin_uids": ["123456789"],
   "virtual_players": {
     "enabled": false,
     "names": ["Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace"],

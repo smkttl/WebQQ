@@ -66,10 +66,14 @@ COMMAND_NAMES = {
     "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "角色", "平票",
     "女巫自救", "女巫双药", "胜利", "开始", "结束发言", "状态", "推进", "重发", "取消",
     "清理", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "救", "毒", "救毒",
-    "过", "开枪", "不开枪", "投票", "弃票",
+    "过", "开枪", "不开枪", "投票", "弃票", "观战", "debug", "同意", "撤销提议",
+}
+HOST_ONLY_COMMANDS = {
+    "添加AI", "删除AI", "配置", "角色", "平票", "女巫自救", "女巫双药", "胜利",
+    "开始", "推进", "重发", "取消", "清理",
 }
 COMPACT_ARGUMENT_COMMANDS = {
-    "添加AI", "删除AI", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
+    "添加AI", "删除AI", "配置", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
     "连结", "守护", "刀", "查验", "毒", "救毒", "开枪", "投票",
 }
 COMPACT_COMMAND_ORDER = sorted(COMPACT_ARGUMENT_COMMANDS, key=len, reverse=True)
@@ -91,6 +95,10 @@ class WerewolfPlugin:
             raise ValueError("day_ready_threshold must be a number in (0, 1]")
         if not 0 < self.day_ready_threshold <= 1:
             raise ValueError("day_ready_threshold must be a number in (0, 1]")
+        admin_uids = ctx.config.get("admin_uids", [])
+        if not isinstance(admin_uids, list):
+            raise ValueError("admin_uids must be an array")
+        self.admin_uids = {str(value).strip() for value in admin_uids if str(value).strip()}
 
         default_path = Path(__file__).resolve().parents[2] / "data" / "werewolf" / "state.json"
         self.state_path = Path(state_path) if state_path else default_path
@@ -148,6 +156,11 @@ class WerewolfPlugin:
             game.setdefault("ai_sequence", 0)
             game.setdefault("discussion_human_messages", 0)
             game.setdefault("ai_round_robin_seat", 0)
+            game.setdefault("host_action_proposal", None)
+            settings = game.setdefault("settings", {})
+            if "wolf_can_kill_wolves" not in settings:
+                settings["wolf_can_kill_wolves"] = False
+                migrated = True
             for player in game.get("players", []):
                 self._ensure_player_schema(player)
         return state, migrated
@@ -291,6 +304,20 @@ class WerewolfPlugin:
             await self._safe_send(chat_id, f"当前群没有游戏。发送 {self.prefix} 创建 开房。")
             return
 
+        if command == "同意":
+            await self._approve_host_action(game, user_id)
+            return
+        if command == "撤销提议":
+            await self._withdraw_host_action(game, user_id)
+            return
+        if command in HOST_ONLY_COMMANDS:
+            if not self._is_host(game, user_id):
+                await self._propose_host_action(game, user_id, command, args)
+                return
+            if game.get("host_action_proposal"):
+                game["host_action_proposal"] = None
+                self._save()
+
         if command == "加入":
             await self._join_game(game, user_id, user_name)
         elif command == "退出":
@@ -301,8 +328,12 @@ class WerewolfPlugin:
             await self._remove_virtual_player(game, user_id, args)
         elif command == "名单":
             await self._safe_send(chat_id, self._seat_list(game, include_status=game["phase"] != "lobby"))
+        elif command == "观战":
+            await self._spectate(game, user_id)
+        elif command == "debug":
+            await self._debug(game, user_id)
         elif command == "配置":
-            await self._start_setup(game, user_id)
+            await self._start_setup(game, user_id, args)
         elif command == "角色":
             await self._setup_roles(game, user_id, args)
         elif command == "平票":
@@ -330,6 +361,105 @@ class WerewolfPlugin:
         else:
             await self._safe_send(chat_id, f"未知群聊命令。发送 {self.prefix} 帮助 查看列表。")
 
+    async def _propose_host_action(self, game, user_id, command, args):
+        player = self._player(game, user_id)
+        if not player or player.get("virtual"):
+            await self._safe_send(game["chat_id"], "只有本局真实玩家可以发起房主操作提议。")
+            return
+        current_token = self._host_action_phase_token(game)
+        proposal = game.get("host_action_proposal")
+        if proposal and proposal.get("phase_token") != current_token:
+            proposal = None
+            game["host_action_proposal"] = None
+        normalized_args = [str(value) for value in args]
+        if proposal:
+            if proposal.get("command") == command and proposal.get("args") == normalized_args:
+                await self._approve_host_action(game, user_id)
+            else:
+                await self._safe_send(
+                    game["chat_id"],
+                    f"当前已有提议：{self._format_host_action(proposal['command'], proposal.get('args') or [])}。"
+                    f"请发送 {self.prefix} 同意，或由提议者/房主发送 {self.prefix} 撤销提议。",
+                )
+            return
+        game["host_action_proposal"] = {
+            "command": command,
+            "args": normalized_args,
+            "proposer_id": user_id,
+            "approvals": [user_id],
+            "phase_token": current_token,
+        }
+        self._save()
+        await self._safe_send(
+            game["chat_id"],
+            f"{player['seat']}号 {player['name']} 提议执行：{self._format_host_action(command, normalized_args)}。"
+            f"同意 1/3；本局玩家发送 {self.prefix} 同意，或重复同一命令。死亡玩家也可以同意。",
+        )
+
+    async def _approve_host_action(self, game, user_id):
+        player = self._player(game, user_id)
+        if not player or player.get("virtual"):
+            await self._safe_send(game["chat_id"], "只有本局真实玩家可以同意房主操作提议。")
+            return
+        proposal = game.get("host_action_proposal")
+        if not proposal:
+            await self._safe_send(game["chat_id"], "当前没有等待同意的房主操作提议。")
+            return
+        if proposal.get("phase_token") != self._host_action_phase_token(game):
+            game["host_action_proposal"] = None
+            self._save()
+            await self._safe_send(game["chat_id"], "游戏阶段已经变化，原房主操作提议已失效。")
+            return
+        approvals = proposal.setdefault("approvals", [])
+        if user_id in approvals:
+            await self._safe_send(game["chat_id"], f"你已经同意该提议，当前 {len(approvals)}/3。")
+            return
+        approvals.append(user_id)
+        self._save()
+        if len(approvals) < 3:
+            await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 已同意，当前 {len(approvals)}/3。")
+            return
+
+        command = proposal["command"]
+        args = list(proposal.get("args") or [])
+        game["host_action_proposal"] = None
+        self._save()
+        await self._safe_send(game["chat_id"], f"提议已获得 3 名玩家同意，执行：{self._format_host_action(command, args)}。")
+        host = self._player(game, game["host_id"])
+        synthetic_message = {
+            "chat_id": game["chat_id"],
+            "sender_id": game["host_id"],
+            "user_id": game["host_id"],
+            "sender_name": host["name"] if host else str(game["host_id"]),
+        }
+        await self._handle_group(synthetic_message, command, args)
+
+    async def _withdraw_host_action(self, game, user_id):
+        proposal = game.get("host_action_proposal")
+        if not proposal:
+            await self._safe_send(game["chat_id"], "当前没有等待处理的房主操作提议。")
+            return
+        if user_id not in (proposal.get("proposer_id"), game.get("host_id")):
+            await self._safe_send(game["chat_id"], "只有提议者或房主可以撤销该提议。")
+            return
+        game["host_action_proposal"] = None
+        self._save()
+        await self._safe_send(game["chat_id"], "房主操作提议已撤销。")
+
+    @staticmethod
+    def _host_action_phase_token(game):
+        return {
+            "phase": game.get("phase"),
+            "setup_step": game.get("setup_step"),
+            "night": game.get("night"),
+            "day": game.get("day"),
+            "vote_round": game.get("vote_round"),
+        }
+
+    def _format_host_action(self, command, args):
+        suffix = " " + " ".join(args) if args else ""
+        return f"{self.prefix} {command}{suffix}"
+
     async def _handle_private(self, message, command, args):
         user_id = str(message.get("sender_id") or message.get("user_id"))
         game = self._active_game_for_user(user_id)
@@ -356,6 +486,48 @@ class WerewolfPlugin:
             await self._vote_action(game, player, command, args)
         else:
             await self._safe_send(chat_id, f"当前私聊命令无效。发送 {self.prefix} 状态 查看身份和可用操作。")
+
+    async def _spectate(self, game, user_id):
+        if self._player(game, user_id):
+            await self._safe_send(game["chat_id"], "本局玩家不能使用观战身份表。")
+            return
+        allowed_phases = {"night_actions", "witch", "death_shot", "discussion", "vote", "ended"}
+        if game.get("phase") not in allowed_phases:
+            await self._safe_send(game["chat_id"], "发牌完成并正式开局后才能观战。")
+            return
+        spectator_chat = self._temp_id(game, user_id)
+        if not await self._safe_send(spectator_chat, self._spectator_text(game)):
+            await self._safe_send(game["chat_id"], "无法发送观战临时会话，请确认该账号可以接收群临时消息。")
+
+    def _spectator_text(self, game):
+        phase_names = {
+            "night_actions": "夜间行动",
+            "witch": "夜间行动",
+            "death_shot": "死亡结算",
+            "discussion": "白天讨论",
+            "vote": "投票",
+            "ended": "已结束",
+        }
+        lines = ["【狼人杀观战身份表】", f"当前阶段：{phase_names.get(game.get('phase'), game.get('phase'))}"]
+        for player in sorted(game["players"], key=lambda item: item["seat"]):
+            status = "存活" if player.get("alive") else "已死亡"
+            lines.append(f"{player['seat']}号 {player['name']}：{ROLE_NAMES[player['role']]}（{status}）")
+        if game.get("lovers"):
+            lovers = [self._player(game, user_id) for user_id in game["lovers"]]
+            lines.append("情侣：" + " 与 ".join(f"{player['seat']}号 {player['name']}" for player in lovers))
+        else:
+            lines.append("情侣：尚未产生或本局没有情侣")
+        lines.append("观战信息包含未公开身份，请勿向场上玩家泄露。")
+        return "\n".join(lines)
+
+    async def _debug(self, game, user_id):
+        if user_id not in self.admin_uids:
+            await self._safe_send(game["chat_id"], "只有配置文件中的管理员可以使用 debug。")
+            return
+        debug_chat = self._temp_id(game, user_id)
+        payload = "【狼人杀完整调试数据】\n" + json.dumps(game, ensure_ascii=False, indent=2, sort_keys=True)
+        if not await self._safe_send(debug_chat, payload):
+            await self._safe_send(game["chat_id"], "无法发送 debug 临时会话，请确认该账号可以接收群临时消息。")
 
     async def _create_game(self, chat_id, host_id, host_name):
         existing = self.state["games"].get(chat_id)
@@ -389,6 +561,7 @@ class WerewolfPlugin:
             "ai_sequence": 0,
             "discussion_human_messages": 0,
             "ai_round_robin_seat": 0,
+            "host_action_proposal": None,
         }
         self.state["games"][chat_id] = game
         self._save()
@@ -549,27 +722,112 @@ class WerewolfPlugin:
                 result.append(name)
         return result
 
-    async def _start_setup(self, game, user_id):
+    async def _start_setup(self, game, user_id, args):
         if not self._is_host(game, user_id):
             await self._safe_send(game["chat_id"], "只有房主可以配置游戏。")
             return
         if game["phase"] not in ("lobby", "setup"):
             await self._safe_send(game["chat_id"], "当前阶段不能重新配置。")
             return
-        count = len(game["players"])
-        if not self.min_players <= count <= self.max_players:
-            await self._safe_send(game["chat_id"], f"需要 {self.min_players}–{self.max_players} 名玩家，当前 {count} 人。")
+        player_count = len(game["players"])
+        if not self.min_players <= player_count <= self.max_players:
+            await self._safe_send(game["chat_id"], f"需要 {self.min_players}–{self.max_players} 名玩家，当前 {player_count} 人。")
             return
         if any(player.get("virtual") for player in game["players"]):
             real_count = sum(1 for player in game["players"] if not player.get("virtual"))
             if real_count < 2:
                 await self._safe_send(game["chat_id"], f"包含 AI 的游戏至少需要 2 名真实玩家，当前只有 {real_count} 名。")
                 return
-        game["phase"] = "setup"
-        game["setup_step"] = "roles"
-        game["settings"] = {"day_ready_threshold": self.day_ready_threshold}
+
+        if not args:
+            await self._safe_send(game["chat_id"], self._configuration_help(game))
+            return
+
+        role_counts = {key: 0 for key in ROLE_NAMES}
+        options = {}
+        allowed_options = {"平票", "自救", "双药", "胜利", "狼刀狼人"}
+        seen = set()
+        try:
+            for token in args:
+                if "=" not in token:
+                    raise ValueError("每个配置项必须使用“名称=值”格式。")
+                name, raw_value = token.split("=", 1)
+                name = name.strip()
+                raw_value = raw_value.strip()
+                if not name or not raw_value or name in seen:
+                    raise ValueError("每个配置项必须且只能填写一次。")
+                seen.add(name)
+                if name in ROLE_KEYS:
+                    if not re.fullmatch(r"[0-9]+", raw_value):
+                        raise ValueError("角色数量必须是非负整数。")
+                    role_count = int(raw_value)
+                    role_counts[ROLE_KEYS[name]] = role_count
+                elif name in allowed_options:
+                    options[name] = raw_value
+                else:
+                    raise ValueError(f"未知配置项：{name}。")
+        except ValueError as exc:
+            message = str(exc) or "配置格式无效。"
+            await self._safe_send(game["chat_id"], f"{message}\n\n{self._configuration_help(game)}")
+            return
+
+        missing = [name for name in ("平票", "自救", "双药", "胜利", "狼刀狼人") if name not in options]
+        if missing:
+            await self._safe_send(
+                game["chat_id"],
+                f"缺少必填配置项：{'、'.join(missing)}。\n\n{self._configuration_help(game)}",
+            )
+            return
+        if options["平票"] not in TIE_POLICIES:
+            await self._safe_send(game["chat_id"], "平票必须填写 1、2 或 3。\n\n" + self._configuration_help(game))
+            return
+        if options["自救"] not in WITCH_SELF_POLICIES:
+            await self._safe_send(game["chat_id"], "自救必须填写 1、2 或 3。\n\n" + self._configuration_help(game))
+            return
+        if options["双药"] not in ("是", "否"):
+            await self._safe_send(game["chat_id"], "双药必须填写 是 或 否。\n\n" + self._configuration_help(game))
+            return
+        if options["胜利"] not in ("屠边", "屠城"):
+            await self._safe_send(game["chat_id"], "胜利必须填写 屠边 或 屠城。\n\n" + self._configuration_help(game))
+            return
+        if options["狼刀狼人"] not in ("是", "否"):
+            await self._safe_send(game["chat_id"], "狼刀狼人必须填写 是 或 否。\n\n" + self._configuration_help(game))
+            return
+        error = self._validate_role_counts(role_counts, player_count)
+        if error:
+            await self._safe_send(game["chat_id"], f"{error}\n\n{self._configuration_help(game)}")
+            return
+
+        game["settings"] = {
+            "day_ready_threshold": self.day_ready_threshold,
+            "roles": role_counts,
+            "tie_policy": TIE_POLICIES[options["平票"]],
+            "witch_self": WITCH_SELF_POLICIES[options["自救"]],
+            "witch_double": options["双药"] == "是",
+            "victory": "slaughter_side" if options["胜利"] == "屠边" else "slaughter_city",
+            "wolf_can_kill_wolves": options["狼刀狼人"] == "是",
+        }
+        game["phase"] = "ready"
+        game["setup_step"] = None
         self._save()
-        await self._safe_send(game["chat_id"], self._roles_prompt(game))
+        await self._safe_send(
+            game["chat_id"],
+            f"配置完成。房主确认后发送 {self.prefix} 开始。\n\n{self._settings_text(game)}",
+        )
+
+    def _configuration_help(self, game):
+        return (
+            "【狼人杀一键配置】\n"
+            f"请在一条命令中填写全部设置：\n{self.prefix} 配置 村民=2 狼人=2 预言家=1 女巫=1 "
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否\n"
+            f"当前玩家数：{len(game['players'])}；角色总数必须与玩家数一致，未填写的角色按 0 计算。\n"
+            "可用角色：村民、狼人、预言家、女巫、猎人、守卫、白痴、狼王、丘比特。\n"
+            "平票：1=再次投票后仍平票则无人出局；2=立即无人出局；3=随机一人出局。\n"
+            "自救：1=女巫仅首夜可自救；2=不能自救；3=任意夜晚可自救。双药、狼刀狼人填写 是/否。\n"
+            "狼刀狼人=是时，狼人可刀狼队友或自己；填写否时只能刀存活的非狼人玩家。\n"
+            "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利。\n"
+            "屠城：全部非狼人阵营玩家死亡时，狼人胜利。"
+        )
 
     def _roles_prompt(self, game):
         return (
@@ -673,6 +931,7 @@ class WerewolfPlugin:
             await self._safe_send(game["chat_id"], f"请选择 {self.prefix} 胜利 屠边 或 {self.prefix} 胜利 屠城。")
             return
         game["settings"]["victory"] = "slaughter_side" if choice == "屠边" else "slaughter_city"
+        game["settings"].setdefault("wolf_can_kill_wolves", False)
         game["setup_step"] = None
         game["phase"] = "ready"
         self._save()
@@ -787,14 +1046,20 @@ class WerewolfPlugin:
             "【狼人杀规则】\n"
             "夜间角色通过临时会话行动；全部必要行动完成后自动结算。白天自由发言，达到结束发言阈值后进入私密投票。\n"
             "支持村民、狼人、预言家、女巫、猎人、守卫、白痴、狼王和丘比特。守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
+            "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利；屠城：全部非狼人阵营玩家死亡时，狼人胜利。具体采用哪种条件以本局设置为准。\n"
             "跨阵营情侣成为第三方，必须成为最终两名存活者才能获胜。带有“AI”前缀的座位是公开标识的虚拟玩家。"
         )
 
     def _settings_text(self, game):
         counts = game["settings"]["roles"]
         roles = "、".join(f"{ROLE_NAMES[key]}×{value}" for key, value in counts.items() if value)
-        victory = "屠边" if game["settings"]["victory"] == "slaughter_side" else "屠城"
+        victory = (
+            "屠边（普通村民全部死亡或神职全部死亡时，狼人胜利）"
+            if game["settings"]["victory"] == "slaughter_side"
+            else "屠城（全部非狼人阵营玩家死亡时，狼人胜利）"
+        )
         double = "允许" if game["settings"]["witch_double"] else "不允许"
+        wolf_targets = "允许刀狼队友和自己" if game["settings"].get("wolf_can_kill_wolves", False) else "只能刀非狼人玩家"
         needed = math.ceil(float(game["settings"]["day_ready_threshold"]) * len(game["players"]))
         virtuals = [f"{player['seat']}号 {player['name']}" for player in game["players"] if player.get("virtual")]
         return (
@@ -803,6 +1068,7 @@ class WerewolfPlugin:
             f"平票：{TIE_NAMES[game['settings']['tie_policy']]}\n"
             f"女巫：{WITCH_SELF_NAMES[game['settings']['witch_self']]}，{double}同夜双药\n"
             f"胜利条件：{victory}\n"
+            f"狼人刀人：{wolf_targets}\n"
             f"首日结束发言阈值：{game['settings']['day_ready_threshold']:.0%}（当前需 {needed} 人）\n"
             f"虚拟玩家：{'、'.join(virtuals) if virtuals else '无'}"
         )
@@ -810,7 +1076,7 @@ class WerewolfPlugin:
     def _command_text(self):
         return (
             "【命令列表】\n"
-            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、开始、结束发言、状态、推进、重发 [座位]、取消、清理、帮助\n"
+            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、开始、观战、debug（管理员）、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
             f"临时会话：{self.prefix} 状态、连结 <两座位>、守护 <座位>、空守、刀 <座位>、空刀、查验 <座位>、救、毒 <座位>、救毒 <座位>、过、开枪 <座位>、不开枪、投票 <座位>、弃票、狼聊 <内容>\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
         )
@@ -848,7 +1114,15 @@ class WerewolfPlugin:
             elif role == "guard":
                 prompt = f"请选择守护目标：{self.prefix} 守护 <座位>，或 {self.prefix} 空守"
             elif role in WOLF_ROLES:
-                prompt = f"请选择刀人目标：{self.prefix} 刀 <座位>，或 {self.prefix} 空刀。可使用 {self.prefix} 狼聊 <内容> 与狼队交流。"
+                target_rule = (
+                    "可选择任意存活玩家，包括自己和狼队友。"
+                    if game.get("settings", {}).get("wolf_can_kill_wolves", False)
+                    else "只能选择存活的非狼人玩家。"
+                )
+                prompt = (
+                    f"请选择刀人目标：{self.prefix} 刀 <座位>，或 {self.prefix} 空刀。{target_rule}"
+                    f"可使用 {self.prefix} 狼聊 <内容> 与狼队交流。"
+                )
             elif role == "seer":
                 prompt = f"请选择查验目标：{self.prefix} 查验 <座位>"
             if prompt:
@@ -896,8 +1170,10 @@ class WerewolfPlugin:
                 return
             if command == "刀":
                 target_player = self._single_target(game, args)
-                if not target_player or target_player["role"] in WOLF_ROLES:
-                    await self._private_error(game, player, "请选择一名存活的非狼队玩家。")
+                can_target_wolves = game.get("settings", {}).get("wolf_can_kill_wolves", False)
+                if not target_player or (not can_target_wolves and target_player["role"] in WOLF_ROLES):
+                    error = "请选择一名存活玩家。" if can_target_wolves else "请选择一名存活的非狼队玩家。"
+                    await self._private_error(game, player, error)
                     return
                 target = target_player["user_id"]
             actions.setdefault("wolves", {})[player["user_id"]] = target
@@ -1479,6 +1755,11 @@ class WerewolfPlugin:
         tie = TIE_NAMES.get(game.get("settings", {}).get("tie_policy"), "尚未配置")
         witch_self = WITCH_SELF_NAMES.get(game.get("settings", {}).get("witch_self"), "尚未配置")
         double = "允许" if game.get("settings", {}).get("witch_double") else "不允许"
+        wolf_targets = (
+            "允许；狼人可选择任意存活玩家，包括狼队友和自己"
+            if game.get("settings", {}).get("wolf_can_kill_wolves", False)
+            else "不允许；狼人只能选择存活的非狼人玩家"
+        )
         victory_key = game.get("settings", {}).get("victory")
         victory = (
             "屠边：狼人消灭全部普通村民或全部神职即获胜"
@@ -1499,6 +1780,7 @@ class WerewolfPlugin:
             "top tie means no wolf kill. Night deaths resolve together before triggered shots and victory checks. "
             "During the day, living players discuss, confirm readiness, then vote privately.\n"
             f"- Witch: {witch_self}; {double} same-night antidote and poison use.\n"
+            f"- Wolf friendly fire: {wolf_targets}.\n"
             "- Guard may protect self, may not protect the same player on consecutive nights, and guard plus antidote "
             "on the wolf victim still causes that victim to die.\n"
             "- Hunter and wolf king may shoot after any death except poison. The idiot survives the first public exile, "
@@ -1570,6 +1852,11 @@ class WerewolfPlugin:
     def _ai_decision_instruction(self, game, player, kind):
         legal = self._legal_ai_targets(game, player, kind)
         labels = ", ".join(f"{item['seat']}={item['name']}" for item in legal) or "none"
+        wolf_target_rule = (
+            "living player, including yourself or a wolf teammate"
+            if game.get("settings", {}).get("wolf_can_kill_wolves", False)
+            else "living non-wolf player"
+        )
         instructions = {
             "speech": (
                 "Write one natural Chinese Werewolf discussion contribution of at most 120 characters. "
@@ -1581,7 +1868,7 @@ class WerewolfPlugin:
             ),
             "cupid": f"Choose two different living players from [{labels}]. Schema: {{\"action\":\"link\",\"seats\":[2,5]}}.",
             "guard": f"Choose a legal guard target from [{labels}], or pass. Schema: {{\"action\":\"guard\",\"seat\":2}} or {{\"action\":\"pass\"}}.",
-            "wolf": f"Choose a living non-wolf target from [{labels}], or pass. Optionally add a concise private team message. Schema: {{\"action\":\"kill\",\"seat\":3,\"wolf_message\":\"...\"}} or {{\"action\":\"pass\"}}.",
+            "wolf": f"Choose a {wolf_target_rule} from [{labels}], or pass. Optionally add a concise private team message. Schema: {{\"action\":\"kill\",\"seat\":3,\"wolf_message\":\"...\"}} or {{\"action\":\"pass\"}}.",
             "seer": f"Inspect one legal player from [{labels}]. Schema: {{\"action\":\"inspect\",\"seat\":4}}.",
             "witch": self._ai_witch_instruction(game, player, labels),
             "shot": f"Choose a living target from [{labels}], or decline. Schema: {{\"action\":\"shoot\",\"seat\":4}} or {{\"action\":\"pass\"}}.",
@@ -1608,6 +1895,8 @@ class WerewolfPlugin:
         if kind == "guard":
             return [item for item in living if item["user_id"] != game.get("last_guard_target")]
         if kind == "wolf":
+            if game.get("settings", {}).get("wolf_can_kill_wolves", False):
+                return living
             return [item for item in living if item["role"] not in WOLF_ROLES]
         if kind == "seer":
             return [item for item in living if item["user_id"] != player["user_id"]]
