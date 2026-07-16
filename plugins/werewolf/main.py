@@ -178,13 +178,22 @@ class WerewolfPlugin:
         if event.get("type") != "message":
             return
         message = event.get("message") or {}
-        if message.get("self") or message.get("system") or message.get("recalled"):
-            return
-        if str(message.get("source") or "").startswith("plugin:"):
-            return
-
+        source = str(message.get("source") or "")
         chat_type = str(message.get("type") or "")
         chat_id = str(message.get("chat_id") or "")
+        trusted_ui_group = (
+            bool(message.get("self"))
+            and source in ("user", "ui_portal")
+            and chat_type == "group"
+            and chat_id.startswith("group_")
+        )
+        if (message.get("self") and not trusted_ui_group) or message.get("system") or message.get("recalled"):
+            return
+        if source.startswith("plugin:"):
+            return
+
+        if trusted_ui_group:
+            message = self._as_host_message(message, ctx)
         sender_id = str(message.get("sender_id") or message.get("user_id") or "")
         if not sender_id:
             return
@@ -233,6 +242,47 @@ class WerewolfPlugin:
                 game = None
             if game and game.get("phase") != "ended":
                 await self._drive_virtual_game(game)
+
+    async def handle_portal_message(self, message, ctx):
+        chat_id = str(message.get("chat_id") or "")
+        if message.get("chat_type") != "group" or not chat_id.startswith("group_"):
+            raise ValueError("Werewolf portal commands require a group chat")
+        text = str(message.get("text") or "").strip()
+        if not text.startswith(self.prefix):
+            raise ValueError(f"Werewolf portal commands must start with {self.prefix}")
+        self_user = message.get("self_user") or {}
+        synthetic = {
+            "message_id": "",
+            "chat_id": chat_id,
+            "type": "group",
+            "group_id": int(chat_id.split("_", 1)[1]),
+            "sender_id": str(self_user.get("user_id") or "self"),
+            "user_id": str(self_user.get("user_id") or "self"),
+            "sender_name": str(self_user.get("name") or "WebQQ"),
+            "content": text,
+            "self": True,
+            "source": "ui_portal",
+        }
+        await self.handle_event({"type": "message", "message": synthetic}, ctx)
+
+    def _as_host_message(self, message, ctx):
+        normalized = dict(message)
+        getter = getattr(ctx, "get_self_user", None)
+        self_user = getter() if callable(getter) else {}
+        ui_user_id = str(self_user.get("user_id") or message.get("sender_id") or "self")
+        game = self.state["games"].get(str(message.get("chat_id") or ""))
+        actor = self._player(game, game.get("host_id")) if game else None
+        if actor:
+            user_id = actor["user_id"]
+            user_name = actor["name"]
+        else:
+            user_id = ui_user_id
+            user_name = str(self_user.get("name") or message.get("sender_name") or "WebQQ")
+        normalized["sender_id"] = user_id
+        normalized["user_id"] = user_id
+        normalized["sender_name"] = user_name
+        normalized["trusted_ui_user_id"] = ui_user_id
+        return normalized
 
     def _remember_message_id(self, message_id):
         self.state["processed_ids"].append(str(message_id))
@@ -331,7 +381,7 @@ class WerewolfPlugin:
         elif command == "观战":
             await self._spectate(game, user_id)
         elif command == "debug":
-            await self._debug(game, user_id)
+            await self._debug(game, str(message.get("trusted_ui_user_id") or user_id))
         elif command == "配置":
             await self._start_setup(game, user_id, args)
         elif command == "角色":

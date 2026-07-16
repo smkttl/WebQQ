@@ -14,6 +14,7 @@ class FakeContext:
         self.logs = []
         self.failures = {}
         self.messages = []
+        self.self_user = {"user_id": "9000", "name": "WebQQ Admin"}
 
     async def send_message(self, chat_id, text, reply_to=None):
         remaining = self.failures.get(chat_id, 0)
@@ -27,6 +28,9 @@ class FakeContext:
 
     def get_messages(self, chat_id, limit=50, before=None):
         return [message for message in self.messages if message.get("chat_id") == chat_id][-limit:]
+
+    def get_self_user(self):
+        return dict(self.self_user)
 
 
 class StableRandom:
@@ -68,6 +72,20 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             "sender_id": str(user_id),
             "sender_name": name or f"P{user_id}",
             "content": content,
+        }
+        await self.plugin.handle_event({"type": "message", "message": message}, self.ctx)
+
+    async def web_group(self, content, group_id=123):
+        self.message_number += 1
+        message = {
+            "message_id": f"web-{self.message_number}",
+            "chat_id": f"group_{group_id}",
+            "type": "group",
+            "sender_id": "self",
+            "sender_name": "You",
+            "content": content,
+            "self": True,
+            "source": "user",
         }
         await self.plugin.handle_event({"type": "message", "message": message}, self.ctx)
 
@@ -139,6 +157,69 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(100, "/wolf 退出", "Alice")
         self.assertEqual(len(game["players"]), 1)
         self.assertIn("房主不能单独退出", self.ctx.sent[-1]["text"])
+
+    async def test_webqq_ui_can_create_as_logged_in_user(self):
+        await self.web_group("/wolf 创建")
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["host_id"], "9000")
+        self.assertEqual(game["players"][0]["user_id"], "9000")
+        self.assertEqual(game["players"][0]["name"], "WebQQ Admin")
+
+    async def test_webqq_ui_group_command_has_host_privileges(self):
+        game = await self.reach_first_day()
+
+        await self.web_group("/wolf 推进")
+
+        self.assertEqual(game["phase"], "vote")
+        self.assertIsNone(game["host_action_proposal"])
+
+    async def test_webqq_portal_group_command_has_host_privileges(self):
+        game = await self.reach_first_day()
+
+        await self.plugin.handle_portal_message({
+            "chat_id": "group_123",
+            "chat_type": "group",
+            "text": "/wolf 推进",
+            "source": "ui_portal",
+            "self_user": {"user_id": "9000", "name": "WebQQ Admin"},
+        }, self.ctx)
+
+        self.assertEqual(game["phase"], "vote")
+        self.assertIsNone(game["host_action_proposal"])
+
+    async def test_webqq_portal_rejects_private_or_unprefixed_messages(self):
+        with self.assertRaisesRegex(ValueError, "require a group chat"):
+            await self.plugin.handle_portal_message({
+                "chat_id": "private_1",
+                "chat_type": "private",
+                "text": "/wolf 状态",
+            }, self.ctx)
+        with self.assertRaisesRegex(ValueError, "must start with /wolf"):
+            await self.plugin.handle_portal_message({
+                "chat_id": "group_123",
+                "chat_type": "group",
+                "text": "推进",
+            }, self.ctx)
+
+    async def test_webqq_portal_preserves_real_uid_for_admin_debug(self):
+        self.ctx = FakeContext({"admin_uids": [9000]})
+        self.state_path = Path(self.tmp.name) / "portal-debug-state.json"
+        self.plugin = WerewolfPlugin(self.ctx, state_path=self.state_path, rng=StableRandom())
+        self.message_number = 0
+        await self.configured_six_player_game(start=True)
+
+        await self.plugin.handle_portal_message({
+            "chat_id": "group_123",
+            "chat_type": "group",
+            "text": "/wolf debug",
+            "source": "ui_portal",
+            "self_user": {"user_id": "9000", "name": "WebQQ Admin"},
+        }, self.ctx)
+
+        messages = [item for item in self.ctx.sent if item["chat_id"] == "temp_123_9000"]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("【狼人杀完整调试数据】", messages[0]["text"])
 
     async def test_configured_command_prefix_is_used_in_help(self):
         context = FakeContext({"command_prefix": "/ww"})
