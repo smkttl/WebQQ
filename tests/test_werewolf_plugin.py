@@ -393,6 +393,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["phase"], "ready")
         self.assertTrue(all(player["role"] is None for player in game["players"]))
         self.assertEqual(self.plugin._call_virtual_llm.await_count, 2)
+        self.assertTrue(all(call.kwargs.get("max_tokens") is None for call in self.plugin._call_virtual_llm.await_args_list))
         self.assertIn("AI 模型预检失败", self.ctx.sent[-1]["text"])
 
     async def test_five_humans_and_one_ai_start_without_temp_chat_for_ai(self):

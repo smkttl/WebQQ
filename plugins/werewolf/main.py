@@ -1305,7 +1305,7 @@ class WerewolfPlugin:
         last_error = "unknown error"
         for _ in range(self._virtual_int("max_retries", 1, 0, 5) + 1):
             try:
-                text = await self._call_virtual_llm(messages, max_tokens=20)
+                text = await self._call_virtual_llm(messages)
                 payload = json.loads(text.strip())
                 if payload == {"ok": True}:
                     return ""
