@@ -2,5 +2,21 @@
   "command_prefix": "/wolf",
   "min_players": 6,
   "max_players": 12,
-  "day_ready_threshold": 0.6
+  "day_ready_threshold": 0.6,
+  "virtual_players": {
+    "enabled": false,
+    "names": ["Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace"],
+    "api_key": "",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini",
+    "persona_prompt": "Play naturally, strategically, and concisely. Stay in character as a player.",
+    "temperature": 0.7,
+    "max_tokens": 300,
+    "timeout_seconds": 30,
+    "max_retries": 1,
+    "max_parallel_decisions": 4,
+    "history_limit": 50,
+    "discussion_messages_per_reply": 3,
+    "max_replies_per_day": 3
+  }
 }
