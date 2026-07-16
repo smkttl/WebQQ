@@ -1,0 +1,6 @@
+{
+  "command_prefix": "/wolf",
+  "min_players": 6,
+  "max_players": 12,
+  "day_ready_threshold": 0.6
+}

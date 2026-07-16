@@ -1,0 +1,8 @@
+{
+  "id": "werewolf",
+  "name": "Werewolf",
+  "version": "1.0.0",
+  "description": "Runs a Chinese-language Werewolf game in a group with temporary-chat secrets.",
+  "entry": "main.py",
+  "enabled_by_default": false
+}
