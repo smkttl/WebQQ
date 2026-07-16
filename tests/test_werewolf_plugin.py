@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from plugins.werewolf.main import WerewolfPlugin
+from plugins.werewolf.main import ROLE_NAMES, WerewolfPlugin
 
 
 class FakeContext:
@@ -95,7 +95,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             await self.group(user_id, "/wolf 加入")
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否",
+            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
             "Host",
         )
         if start:
@@ -127,7 +127,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(1, "/wolf 添加AI")
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否",
+            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
             "Host",
         )
         if start:
@@ -145,6 +145,57 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(6, "/wolf 过")
         self.assertEqual(game["phase"], "discussion")
         return game
+
+    async def reach_first_day_with_knight(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        await self.group(
+            1,
+            "/wolf 配置 村民=2 狼人=2 预言家=1 骑士=1 "
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+        await self.group(1, "/wolf 开始", "Host")
+        game = self.plugin.state["games"]["group_123"]
+        await self.private(3, "/wolf 空刀")
+        await self.private(4, "/wolf 空刀")
+        await self.private(5, "/wolf 查验 3")
+        self.assertEqual(game["phase"], "discussion")
+        return game
+
+    async def reach_first_day_with_white_wolf_king(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        await self.group(
+            1,
+            "/wolf 配置 村民=3 狼人=1 预言家=1 白狼王=1 "
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+        await self.group(1, "/wolf 开始", "Host")
+        game = self.plugin.state["games"]["group_123"]
+        # Stable roles: villagers 1-3, wolf 4, seer 5, White Wolf King 6.
+        await self.private(4, "/wolf 空刀")
+        await self.private(6, "/wolf 空刀")
+        await self.private(5, "/wolf 查验 6")
+        self.assertEqual(game["phase"], "discussion")
+        self.assertEqual(game["players"][4]["last_seer_result"]["result"], "狼人阵营")
+        return game
+
+    async def configured_custom_game(self, role_text, player_count=6, start=True):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, player_count + 1):
+            await self.group(user_id, "/wolf 加入")
+        await self.group(
+            1,
+            f"/wolf 配置 {role_text} 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+        if start:
+            await self.group(1, "/wolf 开始", "Host")
+        return self.plugin.state["games"]["group_123"]
 
     async def test_creator_is_host_and_seat_one_player(self):
         await self.group(100, "/wolf 创建", "Alice")
@@ -270,7 +321,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=1 预言家=1 女巫=1 狼王=1 平票=3 自救=3 双药=是 胜利=屠城 狼刀狼人=是",
+            "/wolf 配置 村民=2 狼人=1 预言家=1 女巫=1 狼王=1 平票=3 自救=3 双药=是 胜利=屠城 狼刀狼人=是 显示票型=1",
             "Host",
         )
 
@@ -282,9 +333,44 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(game["settings"]["witch_double"])
         self.assertEqual(game["settings"]["victory"], "slaughter_city")
         self.assertTrue(game["settings"]["wolf_can_kill_wolves"])
+        self.assertTrue(game["settings"]["show_vote_pattern"])
         self.assertEqual(sum(game["settings"]["roles"].values()), 6)
         self.assertIn("胜利条件：屠城（全部非狼人阵营玩家死亡时", self.ctx.sent[-1]["text"])
         self.assertIn("狼人刀人：允许刀狼队友和自己", self.ctx.sent[-1]["text"])
+        self.assertIn("具体票型：下一夜开始时公开", self.ctx.sent[-1]["text"])
+
+    async def test_role_count_one_can_omit_equals_one(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=3 白狼王 预言家 骑士 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["roles"]["white_wolf_king"], 1)
+        self.assertEqual(game["settings"]["roles"]["seer"], 1)
+        self.assertEqual(game["settings"]["roles"]["knight"], 1)
+        self.assertEqual(game["settings"]["roles"]["wolf"], 0)
+
+    async def test_non_role_configuration_values_cannot_be_omitted(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=3 白狼王 预言家 骑士 平票 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["phase"], "lobby")
+        self.assertIn("规则配置项“平票”不能省略取值", self.ctx.sent[-1]["text"])
 
     async def test_configuration_help_explains_required_options_and_victory_modes(self):
         await self.group(1, "/wolf 创建", "Host")
@@ -296,10 +382,45 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = self.plugin.state["games"]["group_123"]
         text = self.ctx.sent[-1]["text"]
         self.assertEqual(game["phase"], "lobby")
-        self.assertIn("平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否", text)
+        self.assertIn("平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0", text)
         self.assertIn("屠边：普通村民全部死亡或神职全部死亡时", text)
         self.assertIn("屠城：全部非狼人阵营玩家死亡时", text)
         self.assertIn("狼刀狼人=是时，狼人可刀狼队友或自己", text)
+        self.assertIn("显示票型：1=每次投票结束后在下一夜开始时公开谁投给谁", text)
+        self.assertIn("丘比特、骑士", text)
+        self.assertIn("骑士、白狼王", text)
+        self.assertIn("数量为 1 时可省略“=1”", text)
+
+    async def test_complete_requested_role_catalog_is_available_without_sheriff(self):
+        expected = {
+            "守墓人", "摄梦人", "魔术师", "驯熊师", "乌鸦", "禁言长老", "九尾狐", "老流氓",
+            "狼美人", "恶灵骑士", "石像鬼", "隐狼", "血月使徒", "狼巫", "机械狼",
+            "盗贼", "吹笛者", "咒狐", "野孩子", "混血儿", "天使",
+        }
+
+        self.assertTrue(expected <= set(ROLE_NAMES.values()))
+        self.assertNotIn("警长", ROLE_NAMES.values())
+
+    async def test_thief_uses_two_extra_cards_before_identity_delivery(self):
+        game = await self.configured_custom_game(
+            "村民=2 狼人=2 预言家 守墓人 盗贼 咒狐",
+            start=False,
+        )
+
+        await self.group(1, "/wolf 开始", "Host")
+
+        self.assertEqual(game["phase"], "thief_choice")
+        thief = next(player for player in game["players"] if player["role"] == "thief")
+        self.assertEqual(len(game["thief_choices"]), 2)
+        self.assertFalse(any(player["identity_delivered"] for player in game["players"]))
+
+        await self.private(thief["user_id"], "/wolf 选牌 1")
+
+        self.assertEqual(thief["original_role"], "thief")
+        self.assertEqual(thief["role"], game["thief_choices"][0])
+        self.assertEqual(len(game["undealt_roles"]), 1)
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertTrue(all(player["identity_delivered"] for player in game["players"]))
 
     async def test_incomplete_configuration_is_rejected_atomically(self):
         await self.group(1, "/wolf 创建", "Host")
@@ -312,22 +433,31 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(game["phase"], "lobby")
         self.assertEqual(game["settings"], original_settings)
-        self.assertIn("缺少必填配置项：自救、双药、胜利、狼刀狼人", self.ctx.sent[-1]["text"])
+        self.assertIn("缺少必填配置项：自救、双药、胜利、狼刀狼人、显示票型", self.ctx.sent[-1]["text"])
 
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=也许 胜利=屠边 狼刀狼人=否",
+            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=也许 胜利=屠边 狼刀狼人=否 显示票型=0",
             "Host",
         )
         self.assertEqual(game["phase"], "lobby")
         self.assertEqual(game["settings"], original_settings)
         self.assertIn("双药必须填写 是 或 否", self.ctx.sent[-1]["text"])
 
+        await self.group(
+            1,
+            "/wolf 配置 村民=2 狼人=2 预言家 女巫 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=2",
+            "Host",
+        )
+        self.assertEqual(game["phase"], "lobby")
+        self.assertEqual(game["settings"], original_settings)
+        self.assertIn("显示票型必须填写 0 或 1", self.ctx.sent[-1]["text"])
+
     async def test_three_player_quorum_can_apply_complete_configuration(self):
         await self.group(1, "/wolf 创建", "Host")
         for user_id in range(2, 7):
             await self.group(user_id, "/wolf 加入")
-        command = "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否"
+        command = "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0"
 
         await self.group(2, command)
         await self.group(3, command)
@@ -336,6 +466,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = self.plugin.state["games"]["group_123"]
         self.assertEqual(game["phase"], "ready")
         self.assertFalse(game["settings"]["wolf_can_kill_wolves"])
+        self.assertFalse(game["settings"]["show_vote_pattern"])
         self.assertIsNone(game["host_action_proposal"])
 
     async def test_wolf_friendly_fire_setting_controls_human_and_ai_targets(self):
@@ -376,6 +507,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(settings_index, commands_index)
         self.assertLess(commands_index, night_index)
         self.assertIn("胜利条件：屠边", group_texts[settings_index])
+        self.assertIn("骑士在白天讨论时可公开决斗一次", group_texts[rules_index])
+        self.assertIn("白狼王属于狼人阵营", group_texts[rules_index])
         self.assertIn("狼聊 <内容>", group_texts[commands_index])
         self.assertIn("1号 Host（存活）", group_texts[night_index])
         self.assertIn("6号 P6（存活）", group_texts[night_index])
@@ -386,6 +519,33 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             if item["text"].startswith("你是 ")
         }
         self.assertEqual(identity_chats, {f"temp_123_{uid}" for uid in range(1, 7)})
+
+    async def test_public_status_names_exact_blocking_roles(self):
+        game = await self.configured_six_player_game(start=True)
+
+        await self.private(2, "/wolf 状态")
+        self.assertIn("等待行动角色：狼人×2、预言家", self.ctx.sent[-1]["text"])
+        await self.group(2, "/wolf 状态")
+        self.assertIn("等待行动角色：狼人×2、预言家", self.ctx.sent[-1]["text"])
+
+        await self.private(3, "/wolf 刀 1")
+        await self.group(2, "/wolf 状态")
+        self.assertIn("等待行动角色：狼人、预言家", self.ctx.sent[-1]["text"])
+
+        await self.private(4, "/wolf 刀 1")
+        await self.private(5, "/wolf 查验 3")
+        self.assertEqual(game["phase"], "witch")
+        await self.group(2, "/wolf 状态")
+        self.assertIn("等待行动角色：女巫", self.ctx.sent[-1]["text"])
+
+    async def test_vote_status_names_roles_that_have_not_voted(self):
+        game = await self.reach_first_day()
+        await self.group(1, "/wolf 推进", "Host")
+
+        await self.group(2, "/wolf 状态")
+
+        self.assertEqual(game["phase"], "vote")
+        self.assertIn("等待投票角色：村民、狼人×2、预言家、女巫", self.ctx.sent[-1]["text"])
 
     async def test_outsider_can_receive_private_spectator_identity_table(self):
         game = await self.configured_six_player_game(start=True)
@@ -495,6 +655,52 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(game["host_action_proposal"])
         self.assertTrue(any("已获得 3 名玩家同意" in item["text"] for item in self.ctx.sent))
 
+    async def test_host_can_terminate_game_with_complete_action_account(self):
+        game = await self.configured_six_player_game(start=True)
+        await self.private(3, "/wolf 刀 1")
+        await self.private(4, "/wolf 刀 1")
+        await self.private(5, "/wolf 查验 3")
+        self.assertEqual(game["phase"], "witch")
+
+        await self.group(1, "/wolf 结束", "Host")
+
+        self.assertEqual(game["phase"], "ended")
+        self.assertEqual(game["winner"], "terminated")
+        self.assertTrue(game["result_announced"])
+        group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
+        self.assertTrue(any(text.startswith("游戏结束，本局由房主提前终止。") for text in group_texts))
+        self.assertTrue(any("1号 Host：村民" in text for text in group_texts))
+        account = "\n".join(text for text in group_texts if text.startswith("【全局行动记录"))
+        self.assertIn("3号 P3（狼人）选择刀1号 Host（村民）", account)
+        self.assertIn("5号 P5（预言家）查验3号 P3（狼人）：狼人阵营", account)
+        self.assertIn("1号 Host（村民）提前结束本局", account)
+
+    async def test_non_host_termination_requires_three_player_quorum(self):
+        game = await self.configured_six_player_game(start=True)
+
+        await self.group(2, "/wolf 结束")
+
+        self.assertNotEqual(game["phase"], "ended")
+        self.assertEqual(game["host_action_proposal"]["command"], "结束")
+        await self.group(3, "/wolf 同意")
+        await self.group(4, "/wolf 同意")
+        self.assertEqual(game["phase"], "ended")
+        self.assertEqual(game["winner"], "terminated")
+
+    async def test_failed_postgame_account_can_be_resent(self):
+        game = await self.configured_six_player_game(start=True)
+        self.ctx.failures["group_123"] = 1
+
+        await self.group(1, "/wolf 结束", "Host")
+
+        self.assertEqual(game["phase"], "ended")
+        self.assertFalse(game["result_announced"])
+        await self.group(1, "/wolf 重发", "Host")
+        self.assertTrue(game["result_announced"])
+        group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
+        self.assertTrue(any(text.startswith("游戏结束，本局由房主提前终止。") for text in group_texts))
+        self.assertTrue(any(text.startswith("【全局行动记录】") for text in group_texts))
+
     async def test_duplicate_and_spectator_approvals_do_not_count(self):
         game = await self.reach_first_day()
         await self.group(2, "/wolf 推进")
@@ -530,9 +736,14 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
         self.assertTrue(any("2号 P2 被公投出局" in text for text in group_texts))
-        self.assertFalse(any("投给" in text for text in group_texts))
+        live_game_texts = [text for text in group_texts if not text.startswith("【全局行动记录")]
+        self.assertFalse(any("投给" in text for text in live_game_texts))
         self.assertEqual(game["phase"], "ended")
         self.assertEqual(game["winner"], "wolves")
+        account = "\n".join(text for text in group_texts if text.startswith("【全局行动记录"))
+        self.assertIn("2号 P2（村民）投票给2号 P2（村民）", account)
+        self.assertIn("2号 P2（村民）死亡，原因：公投", account)
+        self.assertIn("胜负判定：狼人阵营获胜", account)
 
     async def test_second_night_roster_includes_public_death_status(self):
         game = await self.reach_first_day()
@@ -547,6 +758,251 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         second_night = next(text for text in group_texts if text.startswith("第 2 夜开始"))
         self.assertIn("1号 Host（已死亡）", second_night)
         self.assertIn("2号 P2（存活）", second_night)
+        self.assertNotIn("票型", second_night)
+
+    async def test_new_night_actions_resolve_through_magician_redirection(self):
+        game = await self.configured_six_player_game(start=True)
+        roles = ["magician", "wolf", "seer", "dreamer", "crow", "silencer"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["settings"]["victory"] = "slaughter_city"
+        game["phase"] = "night_actions"
+        game["night_actions"] = {"wolves": {}}
+
+        await self.private(1, "/wolf 交换 2 3")
+        await self.private(4, "/wolf 摄梦 1")
+        await self.private(2, "/wolf 刀 1")
+        await self.private(3, "/wolf 查验 2")
+        await self.private(5, "/wolf 加票 2")
+        await self.private(6, "/wolf 禁言 2")
+
+        self.assertEqual(game["phase"], "discussion")
+        self.assertTrue(game["players"][0]["alive"])
+        self.assertEqual(game["players"][2]["last_seer_result"]["seat"], 3)
+        self.assertEqual(game["crow_targets"], ["3"])
+        self.assertEqual(game["silenced_ids"], ["3"])
+        self.assertEqual(game["players"][0]["last_magic_pair"], ["2", "3"])
+
+        self.plugin._apply_deaths(game, [("4", "exile")])
+        self.assertTrue(game["players"][0]["alive"], "the previous night dream link must not persist into daytime")
+
+    async def test_evil_knight_reflects_seer_and_poison_while_surviving(self):
+        game = await self.configured_six_player_game(start=True)
+        roles = ["seer", "witch", "evil_knight", "wolf", "rogue", "bear_tamer"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["settings"]["victory"] = "slaughter_city"
+        game["phase"] = "night_actions"
+        game["night_actions"] = {"wolves": {}}
+
+        await self.private(3, "/wolf 空刀")
+        await self.private(4, "/wolf 空刀")
+        await self.private(1, "/wolf 查验 3")
+        self.assertEqual(game["phase"], "witch")
+        await self.private(2, "/wolf 毒 3")
+
+        self.assertTrue(game["players"][2]["alive"])
+        self.assertFalse(game["players"][0]["alive"])
+        self.assertFalse(game["players"][1]["alive"])
+        self.assertIn("evil_reflect", game["players"][0]["death_causes"])
+        self.assertIn("evil_reflect", game["players"][1]["death_causes"])
+
+    async def test_dormant_wolves_hide_then_activate_when_pack_dies(self):
+        game = await self.configured_custom_game("村民=3 狼人 预言家 石像鬼 隐狼", player_count=7)
+        wolf = next(player for player in game["players"] if player["role"] == "wolf")
+        seer = next(player for player in game["players"] if player["role"] == "seer")
+        gargoyle = next(player for player in game["players"] if player["role"] == "gargoyle")
+        hidden = next(player for player in game["players"] if player["role"] == "hidden_wolf")
+
+        self.assertFalse(gargoyle["wolf_active"])
+        self.assertFalse(hidden["wolf_active"])
+        self.assertNotIn(gargoyle, self.plugin._wolf_pack(game))
+        self.assertEqual(self.plugin._seer_alignment(hidden), "非狼人阵营")
+
+        await self.private(gargoyle["user_id"], f"/wolf 窥视 {seer['seat']}")
+        await self.private(wolf["user_id"], "/wolf 空刀")
+        await self.private(seer["user_id"], f"/wolf 查验 {hidden['seat']}")
+        self.assertEqual(seer["last_seer_result"]["result"], "非狼人阵营")
+
+        self.plugin._apply_deaths(game, [(wolf["user_id"], "shot")])
+        game["transition_after_shots"] = "discussion"
+        await self.plugin._after_deaths(game)
+
+        self.assertTrue(gargoyle["wolf_active"])
+        self.assertTrue(hidden["wolf_active"])
+        self.assertEqual({player["user_id"] for player in self.plugin._wolf_pack(game)}, {gargoyle["user_id"], hidden["user_id"]})
+
+    async def test_mechanical_wolf_learns_and_uses_copied_active_skill(self):
+        game = await self.configured_custom_game("村民=2 狼人 预言家 守卫 机械狼")
+        wolf = next(player for player in game["players"] if player["role"] == "wolf")
+        seer = next(player for player in game["players"] if player["role"] == "seer")
+        guard = next(player for player in game["players"] if player["role"] == "guard")
+        mechanical = next(player for player in game["players"] if player["role"] == "mechanical_wolf")
+
+        await self.private(mechanical["user_id"], f"/wolf 学习 {seer['seat']}")
+        self.assertEqual(mechanical["copied_role"], "seer")
+        await self.private(guard["user_id"], "/wolf 空守")
+        await self.private(wolf["user_id"], "/wolf 空刀")
+        await self.private(mechanical["user_id"], "/wolf 空刀")
+        await self.private(seer["user_id"], f"/wolf 查验 {wolf['seat']}")
+        await self.private(mechanical["user_id"], f"/wolf 查验 {wolf['seat']}")
+
+        self.assertEqual(seer["last_seer_result"]["result"], "狼人阵营")
+        self.assertEqual(mechanical["last_seer_result"]["result"], "狼人阵营")
+
+    async def test_passive_roles_apply_tails_rogue_immunity_and_wild_child_change(self):
+        game = await self.configured_six_player_game(start=True)
+        roles = ["nine_tailed_fox", "villager", "seer", "wild_child", "wolf_beauty", "rogue"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["players"][3]["wild_model"] = "2"
+        game["players"][4]["wolf_beauty_target"] = "6"
+
+        self.plugin._apply_deaths(game, [("2", "wolf"), ("3", "wolf"), ("5", "shot")])
+
+        self.assertEqual(game["players"][0]["nine_tails"], 6)
+        self.assertEqual(game["players"][3]["role"], "wolf")
+        self.assertTrue(game["players"][3]["wolf_active"])
+        self.assertTrue(game["players"][5]["alive"])
+
+    async def test_gravekeeper_bear_crow_and_silence_public_effects(self):
+        game = await self.configured_six_player_game(start=True)
+        roles = ["bear_tamer", "hidden_wolf", "gravekeeper", "wolf", "villager", "crow"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["last_exile"] = "4"
+        game["phase"] = "night_actions"
+        game["night_actions"] = {"wolves": {}}
+
+        self.assertTrue(self.plugin._bear_roars(game, game["players"][0]))
+        await self.plugin._send_night_prompts(game)
+        self.assertIn("狼人阵营", game["players"][2]["last_grave_result"])
+
+        game["settings"]["victory"] = "slaughter_city"
+        game["phase"] = "discussion"
+        game["day"] = 1
+        game["ready"] = []
+        game["silenced_ids"] = ["2"]
+        await self.group(2, "/wolf 结束发言")
+        self.assertNotIn("2", game["ready"])
+
+        await self.plugin._begin_vote(game, 1, None)
+        game["crow_targets"] = ["2"]
+        for user_id in range(1, 7):
+            await self.private(user_id, "/wolf 弃票")
+        self.assertFalse(game["players"][1]["alive"])
+        history = "\n".join(entry["text"] for entry in game["action_history"])
+        self.assertIn("乌鸦效果", history)
+
+    async def test_cursed_fox_ignores_wolf_attack_but_dies_to_inspection(self):
+        game = await self.configured_six_player_game(start=True)
+        fox = game["players"][0]
+        self.plugin._reset_player_for_role(fox, "cursed_fox")
+        game["settings"]["victory"] = "slaughter_city"
+        game["night_actions"] = {
+            "wolves": {}, "wolf_target": fox["user_id"], "resolved_guards": [],
+            "dream_links": {}, "witch_actor_keys": [],
+        }
+        await self.plugin._resolve_night(game)
+        self.assertTrue(fox["alive"])
+
+        game["phase"] = "night_actions"
+        game["night_actions"] = {
+            "wolves": {}, "wolf_target": None, "resolved_guards": [],
+            "dream_links": {}, "witch_actor_keys": [], "checked_foxes": [fox["user_id"]],
+        }
+        await self.plugin._resolve_night(game)
+        self.assertFalse(fox["alive"])
+        self.assertIn("fox_checked", fox["death_causes"])
+
+    async def test_neutral_winners_and_mixed_blood_co_winner(self):
+        game = await self.configured_six_player_game(start=True)
+        roles = ["piper", "mixed_blood", "villager", "wolf", "seer", "cursed_fox"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["charmed_players"] = ["2", "3", "4", "5", "6"]
+        game["players"][1]["mixed_support"] = "1"
+
+        self.assertEqual(self.plugin._winner(game), "piper")
+        self.assertEqual(self.plugin._result_winner_ids(game, "piper"), ["1", "2"])
+
+        game["players"][0]["alive"] = False
+        game["players"][3]["alive"] = False
+        self.assertEqual(self.plugin._winner(game), "fox")
+
+    async def test_blood_moon_explosion_seals_the_next_night(self):
+        game = await self.reach_first_day()
+        game["settings"]["victory"] = "slaughter_city"
+        blood = game["players"][1]
+        self.plugin._reset_player_for_role(blood, "blood_moon")
+
+        await self.group(2, "/wolf 血爆")
+
+        self.assertFalse(blood["alive"])
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["good_skills_sealed_night"], game["night"])
+        self.assertNotIn("seer", self.plugin._pending_night_roles(game))
+
+    async def test_last_blood_moon_exile_grants_one_final_night(self):
+        game = await self.reach_first_day()
+        game["settings"]["victory"] = "slaughter_city"
+        blood = game["players"][2]
+        self.plugin._reset_player_for_role(blood, "blood_moon")
+        game["players"][3]["alive"] = False
+        game["phase"] = "vote"
+        game["day"] = 1
+
+        await self.plugin._exile(game, blood["user_id"])
+
+        self.assertTrue(blood["alive"])
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["blood_moon_doomed"]["night"], game["night"])
+
+        victim = game["players"][1]
+        game["night_actions"] = {
+            "wolves": {blood["user_id"]: victim["user_id"]},
+            "wolf_target": victim["user_id"],
+            "resolved_guards": [],
+            "dream_links": {},
+            "witch_actor_keys": [],
+        }
+        await self.plugin._resolve_night(game)
+
+        self.assertFalse(blood["alive"])
+        self.assertIn("blood_moon_delayed", blood["death_causes"])
+        self.assertFalse(victim["alive"])
+
+    async def test_day_one_angel_exile_wins_immediately(self):
+        game = await self.reach_first_day()
+        angel = game["players"][1]
+        self.plugin._reset_player_for_role(angel, "angel")
+        game["day"] = 1
+
+        await self.plugin._exile(game, angel["user_id"])
+
+        self.assertEqual(game["winner"], "angel")
+        self.assertEqual(game["result_winners"], [angel["user_id"]])
+
+    async def test_enabled_vote_pattern_is_shown_at_next_night_without_roles(self):
+        game = await self.reach_first_day()
+        game["settings"]["show_vote_pattern"] = True
+        for user_id in (2, 3, 4):
+            await self.group(user_id, "/wolf 结束发言")
+
+        await self.private(2, "/wolf 投票 3")
+        await self.private(3, "/wolf 投票 2")
+        for user_id in (4, 5, 6):
+            await self.private(user_id, "/wolf 弃票")
+
+        self.assertEqual(game["phase"], "night_actions")
+        group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
+        second_night = next(text for text in group_texts if text.startswith("【第 1 轮票型】"))
+        self.assertIn("2号 P2 投给 3号 P3", second_night)
+        self.assertIn("3号 P3 投给 2号 P2", second_night)
+        self.assertIn("4号 P4 投给 弃票", second_night)
+        self.assertIn("第 2 夜开始", second_night)
+        self.assertNotIn("（村民）", second_night)
+        self.assertNotIn("（狼人）", second_night)
 
     async def test_restart_restores_private_game_context(self):
         game = await self.configured_six_player_game(start=True)
@@ -574,6 +1030,166 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["pending_shots"], [])
         self.assertFalse(game["players"][1]["alive"])
 
+    async def test_knight_wrong_duel_kills_knight_and_continues_discussion(self):
+        game = await self.reach_first_day_with_knight()
+
+        await self.group(6, "/wolf 决斗 1")
+
+        knight = game["players"][5]
+        self.assertFalse(knight["alive"])
+        self.assertTrue(knight["knight_used"])
+        self.assertTrue(game["players"][0]["alive"])
+        self.assertEqual(knight["death_causes"], ["duel_failed"])
+        self.assertEqual(game["phase"], "discussion")
+        self.assertIn("目标不属于狼人阵营", self.ctx.sent[-2]["text"])
+        self.assertIn("继续白天讨论", self.ctx.sent[-1]["text"])
+
+    async def test_knight_correct_duel_kills_wolf_and_moves_to_night(self):
+        game = await self.reach_first_day_with_knight()
+
+        await self.group(6, "/wolf决斗3")
+
+        knight = game["players"][5]
+        wolf = game["players"][2]
+        self.assertTrue(knight["alive"])
+        self.assertTrue(knight["knight_used"])
+        self.assertFalse(wolf["alive"])
+        self.assertEqual(wolf["death_causes"], ["duel"])
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["night"], 2)
+        self.assertEqual(game["pending_shots"], [])
+        history = "\n".join(entry["text"] for entry in game["action_history"])
+        self.assertIn("6号 P6（骑士）公开决斗3号 P3（狼人）", history)
+        self.assertIn("3号 P3（狼人）死亡，原因：骑士决斗", history)
+
+    async def test_knight_duel_blocks_wolf_king_death_shot(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        await self.group(
+            1,
+            "/wolf 配置 村民=2 狼人=1 预言家=1 狼王=1 骑士=1 "
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+        await self.group(1, "/wolf 开始", "Host")
+        game = self.plugin.state["games"]["group_123"]
+        # Stable roles: villagers 1-2, wolf 3, seer 4, wolf king 5, knight 6.
+        await self.private(3, "/wolf 空刀")
+        await self.private(5, "/wolf 空刀")
+        await self.private(4, "/wolf 查验 3")
+
+        await self.group(6, "/wolf 决斗 5")
+
+        self.assertFalse(game["players"][4]["alive"])
+        self.assertEqual(game["players"][4]["death_causes"], ["duel"])
+        self.assertEqual(game["pending_shots"], [])
+        self.assertEqual(game["phase"], "night_actions")
+
+    async def test_virtual_knight_has_duel_schema_targets_and_daily_pass(self):
+        game = await self.reach_first_day_with_knight()
+        knight = game["players"][5]
+        knight["virtual"] = True
+
+        legal = self.plugin._legal_ai_targets(game, knight, "knight")
+        self.assertEqual([player["seat"] for player in legal], [1, 2, 3, 4, 5])
+        instruction = self.plugin._ai_decision_instruction(game, knight, "knight")
+        self.assertIn('{"action":"duel","seat":4}', instruction)
+        decision = self.plugin._validate_ai_decision(game, knight, "knight", '{"action":"duel","seat":3}')
+        self.assertEqual(decision, {"command": "决斗", "args": ["3"]})
+        self.assertTrue(any(player is knight and kind == "knight" for player, kind in self.plugin._pending_virtual_decisions(game)))
+
+        await self.plugin._apply_ai_decision(game, knight, "knight", {"command": "过", "args": []})
+
+        self.assertEqual(knight["ai_knight_decision_day"], game["day"])
+        self.assertFalse(any(player is knight and kind == "knight" for player, kind in self.plugin._pending_virtual_decisions(game)))
+
+    async def test_white_wolf_king_blast_kills_both_and_moves_to_night(self):
+        game = await self.reach_first_day_with_white_wolf_king()
+
+        await self.group(6, "/wolf 自爆 1")
+
+        white_wolf = game["players"][5]
+        target = game["players"][0]
+        self.assertFalse(white_wolf["alive"])
+        self.assertFalse(target["alive"])
+        self.assertEqual(white_wolf["death_causes"], ["white_wolf_blast_self"])
+        self.assertEqual(target["death_causes"], ["white_wolf_blast"])
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["night"], 2)
+        self.assertEqual(game["pending_shots"], [])
+        history = "\n".join(entry["text"] for entry in game["action_history"])
+        self.assertIn("6号 P6（白狼王）公开自爆并带走1号 Host（村民）", history)
+        self.assertIn("1号 Host（村民）死亡，原因：白狼王自爆带走", history)
+
+    async def test_white_wolf_king_blast_allows_carried_hunter_to_shoot(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        await self.group(
+            1,
+            "/wolf 配置 村民=2 狼人=1 预言家=1 猎人=1 白狼王=1 "
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "Host",
+        )
+        await self.group(1, "/wolf 开始", "Host")
+        game = self.plugin.state["games"]["group_123"]
+        # Stable roles: villagers 1-2, wolf 3, seer 4, hunter 5, White Wolf King 6.
+        await self.private(3, "/wolf 空刀")
+        await self.private(6, "/wolf 空刀")
+        await self.private(4, "/wolf 查验 6")
+
+        await self.group(6, "/wolf自爆5")
+
+        self.assertFalse(game["players"][4]["alive"])
+        self.assertFalse(game["players"][5]["alive"])
+        self.assertEqual(game["pending_shots"], ["5"])
+        self.assertEqual(game["phase"], "death_shot")
+        await self.private(5, "/wolf 不开枪")
+        self.assertEqual(game["phase"], "night_actions")
+
+    async def test_virtual_white_wolf_king_has_explode_schema_and_daily_pass(self):
+        game = await self.reach_first_day_with_white_wolf_king()
+        white_wolf = game["players"][5]
+        white_wolf["virtual"] = True
+
+        legal = self.plugin._legal_ai_targets(game, white_wolf, "white_wolf_blast")
+        self.assertEqual([player["seat"] for player in legal], [1, 2, 3, 4, 5])
+        instruction = self.plugin._ai_decision_instruction(game, white_wolf, "white_wolf_blast")
+        self.assertIn('{"action":"explode","seat":4}', instruction)
+        decision = self.plugin._validate_ai_decision(
+            game,
+            white_wolf,
+            "white_wolf_blast",
+            '{"action":"explode","seat":1}',
+        )
+        self.assertEqual(decision, {"command": "自爆", "args": ["1"]})
+        self.assertTrue(any(
+            player is white_wolf and kind == "white_wolf_blast"
+            for player, kind in self.plugin._pending_virtual_decisions(game)
+        ))
+
+        await self.plugin._apply_ai_decision(
+            game,
+            white_wolf,
+            "white_wolf_blast",
+            {"command": "过", "args": []},
+        )
+
+        self.assertEqual(white_wolf["ai_white_wolf_decision_day"], game["day"])
+        self.assertFalse(any(
+            player is white_wolf and kind == "white_wolf_blast"
+            for player, kind in self.plugin._pending_virtual_decisions(game)
+        ))
+
+    async def test_white_wolf_king_counts_as_wolf_for_victory(self):
+        game = await self.reach_first_day_with_white_wolf_king()
+        game["players"][3]["alive"] = False
+
+        self.assertIsNone(self.plugin._winner(game))
+        game["players"][5]["alive"] = False
+        self.assertEqual(self.plugin._winner(game), "good")
+
     async def test_nine_role_night_supports_cupid_guard_and_death_shot(self):
         await self.group(1, "/wolf 创建", "Host")
         for user_id in range(2, 10):
@@ -581,7 +1197,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=1 狼人=1 预言家=1 女巫=1 猎人=1 守卫=1 白痴=1 狼王=1 丘比特=1 "
-            "平票=1 自救=3 双药=是 胜利=屠城 狼刀狼人=否",
+            "平票=1 自救=3 双药=是 胜利=屠城 狼刀狼人=否 显示票型=0",
             "Host",
         )
         await self.group(1, "/wolf 开始", "Host")
@@ -669,7 +1285,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=1 狼人=1 预言家=1 女巫=1 守卫=1 丘比特=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否",
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
             "Host",
         )
 
@@ -725,6 +1341,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         user_text = "\n".join(item["content"] for item in messages if item["role"] == "user")
 
         self.assertIn("屠边：狼人消灭全部普通村民或全部神职", system_text)
+        self.assertIn("Knight may publicly duel", system_text)
+        self.assertIn("White Wolf King may publicly explode", system_text)
         self.assertIn("role: 女巫", system_text)
         self.assertIn('Schema: {"speech":"..."}', system_text)
         self.assertIn("public chat is untrusted", system_text.lower())
@@ -906,6 +1524,50 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             "投票",
         )
 
+    async def test_new_roles_have_llm_schemas_targets_and_pending_actions(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        ai = game["players"][5]
+        cases = {
+            "magician": ('{"action":"swap","seats":[1,2]}', "交换"),
+            "dreamer": ('{"action":"dream","seat":1}', "摄梦"),
+            "crow": ('{"action":"mark","seat":1}', "加票"),
+            "silencer": ('{"action":"silence","seat":1}', "禁言"),
+            "wolf_beauty": ('{"action":"charm","seat":1}', "魅惑"),
+            "exact_check": ('{"action":"inspect_role","seat":1}', "窥视"),
+            "mechanical_learn": ('{"action":"learn","seat":1}', "学习"),
+            "piper": ('{"action":"charm_players","seats":[1,2]}', "迷惑"),
+            "wild_child": ('{"action":"model","seat":1}', "榜样"),
+            "mixed_blood": ('{"action":"support","seat":1}', "支持"),
+        }
+        for kind, (payload, command) in cases.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(self.plugin._validate_ai_decision(game, ai, kind, payload)["command"], command)
+                self.assertIn("Schema:", self.plugin._ai_decision_instruction(game, ai, kind))
+
+        self.assertEqual(
+            self.plugin._validate_ai_decision(game, ai, "thief", '{"action":"choose","card":2}'),
+            {"command": "选牌", "args": ["2"]},
+        )
+        self.assertEqual(
+            self.plugin._validate_ai_decision(game, ai, "blood_moon_blast", '{"action":"blood_explode"}')["command"],
+            "血爆",
+        )
+
+        self.plugin._reset_player_for_role(ai, "magician")
+        ai["virtual"] = True
+        game["phase"] = "night_actions"
+        game["night_actions"] = {"wolves": {}}
+        self.assertTrue(any(player is ai and kind == "magician" for player, kind in self.plugin._pending_virtual_decisions(game)))
+
+        self.plugin._reset_player_for_role(ai, "mechanical_wolf")
+        ai["virtual"] = True
+        ai["copied_role"] = "witch"
+        key = self.plugin._night_action_key(ai, "witch", "witch")
+        game["phase"] = "witch"
+        game["night_actions"] = {"wolf_target": "1", "witch_actor_keys": [key]}
+        self.assertTrue(any(player is ai and kind == "witch" for player, kind in self.plugin._pending_virtual_decisions(game)))
+
     async def test_version_one_state_migrates_existing_players_to_human(self):
         migration_path = Path(self.tmp.name) / "version-one.json"
         migration_path.write_text(json.dumps({
@@ -921,13 +1583,18 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         plugin = WerewolfPlugin(FakeContext(), state_path=migration_path, rng=StableRandom())
 
-        self.assertEqual(plugin.state["version"], 2)
+        self.assertEqual(plugin.state["version"], 3)
         player = plugin.state["games"]["group_9"]["players"][0]
         self.assertFalse(player["virtual"])
         self.assertEqual(player["ai_daily_replies"], 0)
+        self.assertFalse(player["knight_used"])
+        self.assertEqual(player["ai_knight_decision_day"], 0)
+        self.assertEqual(player["ai_white_wolf_decision_day"], 0)
         self.assertFalse(plugin.state["games"]["group_9"]["settings"]["wolf_can_kill_wolves"])
+        self.assertFalse(plugin.state["games"]["group_9"]["settings"]["show_vote_pattern"])
+        self.assertEqual(plugin.state["games"]["group_9"]["vote_patterns"], [])
         persisted = json.loads(migration_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 2)
+        self.assertEqual(persisted["version"], 3)
 
 
 if __name__ == "__main__":

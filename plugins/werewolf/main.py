@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 import aiohttp
 
 
-STATE_VERSION = 2
+STATE_VERSION = 3
 DEFAULT_AI_NAMES = ["Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace"]
 
 ROLE_NAMES = {
@@ -23,11 +23,52 @@ ROLE_NAMES = {
     "idiot": "白痴",
     "wolf_king": "狼王",
     "cupid": "丘比特",
+    "knight": "骑士",
+    "white_wolf_king": "白狼王",
+    "gravekeeper": "守墓人",
+    "dreamer": "摄梦人",
+    "magician": "魔术师",
+    "bear_tamer": "驯熊师",
+    "crow": "乌鸦",
+    "silencer": "禁言长老",
+    "nine_tailed_fox": "九尾狐",
+    "rogue": "老流氓",
+    "wolf_beauty": "狼美人",
+    "evil_knight": "恶灵骑士",
+    "gargoyle": "石像鬼",
+    "hidden_wolf": "隐狼",
+    "blood_moon": "血月使徒",
+    "wolf_witch": "狼巫",
+    "mechanical_wolf": "机械狼",
+    "thief": "盗贼",
+    "piper": "吹笛者",
+    "cursed_fox": "咒狐",
+    "wild_child": "野孩子",
+    "mixed_blood": "混血儿",
+    "angel": "天使",
 }
 ROLE_KEYS = {name: key for key, name in ROLE_NAMES.items()}
-WOLF_ROLES = {"wolf", "wolf_king"}
-DIVINE_ROLES = {"seer", "witch", "hunter", "guard", "idiot", "cupid"}
+WOLF_ROLES = {
+    "wolf", "wolf_king", "white_wolf_king", "wolf_beauty", "evil_knight", "gargoyle",
+    "hidden_wolf", "blood_moon", "wolf_witch", "mechanical_wolf",
+}
+PACK_WOLF_ROLES = {
+    "wolf", "wolf_king", "white_wolf_king", "wolf_beauty", "evil_knight", "blood_moon",
+    "wolf_witch", "mechanical_wolf",
+}
+DORMANT_WOLF_ROLES = {"gargoyle", "hidden_wolf"}
+DIVINE_ROLES = {
+    "seer", "witch", "hunter", "guard", "idiot", "cupid", "knight", "gravekeeper",
+    "dreamer", "magician", "bear_tamer", "crow", "silencer", "nine_tailed_fox",
+}
+VILLAGER_ROLES = {"villager", "rogue"}
+NEUTRAL_ROLES = {"thief", "piper", "cursed_fox", "mixed_blood", "angel"}
 SPECIAL_ROLES = set(ROLE_NAMES) - {"villager", "wolf"}
+COPYABLE_ROLES = {
+    "seer", "witch", "hunter", "guard", "knight", "white_wolf_king", "dreamer",
+    "magician", "crow", "silencer", "wolf_beauty", "blood_moon", "gargoyle", "wolf_witch",
+    "piper",
+}
 
 ROLE_HELP = {
     "villager": "没有夜间技能，通过发言和投票找出狼人。",
@@ -39,6 +80,29 @@ ROLE_HELP = {
     "idiot": "首次被公投出局时翻牌免死，之后失去投票权。",
     "wolf_king": "属于狼人阵营，死亡时可以开枪，但被毒死时不能开枪。",
     "cupid": "首夜连接两名玩家成为情侣。",
+    "knight": "白天讨论时可公开决斗一名其他玩家一次：目标是狼人则目标死亡并入夜，否则骑士死亡并继续讨论。",
+    "white_wolf_king": "属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家，随后直接入夜。",
+    "gravekeeper": "每晚获知上一名实际被公投出局玩家的阵营。",
+    "dreamer": "每晚摄梦另一名玩家使其免疫夜间伤害；若摄梦人当夜死亡，梦游者一同死亡。",
+    "magician": "每晚交换两名存活玩家承受夜间目标技能的座位，连续两晚不能重复使用同一座位。",
+    "bear_tamer": "每天清晨，若相邻的最近存活玩家中有狼人阵营，熊会公开咆哮。",
+    "crow": "每晚诅咒另一名玩家，使其次日每轮投票额外获得一票。",
+    "silencer": "每晚禁言另一名玩家；目标次日不能发起白天技能或确认结束发言，但仍可投票。",
+    "nine_tailed_fox": "拥有九条尾巴；普通好人死亡失去一条，神职死亡失去两条，尾巴耗尽时死亡。",
+    "rogue": "属于普通村民，不受毒药和狼美人殉情影响。",
+    "wolf_beauty": "属于狼人阵营，每晚魅惑一名非狼队玩家；狼美人死亡时当前魅惑目标随之死亡。",
+    "evil_knight": "属于狼人阵营，免疫夜间伤害；被查验或被毒时分别反伤预言家或女巫。",
+    "gargoyle": "属于狼人阵营，初始不与狼队见面，每晚查验精确身份；狼队全灭后获得刀人能力。",
+    "hidden_wolf": "属于狼人阵营但查验显示非狼人，初始不与狼队见面；狼队全灭后成为普通狼人。",
+    "blood_moon": "属于狼人阵营，可白天血爆封印当夜好人技能；作为最后一狼被公投时可进行最后一刀。",
+    "wolf_witch": "属于狼人阵营，参与刀人并可每晚额外查验一名玩家的精确身份。",
+    "mechanical_wolf": "属于狼人阵营，首夜学习一名玩家的精确身份并复制其可主动使用的技能。",
+    "thief": "开局从两张未发身份牌中选择一张，随后完全成为该身份。",
+    "piper": "每晚迷惑至多两名玩家；当其他所有存活玩家均被迷惑时独自获胜。",
+    "cursed_fox": "第三方身份，免疫狼刀，被查验则死亡；存活到阵营胜利时夺取胜利。",
+    "wild_child": "首夜选择榜样，榜样存活时属于普通好人；榜样死亡后加入狼队。",
+    "mixed_blood": "首夜选择支持一名玩家；该玩家最终获胜时混血儿共同获胜。",
+    "angel": "若第一天被公投出局则独自获胜，否则第一天投票后变为普通村民。",
 }
 
 TIE_POLICIES = {
@@ -64,17 +128,19 @@ WITCH_SELF_NAMES = {
 
 COMMAND_NAMES = {
     "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "角色", "平票",
-    "女巫自救", "女巫双药", "胜利", "开始", "结束发言", "状态", "推进", "重发", "取消",
+    "女巫自救", "女巫双药", "胜利", "开始", "结束", "结束发言", "状态", "推进", "重发", "取消",
     "清理", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "救", "毒", "救毒",
-    "过", "开枪", "不开枪", "投票", "弃票", "观战", "debug", "同意", "撤销提议",
+    "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议",
+    "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "血爆",
 }
 HOST_ONLY_COMMANDS = {
     "添加AI", "删除AI", "配置", "角色", "平票", "女巫自救", "女巫双药", "胜利",
-    "开始", "推进", "重发", "取消", "清理",
+    "开始", "结束", "推进", "重发", "取消", "清理",
 }
 COMPACT_ARGUMENT_COMMANDS = {
     "添加AI", "删除AI", "配置", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
-    "连结", "守护", "刀", "查验", "毒", "救毒", "开枪", "投票",
+    "连结", "守护", "刀", "查验", "毒", "救毒", "开枪", "投票", "决斗", "自爆",
+    "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持",
 }
 COMPACT_COMMAND_ORDER = sorted(COMPACT_ARGUMENT_COMMANDS, key=len, reverse=True)
 
@@ -144,23 +210,48 @@ class WerewolfPlugin:
             return {"version": STATE_VERSION, "games": {}, "processed_ids": []}, False
         with open(self.state_path, encoding="utf-8") as f:
             state = json.load(f)
-        if not isinstance(state, dict) or state.get("version") not in (1, STATE_VERSION):
+        if not isinstance(state, dict) or state.get("version") not in (1, 2, STATE_VERSION):
             raise ValueError("unsupported werewolf state version")
         if not isinstance(state.get("games"), dict) or not isinstance(state.get("processed_ids", []), list):
             raise ValueError("malformed werewolf state")
         state.setdefault("processed_ids", [])
-        migrated = state.get("version") == 1
-        if migrated:
-            state["version"] = STATE_VERSION
+        migrated = state.get("version") != STATE_VERSION
+        state["version"] = STATE_VERSION
         for game in state["games"].values():
             game.setdefault("ai_sequence", 0)
             game.setdefault("discussion_human_messages", 0)
             game.setdefault("ai_round_robin_seat", 0)
             game.setdefault("host_action_proposal", None)
+            game.setdefault("action_history", [])
+            game.setdefault("result_delivery_index", 0)
+            game.setdefault("vote_patterns", [])
+            game.setdefault("undealt_roles", [])
+            game.setdefault("thief_choices", [])
+            game.setdefault("charmed_players", [])
+            game.setdefault("silenced_id", None)
+            game.setdefault("crow_target", None)
+            game.setdefault("crow_targets", [])
+            game.setdefault("silenced_ids", [])
+            game.setdefault("last_exile", None)
+            game.setdefault("magic_last_pair", [])
+            game.setdefault("dream_last_target", None)
+            game.setdefault("last_silenced_target", None)
+            game.setdefault("wolf_beauty_target", None)
+            game.setdefault("good_skills_sealed_night", 0)
+            game.setdefault("blood_moon_doomed", None)
+            game.setdefault("result_winners", [])
+            game.setdefault("role_notifications", [])
             settings = game.setdefault("settings", {})
             if "wolf_can_kill_wolves" not in settings:
                 settings["wolf_can_kill_wolves"] = False
                 migrated = True
+            if "show_vote_pattern" not in settings:
+                settings["show_vote_pattern"] = False
+                migrated = True
+            roles = settings.get("roles")
+            if isinstance(roles, dict):
+                for role in ROLE_NAMES:
+                    roles.setdefault(role, 0)
             for player in game.get("players", []):
                 self._ensure_player_schema(player)
         return state, migrated
@@ -353,6 +444,13 @@ class WerewolfPlugin:
         if not game:
             await self._safe_send(chat_id, f"当前群没有游戏。发送 {self.prefix} 创建 开房。")
             return
+        if (
+            game.get("phase") == "discussion"
+            and self._is_silenced(game, self._player(game, user_id))
+            and command in {"结束发言", "决斗", "自爆", "血爆"}
+        ):
+            await self._safe_send(chat_id, "你本日被禁言，不能使用白天发言或公开技能命令，但仍可私下投票。")
+            return
 
         if command == "同意":
             await self._approve_host_action(game, user_id)
@@ -396,8 +494,16 @@ class WerewolfPlugin:
             await self._setup_victory(game, user_id, args)
         elif command == "开始":
             await self._start_game(game, user_id)
+        elif command == "结束":
+            await self._terminate_game(game, user_id)
         elif command == "结束发言":
             await self._day_ready(game, user_id)
+        elif command == "决斗":
+            await self._knight_duel(game, user_id, args)
+        elif command == "自爆":
+            await self._white_wolf_blast(game, user_id, args)
+        elif command == "血爆":
+            await self._blood_moon_blast(game, user_id)
         elif command == "状态":
             await self._safe_send(chat_id, self._public_status(game))
         elif command == "推进":
@@ -524,12 +630,21 @@ class WerewolfPlugin:
                 player["identity_delivered"] = True
                 self._save()
                 await self._deliver_start(game)
+        elif command == "选牌":
+            await self._thief_action(game, player, args)
         elif command == "狼聊":
             await self._wolf_relay(game, player, " ".join(args))
         elif command in ("连结", "守护", "空守", "刀", "空刀", "查验"):
             await self._night_action(game, player, command, args)
-        elif command in ("救", "毒", "救毒", "过"):
+        elif command in ("交换", "摄梦", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持"):
+            await self._special_night_action(game, player, command, args)
+        elif command in ("救", "毒", "救毒"):
             await self._witch_action(game, player, command, args)
+        elif command == "过":
+            if game.get("phase") == "witch":
+                await self._witch_action(game, player, command, args)
+            else:
+                await self._special_night_action(game, player, command, args)
         elif command in ("开枪", "不开枪"):
             await self._shot_action(game, player, command, args)
         elif command in ("投票", "弃票"):
@@ -594,7 +709,10 @@ class WerewolfPlugin:
             "host_id": host_id,
             "phase": "lobby",
             "players": [self._new_player(host_id, host_name, 1)],
-            "settings": {"day_ready_threshold": self.day_ready_threshold},
+            "settings": {
+                "day_ready_threshold": self.day_ready_threshold,
+                "show_vote_pattern": False,
+            },
             "setup_step": None,
             "night": 0,
             "day": 0,
@@ -612,6 +730,25 @@ class WerewolfPlugin:
             "discussion_human_messages": 0,
             "ai_round_robin_seat": 0,
             "host_action_proposal": None,
+            "action_history": [],
+            "result_delivery_index": 0,
+            "vote_patterns": [],
+            "undealt_roles": [],
+            "thief_choices": [],
+            "charmed_players": [],
+            "silenced_id": None,
+            "crow_target": None,
+            "crow_targets": [],
+            "silenced_ids": [],
+            "last_exile": None,
+            "magic_last_pair": [],
+            "dream_last_target": None,
+            "last_silenced_target": None,
+            "wolf_beauty_target": None,
+            "good_skills_sealed_night": 0,
+            "blood_moon_doomed": None,
+            "result_winners": [],
+            "role_notifications": [],
         }
         self.state["games"][chat_id] = game
         self._save()
@@ -645,6 +782,26 @@ class WerewolfPlugin:
         player.setdefault("ai_wolf_replies", 0)
         player.setdefault("ai_last_prompt", "")
         player.setdefault("ai_last_decision", {})
+        player.setdefault("knight_used", False)
+        player.setdefault("ai_knight_decision_day", 0)
+        player.setdefault("ai_white_wolf_decision_day", 0)
+        player.setdefault("ai_role_decision_tokens", {})
+        player.setdefault("original_role", player.get("role"))
+        player.setdefault("wolf_active", player.get("role") not in DORMANT_WOLF_ROLES)
+        player.setdefault("copied_role", None)
+        player.setdefault("copied_resources", {})
+        player.setdefault("nine_tails", 9)
+        player.setdefault("wild_model", None)
+        player.setdefault("mixed_support", None)
+        player.setdefault("angel_converted", False)
+        player.setdefault("last_magic_pair", [])
+        player.setdefault("last_dream_target", None)
+        player.setdefault("last_silenced_target", None)
+        player.setdefault("last_guard_target", None)
+        player.setdefault("wolf_beauty_target", None)
+        player.setdefault("blood_blast_used", False)
+        player.setdefault("last_exact_result", None)
+        player.setdefault("last_grave_result", None)
 
     async def _join_game(self, game, user_id, user_name):
         if game["phase"] != "lobby":
@@ -795,13 +952,14 @@ class WerewolfPlugin:
 
         role_counts = {key: 0 for key in ROLE_NAMES}
         options = {}
-        allowed_options = {"平票", "自救", "双药", "胜利", "狼刀狼人"}
+        allowed_options = {"平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型"}
         seen = set()
         try:
             for token in args:
-                if "=" not in token:
-                    raise ValueError("每个配置项必须使用“名称=值”格式。")
-                name, raw_value = token.split("=", 1)
+                if "=" in token:
+                    name, raw_value = token.split("=", 1)
+                else:
+                    name, raw_value = token, "1"
                 name = name.strip()
                 raw_value = raw_value.strip()
                 if not name or not raw_value or name in seen:
@@ -813,6 +971,8 @@ class WerewolfPlugin:
                     role_count = int(raw_value)
                     role_counts[ROLE_KEYS[name]] = role_count
                 elif name in allowed_options:
+                    if "=" not in token:
+                        raise ValueError(f"规则配置项“{name}”不能省略取值。")
                     options[name] = raw_value
                 else:
                     raise ValueError(f"未知配置项：{name}。")
@@ -821,7 +981,10 @@ class WerewolfPlugin:
             await self._safe_send(game["chat_id"], f"{message}\n\n{self._configuration_help(game)}")
             return
 
-        missing = [name for name in ("平票", "自救", "双药", "胜利", "狼刀狼人") if name not in options]
+        missing = [
+            name for name in ("平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型")
+            if name not in options
+        ]
         if missing:
             await self._safe_send(
                 game["chat_id"],
@@ -843,6 +1006,9 @@ class WerewolfPlugin:
         if options["狼刀狼人"] not in ("是", "否"):
             await self._safe_send(game["chat_id"], "狼刀狼人必须填写 是 或 否。\n\n" + self._configuration_help(game))
             return
+        if options["显示票型"] not in ("0", "1"):
+            await self._safe_send(game["chat_id"], "显示票型必须填写 0 或 1。\n\n" + self._configuration_help(game))
+            return
         error = self._validate_role_counts(role_counts, player_count)
         if error:
             await self._safe_send(game["chat_id"], f"{error}\n\n{self._configuration_help(game)}")
@@ -856,6 +1022,7 @@ class WerewolfPlugin:
             "witch_double": options["双药"] == "是",
             "victory": "slaughter_side" if options["胜利"] == "屠边" else "slaughter_city",
             "wolf_can_kill_wolves": options["狼刀狼人"] == "是",
+            "show_vote_pattern": options["显示票型"] == "1",
         }
         game["phase"] = "ready"
         game["setup_step"] = None
@@ -866,24 +1033,28 @@ class WerewolfPlugin:
         )
 
     def _configuration_help(self, game):
+        role_names = "、".join(ROLE_NAMES.values())
         return (
             "【狼人杀一键配置】\n"
-            f"请在一条命令中填写全部设置：\n{self.prefix} 配置 村民=2 狼人=2 预言家=1 女巫=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否\n"
-            f"当前玩家数：{len(game['players'])}；角色总数必须与玩家数一致，未填写的角色按 0 计算。\n"
-            "可用角色：村民、狼人、预言家、女巫、猎人、守卫、白痴、狼王、丘比特。\n"
+            f"请在一条命令中填写全部设置：\n{self.prefix} 配置 村民=2 狼人=2 预言家 女巫 "
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0\n"
+            f"当前玩家数：{len(game['players'])}；通常角色牌总数必须与玩家数一致，数量为 1 时可省略“=1”，未填写按 0 计算。\n"
+            "配置盗贼时，角色牌总数必须比玩家数多 2，两张未发身份牌供盗贼选择。\n"
+            f"可用角色：{role_names}。\n"
             "平票：1=再次投票后仍平票则无人出局；2=立即无人出局；3=随机一人出局。\n"
             "自救：1=女巫仅首夜可自救；2=不能自救；3=任意夜晚可自救。双药、狼刀狼人填写 是/否。\n"
             "狼刀狼人=是时，狼人可刀狼队友或自己；填写否时只能刀存活的非狼人玩家。\n"
+            "显示票型：1=每次投票结束后在下一夜开始时公开谁投给谁；0=仅在游戏结束复盘时公开。\n"
             "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利。\n"
             "屠城：全部非狼人阵营玩家死亡时，狼人胜利。"
         )
 
     def _roles_prompt(self, game):
+        role_names = "、".join(ROLE_NAMES.values())
         return (
             f"配置 1/5：当前 {len(game['players'])} 人，请设置角色数量。\n"
-            f"格式：{self.prefix} 角色 狼人=2 村民=2 预言家=1 女巫=1\n"
-            "可用角色：村民、狼人、预言家、女巫、猎人、守卫、白痴、狼王、丘比特；未填写按 0 计算。"
+            f"格式：{self.prefix} 角色 狼人=2 村民=2 预言家 女巫\n"
+            f"角色数量为 1 时可省略“=1”。配置盗贼时需多配两张身份牌。可用角色：{role_names}；未填写按 0 计算。"
         )
 
     async def _setup_roles(self, game, user_id, args):
@@ -892,7 +1063,7 @@ class WerewolfPlugin:
         counts = {key: 0 for key in ROLE_NAMES}
         try:
             for token in args:
-                name, raw_count = token.split("=", 1)
+                name, raw_count = token.split("=", 1) if "=" in token else (token, "1")
                 key = ROLE_KEYS[name]
                 value = int(raw_count)
                 if value < 0:
@@ -915,17 +1086,50 @@ class WerewolfPlugin:
         )
 
     def _validate_role_counts(self, counts, player_count):
-        if sum(counts.values()) != player_count:
-            return f"角色总数必须等于玩家数 {player_count}。"
+        has_thief = int(counts.get("thief") or 0) == 1
+        expected = player_count + 2 if has_thief else player_count
+        if sum(counts.values()) != expected:
+            suffix = "；配置盗贼时需额外加入两张身份牌" if has_thief else ""
+            return f"角色牌总数必须等于 {expected}{suffix}。"
         if any(counts[key] > 1 for key in SPECIAL_ROLES):
-            return "预言家、女巫、猎人、守卫、白痴、狼王和丘比特均最多一名。"
-        wolf_count = counts["wolf"] + counts["wolf_king"]
-        divine_count = sum(counts[key] for key in DIVINE_ROLES)
-        if counts["villager"] < 1 or divine_count < 1 or wolf_count < 1:
-            return "至少需要一名村民、一名神职和一名狼人阵营玩家。"
-        if wolf_count >= player_count - wolf_count:
+            return "除村民和狼人外，每种特殊身份最多一名。"
+        deck = [role for role, count in counts.items() for _ in range(int(count))]
+        if has_thief:
+            deck.remove("thief")
+            if not self._valid_thief_choice_pairs(deck, player_count):
+                return "盗贼牌组无法保证发牌后仍有普通好人、神职和狼人，或狼人数量过多。"
+        else:
+            error = self._active_role_mix_error(deck)
+            if error:
+                return error
+        return ""
+
+    @staticmethod
+    def _active_role_mix_error(roles):
+        wolf_count = sum(role in WOLF_ROLES for role in roles)
+        village_count = sum(role in VILLAGER_ROLES or role == "wild_child" for role in roles)
+        divine_count = sum(role in DIVINE_ROLES for role in roles)
+        if not village_count or not divine_count or not wolf_count:
+            return "至少需要一名普通好人、一名神职和一名狼人阵营玩家。"
+        if wolf_count >= len(roles) - wolf_count:
             return "狼人阵营初始人数必须少于其他玩家。"
         return ""
+
+    def _valid_thief_choice_pairs(self, deck, player_count):
+        valid = []
+        for first_index in range(len(deck)):
+            for second_index in range(first_index + 1, len(deck)):
+                choices = [deck[first_index], deck[second_index]]
+                base = [
+                    role for index, role in enumerate(deck)
+                    if index not in (first_index, second_index)
+                ]
+                allowed_choices = choices if any(role not in WOLF_ROLES for role in choices) else choices[:1]
+                if len(base) == player_count - 1 and all(
+                    not self._active_role_mix_error(base + [choice]) for choice in allowed_choices
+                ):
+                    valid.append((first_index, second_index))
+        return valid
 
     async def _setup_tie(self, game, user_id, args):
         if not await self._setup_allowed(game, user_id, "tie"):
@@ -982,6 +1186,7 @@ class WerewolfPlugin:
             return
         game["settings"]["victory"] = "slaughter_side" if choice == "屠边" else "slaughter_city"
         game["settings"].setdefault("wolf_can_kill_wolves", False)
+        game["settings"].setdefault("show_vote_pattern", False)
         game["setup_step"] = None
         game["phase"] = "ready"
         self._save()
@@ -1003,6 +1208,9 @@ class WerewolfPlugin:
         if game["phase"] == "dealing":
             await self._deliver_start(game)
             return
+        if game["phase"] == "thief_choice":
+            await self._prompt_thief(game)
+            return
         if game["phase"] != "ready":
             await self._safe_send(game["chat_id"], "请先完成报名和配置。")
             return
@@ -1012,32 +1220,151 @@ class WerewolfPlugin:
                 await self._safe_send(game["chat_id"], f"AI 模型预检失败，暂未发牌：{error}")
                 return
 
-        roles = []
-        for role, count in game["settings"]["roles"].items():
-            roles.extend([role] * int(count))
-        self.rng.shuffle(roles)
+        roles, thief_choices = self._deal_roles(game)
         for player, role in zip(game["players"], roles):
-            player.update({
-                "role": role,
-                "alive": True,
-                "identity_delivered": False,
-                "idiot_revealed": False,
-                "no_vote": False,
-                "death_causes": [],
-                "ai_daily_replies": 0,
-                "ai_ready_day": 0,
-                "ai_wolf_chat": [],
-                "ai_wolf_replies": 0,
-                "ai_last_prompt": "",
-                "ai_last_decision": {},
-            })
-        game["phase"] = "dealing"
+            self._reset_player_for_role(player, role)
+        game["action_history"] = []
+        game["result_announced"] = False
+        game["result_delivery_index"] = 0
+        game["thief_choices"] = list(thief_choices)
+        game["undealt_roles"] = list(thief_choices)
+        game["charmed_players"] = []
+        game["last_exile"] = None
+        game["blood_moon_doomed"] = None
+        game["result_winners"] = []
+        self._record_action(game, "游戏开始，身份分配完成。", context="开局")
         game["intro_index"] = 0
+        thief = next((player for player in game["players"] if player["role"] == "thief"), None)
+        if thief:
+            game["phase"] = "thief_choice"
+            self._record_action(game, f"{self._history_player_label(thief)}等待选择两张未发身份牌。", context="开局")
+        else:
+            game["phase"] = "dealing"
+            self._activate_dormant_wolves(game)
         self._save()
+        if thief:
+            await self._prompt_thief(game)
+        else:
+            await self._deliver_start(game)
+
+    def _deal_roles(self, game):
+        roles = [
+            role
+            for role, count in game["settings"]["roles"].items()
+            for _ in range(int(count))
+        ]
+        if "thief" not in roles:
+            self.rng.shuffle(roles)
+            return roles, []
+        roles.remove("thief")
+        valid_pairs = self._valid_thief_choice_pairs(roles, len(game["players"]))
+        first_index, second_index = self.rng.choice(valid_pairs)
+        choices = [roles[first_index], roles[second_index]]
+        dealt = [
+            role for index, role in enumerate(roles)
+            if index not in (first_index, second_index)
+        ]
+        dealt.append("thief")
+        self.rng.shuffle(dealt)
+        return dealt, choices
+
+    def _reset_player_for_role(self, player, role, original_role=None):
+        player.update({
+            "role": role,
+            "original_role": original_role or role,
+            "alive": True,
+            "identity_delivered": False,
+            "idiot_revealed": False,
+            "no_vote": False,
+            "death_causes": [],
+            "ai_daily_replies": 0,
+            "ai_ready_day": 0,
+            "ai_wolf_chat": [],
+            "ai_wolf_replies": 0,
+            "ai_last_prompt": "",
+            "ai_last_decision": {},
+            "ai_role_decision_tokens": {},
+            "knight_used": False,
+            "ai_knight_decision_day": 0,
+            "ai_white_wolf_decision_day": 0,
+            "wolf_active": role in PACK_WOLF_ROLES,
+            "copied_role": None,
+            "copied_resources": {},
+            "nine_tails": 9,
+            "wild_model": None,
+            "mixed_support": None,
+            "angel_converted": False,
+            "last_magic_pair": [],
+            "last_dream_target": None,
+            "last_silenced_target": None,
+            "last_guard_target": None,
+            "wolf_beauty_target": None,
+            "blood_blast_used": False,
+            "last_exact_result": None,
+            "last_grave_result": None,
+        })
+
+    async def _prompt_thief(self, game):
+        thief = self._living_role(game, "thief")
+        if not thief or len(game.get("thief_choices") or []) != 2:
+            return
+        labels = "、".join(
+            f"{index}={ROLE_NAMES[role]}" for index, role in enumerate(game["thief_choices"], 1)
+        )
+        delivered = await self._send_private(
+            game,
+            thief,
+            f"你是盗贼。两张未发身份牌：{labels}。请选择：{self.prefix} 选牌 <1|2>",
+        )
+        if not delivered:
+            await self._safe_send(game["chat_id"], f"盗贼临时会话送达失败，房主可发送 {self.prefix} 重发。")
+
+    async def _thief_action(self, game, player, args):
+        if game.get("phase") != "thief_choice" or player.get("role") != "thief":
+            await self._private_error(game, player, "当前不能选择身份牌。")
+            return
+        try:
+            index = int(args[0]) - 1 if len(args) == 1 else -1
+        except (TypeError, ValueError):
+            index = -1
+        choices = game.get("thief_choices") or []
+        if index not in (0, 1) or len(choices) != 2:
+            await self._private_error(game, player, f"格式：{self.prefix} 选牌 <1|2>")
+            return
+        selected = choices[index]
+        if all(role in WOLF_ROLES for role in choices) and selected not in WOLF_ROLES:
+            await self._private_error(game, player, "两张牌均为狼人阵营时必须选择狼人身份。")
+            return
+        unselected = choices[1 - index]
+        self._reset_player_for_role(player, selected, original_role="thief")
+        player["thief_chosen_role"] = selected
+        game["undealt_roles"] = [unselected]
+        game["phase"] = "dealing"
+        self._record_action(
+            game,
+            f"盗贼选择成为{ROLE_NAMES[selected]}，另一张未发身份为{ROLE_NAMES[unselected]}。",
+            context="开局",
+        )
+        self._activate_dormant_wolves(game)
+        self._save()
+        await self._private_ack(game, player, f"你选择了 {ROLE_NAMES[selected]}，即将正式发牌。")
         await self._deliver_start(game)
 
+    def _activate_dormant_wolves(self, game):
+        if any(player.get("alive") and self._is_active_pack_wolf(player) for player in game["players"]):
+            return []
+        activated = []
+        for player in game["players"]:
+            if player.get("alive") and player.get("role") in DORMANT_WOLF_ROLES and not player.get("wolf_active"):
+                player["wolf_active"] = True
+                activated.append(player)
+        if activated:
+            labels = "、".join(self._history_player_label(player) for player in activated)
+            self._record_action(game, f"休眠狼人激活并获得刀人能力：{labels}。")
+        return activated
+
     async def _deliver_start(self, game, only_seat=None):
-        introductions = [self._rules_text(), self._settings_text(game), self._command_text()]
+        introductions = [self._rules_text(game), self._settings_text(game), self._command_text()]
         while game.get("intro_index", 0) < len(introductions):
             index = game["intro_index"]
             if not await self._safe_send(game["chat_id"], introductions[index]):
@@ -1076,6 +1403,9 @@ class WerewolfPlugin:
         if game["phase"] == "ended" and not game.get("result_announced"):
             await self._announce_result(game)
             return
+        if game["phase"] == "thief_choice":
+            await self._prompt_thief(game)
+            return
         if game["phase"] != "dealing":
             await self._safe_send(game["chat_id"], "当前没有待重发的身份。")
             return
@@ -1091,13 +1421,24 @@ class WerewolfPlugin:
                 return
         await self._deliver_start(game, only_seat=seat)
 
-    def _rules_text(self):
+    def _rules_text(self, game):
+        configured = [
+            role for role, count in game.get("settings", {}).get("roles", {}).items()
+            if int(count)
+        ]
+        role_rules = "\n".join(f"- {ROLE_NAMES[role]}：{ROLE_HELP[role]}" for role in configured)
         return (
             "【狼人杀规则】\n"
             "夜间角色通过临时会话行动；全部必要行动完成后自动结算。白天自由发言，达到结束发言阈值后进入私密投票。\n"
-            "支持村民、狼人、预言家、女巫、猎人、守卫、白痴、狼王和丘比特。守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
+            "守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
+            "骑士在白天讨论时可公开决斗一次：目标是狼人则该狼人死亡且不能发动死亡技能，随后入夜；目标不是狼人则骑士死亡，讨论继续。\n"
+            "白狼王属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家；两人死亡并结算死亡技能后直接入夜。\n"
             "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利；屠城：全部非狼人阵营玩家死亡时，狼人胜利。具体采用哪种条件以本局设置为准。\n"
-            "跨阵营情侣成为第三方，必须成为最终两名存活者才能获胜。带有“AI”前缀的座位是公开标识的虚拟玩家。"
+            "跨阵营情侣成为第三方，必须成为最终两名存活者才能获胜。带有“AI”前缀的座位是公开标识的虚拟玩家。\n"
+            "夜间行动在游戏进行中始终隐藏；具体票型是否在下一夜开始时公开以本局设置为准。"
+            "游戏结束或被房主终止后，统一公开身份和完整行动记录。\n"
+            "【本局身份规则】\n"
+            + role_rules
         )
 
     def _settings_text(self, game):
@@ -1110,6 +1451,7 @@ class WerewolfPlugin:
         )
         double = "允许" if game["settings"]["witch_double"] else "不允许"
         wolf_targets = "允许刀狼队友和自己" if game["settings"].get("wolf_can_kill_wolves", False) else "只能刀非狼人玩家"
+        vote_pattern = "下一夜开始时公开" if game["settings"].get("show_vote_pattern", False) else "仅结束复盘时公开"
         needed = math.ceil(float(game["settings"]["day_ready_threshold"]) * len(game["players"]))
         virtuals = [f"{player['seat']}号 {player['name']}" for player in game["players"] if player.get("virtual")]
         return (
@@ -1119,6 +1461,7 @@ class WerewolfPlugin:
             f"女巫：{WITCH_SELF_NAMES[game['settings']['witch_self']]}，{double}同夜双药\n"
             f"胜利条件：{victory}\n"
             f"狼人刀人：{wolf_targets}\n"
+            f"具体票型：{vote_pattern}\n"
             f"首日结束发言阈值：{game['settings']['day_ready_threshold']:.0%}（当前需 {needed} 人）\n"
             f"虚拟玩家：{'、'.join(virtuals) if virtuals else '无'}"
         )
@@ -1126,17 +1469,23 @@ class WerewolfPlugin:
     def _command_text(self):
         return (
             "【命令列表】\n"
-            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、开始、观战、debug（管理员）、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
-            f"临时会话：{self.prefix} 状态、连结 <两座位>、守护 <座位>、空守、刀 <座位>、空刀、查验 <座位>、救、毒 <座位>、救毒 <座位>、过、开枪 <座位>、不开枪、投票 <座位>、弃票、狼聊 <内容>\n"
+            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、开始、结束（提前终止并复盘）、观战、debug（管理员）、决斗 <座位>、自爆 <座位>、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
+            f"白天公开技能：{self.prefix} 决斗 <座位>、自爆 <座位>、血爆\n"
+            f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
         )
 
     def _identity_text(self, game, player):
         role = player["role"]
         lines = [f"你是 {player['seat']} 号 {player['name']}。", f"身份：{ROLE_NAMES[role]}", ROLE_HELP[role]]
-        if role in WOLF_ROLES:
-            wolves = [f"{p['seat']}号 {p['name']}（{ROLE_NAMES[p['role']]}）" for p in game["players"] if p["role"] in WOLF_ROLES]
+        if self._is_active_pack_wolf(player):
+            wolves = [
+                f"{p['seat']}号 {p['name']}（{ROLE_NAMES[p['role']]}）"
+                for p in game["players"] if p.get("alive") and self._is_active_pack_wolf(p)
+            ]
             lines.append("狼队成员：" + "、".join(wolves))
+        elif role in DORMANT_WOLF_ROLES:
+            lines.append("你当前不与狼队见面，不能刀人或使用狼聊；狼队全灭后会自动激活。")
         lines.append("身份信息仅供本人查看，请勿在群内转发机器人私聊。")
         return "\n".join(lines)
 
@@ -1146,37 +1495,132 @@ class WerewolfPlugin:
         game["night_actions"] = {"wolves": {}}
         game["ready"] = []
         game["votes"] = {}
+        game["silenced_id"] = None
+        game["crow_target"] = None
         for player in game["players"]:
             if player.get("virtual"):
                 player["ai_wolf_chat"] = []
                 player["ai_wolf_replies"] = 0
+        self._record_action(game, "夜晚开始。")
         self._save()
-        await self._safe_send(game["chat_id"], f"第 {game['night']} 夜开始。\n{self._seat_list(game, include_status=True)}")
+        night_text = f"第 {game['night']} 夜开始。\n{self._seat_list(game, include_status=True)}"
+        vote_patterns = self._vote_patterns_text(game)
+        if vote_patterns:
+            night_text = f"{vote_patterns}\n\n{night_text}"
+        await self._safe_send(game["chat_id"], night_text)
         await self._send_night_prompts(game)
         await self._maybe_finish_initial_night(game)
 
     async def _send_night_prompts(self, game):
+        gravekeeper = self._living_role(game, "gravekeeper")
+        if gravekeeper and not self._good_skills_sealed(game):
+            exile = game.get("last_exile")
+            target = self._player(game, exile) if exile else None
+            result = f"上一名公投死者属于{self._public_camp_name(target)}。" if target else "尚无实际被公投出局的玩家。"
+            gravekeeper["last_grave_result"] = result
+            await self._send_private(game, gravekeeper, f"守墓信息：{result}")
+            self._record_action(game, f"{self._history_player_label(gravekeeper)}获得守墓信息：{result}")
+        for spec in self._night_decision_specs(game):
+            if self._night_spec_complete(game, spec):
+                continue
+            await self._send_private(
+                game,
+                spec["player"],
+                f"第 {game['night']} 夜。{self._night_spec_prompt(game, spec)}",
+            )
+
+    def _night_decision_specs(self, game):
+        specs = []
+        sealed = self._good_skills_sealed(game)
+        ability_kinds = {
+            "cupid": "cupid",
+            "guard": "guard",
+            "seer": "seer",
+            "dreamer": "dreamer",
+            "magician": "magician",
+            "crow": "crow",
+            "silencer": "silencer",
+            "wolf_beauty": "wolf_beauty",
+            "gargoyle": "exact_check",
+            "wolf_witch": "exact_check",
+            "piper": "piper",
+        }
         for player in self._living(game):
-            prompt = None
             role = player["role"]
-            if role == "cupid" and game["night"] == 1 and not game.get("lovers"):
-                prompt = f"请选择两名情侣：{self.prefix} 连结 <座位1> <座位2>"
-            elif role == "guard":
-                prompt = f"请选择守护目标：{self.prefix} 守护 <座位>，或 {self.prefix} 空守"
-            elif role in WOLF_ROLES:
-                target_rule = (
-                    "可选择任意存活玩家，包括自己和狼队友。"
-                    if game.get("settings", {}).get("wolf_can_kill_wolves", False)
-                    else "只能选择存活的非狼人玩家。"
-                )
-                prompt = (
-                    f"请选择刀人目标：{self.prefix} 刀 <座位>，或 {self.prefix} 空刀。{target_rule}"
-                    f"可使用 {self.prefix} 狼聊 <内容> 与狼队交流。"
-                )
-            elif role == "seer":
-                prompt = f"请选择查验目标：{self.prefix} 查验 <座位>"
-            if prompt:
-                await self._send_private(game, player, f"第 {game['night']} 夜。{prompt}")
+            sources = [role]
+            copied = player.get("copied_role")
+            if copied and copied in COPYABLE_ROLES:
+                sources.append(copied)
+            if game["night"] == 1 and role == "wild_child" and not player.get("wild_model"):
+                specs.append(self._night_spec(player, "wild_child", "wild_child", role))
+            if game["night"] == 1 and role == "mixed_blood" and not player.get("mixed_support"):
+                specs.append(self._night_spec(player, "mixed_blood", "mixed_blood", role))
+            if game["night"] == 1 and role == "mechanical_wolf" and not player.get("copied_role"):
+                specs.append(self._night_spec(player, "mechanical_learn", "mechanical_learn", role))
+            for source in sources:
+                kind = ability_kinds.get(source)
+                if not kind:
+                    continue
+                if source == "cupid" and (game["night"] != 1 or game.get("lovers")):
+                    continue
+                if source == "gargoyle" and player.get("role") == "gargoyle" and player.get("wolf_active"):
+                    continue
+                if sealed and source in DIVINE_ROLES:
+                    continue
+                key = self._night_action_key(player, kind, source)
+                specs.append(self._night_spec(player, kind, key, source))
+        for wolf in self._wolf_pack(game):
+            specs.append(self._night_spec(wolf, "wolf", wolf["user_id"], wolf["role"]))
+        return specs
+
+    @staticmethod
+    def _night_spec(player, kind, key, source_role):
+        return {"player": player, "kind": kind, "key": key, "source_role": source_role}
+
+    @staticmethod
+    def _night_spec_complete(game, spec):
+        if spec["kind"] == "wolf":
+            return spec["key"] in game.get("night_actions", {}).get("wolves", {})
+        return spec["key"] in game.get("night_actions", {})
+
+    def _night_spec_prompt(self, game, spec):
+        kind = spec["kind"]
+        prompts = {
+            "cupid": f"请选择两名情侣：{self.prefix} 连结 <座位1> <座位2>",
+            "guard": f"请选择守护目标：{self.prefix} 守护 <座位>，或 {self.prefix} 空守",
+            "seer": f"请选择查验目标：{self.prefix} 查验 <座位>",
+            "dreamer": f"请选择摄梦目标：{self.prefix} 摄梦 <座位>",
+            "magician": f"请选择交换目标：{self.prefix} 交换 <座位1> <座位2>",
+            "crow": f"请选择次日加票目标：{self.prefix} 加票 <座位>",
+            "silencer": f"请选择次日禁言目标：{self.prefix} 禁言 <座位>",
+            "wolf_beauty": f"请选择魅惑目标：{self.prefix} 魅惑 <座位>",
+            "exact_check": f"请选择精确查验目标：{self.prefix} 窥视 <座位>",
+            "mechanical_learn": f"请选择学习目标：{self.prefix} 学习 <座位>",
+            "piper": f"请选择一至两名未被迷惑玩家：{self.prefix} 迷惑 <座位1> [座位2]",
+            "wild_child": f"请选择榜样：{self.prefix} 榜样 <座位>",
+            "mixed_blood": f"请选择支持对象：{self.prefix} 支持 <座位>",
+        }
+        if kind == "wolf":
+            target_rule = (
+                "可选择任意存活玩家，包括自己和狼队友。"
+                if game.get("settings", {}).get("wolf_can_kill_wolves", False)
+                else "不能选择当前已知狼队成员；休眠狼人仍可能被误刀。"
+            )
+            return (
+                f"请选择刀人目标：{self.prefix} 刀 <座位>，或 {self.prefix} 空刀。{target_rule}"
+                f"可使用 {self.prefix} 狼聊 <内容> 与狼队交流。"
+            )
+        return prompts[kind]
+
+    def _good_skills_sealed(self, game):
+        sealed_night = int(game.get("good_skills_sealed_night") or 0)
+        return sealed_night > 0 and sealed_night == int(game.get("night") or 0)
+
+    def _public_camp_name(self, player):
+        if not player:
+            return "未知阵营"
+        camp = self._camp(player.get("role"))
+        return {"good": "好人阵营", "wolf": "狼人阵营", "neutral": "第三方阵营"}[camp]
 
     async def _night_action(self, game, player, command, args):
         if game["phase"] != "night_actions" or not player.get("alive"):
@@ -1187,7 +1631,8 @@ class WerewolfPlugin:
         target = None
 
         if command == "连结":
-            if role != "cupid" or game["night"] != 1 or game.get("lovers"):
+            spec = self._night_spec_for_player(game, player, "cupid")
+            if not spec:
                 await self._private_error(game, player, "你当前不能连接情侣。")
                 return
             if len(args) != 2:
@@ -1197,111 +1642,359 @@ class WerewolfPlugin:
             if not targets or targets[0]["user_id"] == targets[1]["user_id"]:
                 await self._private_error(game, player, "请选择两名不同的存活玩家。")
                 return
-            actions["cupid"] = [targets[0]["user_id"], targets[1]["user_id"]]
+            actions[spec["key"]] = [targets[0]["user_id"], targets[1]["user_id"]]
+            self._record_action(
+                game,
+                f"{self._history_player_label(player)}连接了{self._history_player_label(targets[0])}与"
+                f"{self._history_player_label(targets[1])}。",
+            )
             await self._private_ack(game, player, "情侣选择已记录，在本阶段结束前可修改。")
         elif command in ("守护", "空守"):
-            if role != "guard":
+            spec = self._night_spec_for_player(game, player, "guard")
+            if not spec:
                 await self._private_error(game, player, "只有守卫可以守护。")
                 return
+            target_player = None
             if command == "守护":
-                target = self._single_target(game, args)
-                if not target:
+                target_player = self._single_target(game, args)
+                if not target_player:
                     await self._private_error(game, player, "请选择有效的存活座位。")
                     return
-                if target["user_id"] == game.get("last_guard_target"):
+                if target_player["user_id"] == player.get("last_guard_target"):
                     await self._private_error(game, player, "不能连续两晚守护同一名玩家。")
                     return
-                target = target["user_id"]
-            actions["guard"] = target
+                target = target_player["user_id"]
+            actions[spec["key"]] = target
+            guard_choice = f"守护{self._history_player_label(target_player)}" if target_player else "选择空守"
+            self._record_action(game, f"{self._history_player_label(player)}{guard_choice}。")
             await self._private_ack(game, player, "守护选择已记录。")
         elif command in ("刀", "空刀"):
-            if role not in WOLF_ROLES:
-                await self._private_error(game, player, "只有狼人阵营可以提交刀人选择。")
+            if not self._is_active_pack_wolf(player):
+                await self._private_error(game, player, "只有当前狼队成员可以提交刀人选择。")
                 return
             if command == "刀":
                 target_player = self._single_target(game, args)
                 can_target_wolves = game.get("settings", {}).get("wolf_can_kill_wolves", False)
-                if not target_player or (not can_target_wolves and target_player["role"] in WOLF_ROLES):
-                    error = "请选择一名存活玩家。" if can_target_wolves else "请选择一名存活的非狼队玩家。"
+                if not target_player or (not can_target_wolves and self._is_active_pack_wolf(target_player)):
+                    error = "请选择一名存活玩家。" if can_target_wolves else "请选择一名存活的非狼队玩家；休眠狼人仍可能被误刀。"
                     await self._private_error(game, player, error)
                     return
                 target = target_player["user_id"]
             actions.setdefault("wolves", {})[player["user_id"]] = target
+            wolf_choice = f"选择刀{self._history_player_label(target_player)}" if target else "选择空刀"
+            self._record_action(game, f"{self._history_player_label(player)}{wolf_choice}。")
             await self._private_ack(game, player, "刀人选择已记录。")
         elif command == "查验":
-            if role != "seer" or "seer" in actions:
+            spec = self._night_spec_for_player(game, player, "seer")
+            if not spec:
                 await self._private_error(game, player, "你当前不能再次查验。")
                 return
             target_player = self._single_target(game, args)
             if not target_player or target_player["user_id"] == player["user_id"]:
                 await self._private_error(game, player, "请选择另一名存活玩家。")
                 return
-            actions["seer"] = target_player["user_id"]
-            result = "狼人阵营" if target_player["role"] in WOLF_ROLES else "非狼人阵营"
-            player["last_seer_result"] = {
-                "night": game["night"],
-                "seat": target_player["seat"],
-                "name": target_player["name"],
-                "result": result,
-            }
-            await self._private_ack(game, player, f"查验结果：{target_player['seat']}号 {target_player['name']} 属于{result}。")
+            actions[spec["key"]] = target_player["user_id"]
+            self._record_action(
+                game,
+                f"{self._history_player_label(player)}提交查验{self._history_player_label(target_player)}。",
+            )
+            await self._private_ack(game, player, "查验目标已记录，所有前置行动完成后返回结果。")
         else:
             return
+        self._save()
+        await self._maybe_finish_initial_night(game)
+
+    def _night_spec_for_player(self, game, player, kind, pending=False):
+        specs = [
+            spec for spec in self._night_decision_specs(game)
+            if spec["player"]["user_id"] == player["user_id"] and spec["kind"] == kind
+        ]
+        if pending:
+            specs = [spec for spec in specs if not self._night_spec_complete(game, spec)]
+        return specs[0] if specs else None
+
+    async def _special_night_action(self, game, player, command, args):
+        if game.get("phase") != "night_actions" or not player.get("alive"):
+            await self._private_error(game, player, "当前不能执行该夜间操作。")
+            return
+        command_kinds = {
+            "交换": "magician",
+            "摄梦": "dreamer",
+            "加票": "crow",
+            "禁言": "silencer",
+            "魅惑": "wolf_beauty",
+            "窥视": "exact_check",
+            "学习": "mechanical_learn",
+            "迷惑": "piper",
+            "榜样": "wild_child",
+            "支持": "mixed_blood",
+        }
+        if command == "过":
+            specs = [
+                spec for spec in self._night_decision_specs(game)
+                if spec["player"]["user_id"] == player["user_id"]
+                and spec["kind"] != "wolf"
+                and not self._night_spec_complete(game, spec)
+            ]
+            if not specs or specs[0]["kind"] in {"mechanical_learn", "wild_child", "mixed_blood"}:
+                await self._private_error(game, player, "当前没有可以跳过的夜间技能。")
+                return
+            spec = specs[0]
+            game["night_actions"][spec["key"]] = None
+            self._record_action(game, f"{self._history_player_label(player)}跳过{ROLE_NAMES[spec['source_role']]}技能。")
+            self._save()
+            await self._private_ack(game, player, "本项技能已跳过。")
+            await self._maybe_finish_initial_night(game)
+            return
+        kind = command_kinds.get(command)
+        spec = self._night_spec_for_player(game, player, kind) if kind else None
+        if not spec:
+            await self._private_error(game, player, "你的身份当前不能使用该技能。")
+            return
+
+        targets = None
+        if kind in {"magician", "piper"}:
+            expected = 2 if kind == "magician" else None
+            if (expected and len(args) != expected) or (kind == "piper" and len(args) not in (1, 2)):
+                usage = "交换 <座位1> <座位2>" if kind == "magician" else "迷惑 <座位1> [座位2]"
+                await self._private_error(game, player, f"格式：{self.prefix} {usage}")
+                return
+            targets = self._parse_seats(game, args, living=True)
+            if not targets or len({target["user_id"] for target in targets}) != len(targets):
+                await self._private_error(game, player, "请选择不同的有效存活座位。")
+                return
+        else:
+            target = self._single_target(game, args)
+            if not target:
+                await self._private_error(game, player, "请选择一个有效存活座位。")
+                return
+            targets = [target]
+
+        target_ids = [target["user_id"] for target in targets]
+        if kind == "magician":
+            previous = set(player.get("last_magic_pair") or [])
+            if previous & set(target_ids):
+                await self._private_error(game, player, "不能连续两晚交换包含同一玩家的座位。")
+                return
+        elif kind == "dreamer":
+            if target_ids[0] == player["user_id"] or target_ids[0] == player.get("last_dream_target"):
+                await self._private_error(game, player, "请选择另一名玩家，且不能连续两晚摄梦同一人。")
+                return
+        elif kind == "crow":
+            if target_ids[0] == player["user_id"]:
+                await self._private_error(game, player, "乌鸦不能给自己加票。")
+                return
+        elif kind == "silencer":
+            if target_ids[0] == player["user_id"] or target_ids[0] == player.get("last_silenced_target"):
+                await self._private_error(game, player, "不能禁言自己，也不能连续两晚禁言同一人。")
+                return
+        elif kind == "wolf_beauty":
+            if target_ids[0] == player["user_id"] or self._is_active_pack_wolf(targets[0]):
+                await self._private_error(game, player, "请选择一名不属于当前狼队的其他玩家。")
+                return
+        elif kind in {"exact_check", "mechanical_learn", "wild_child", "mixed_blood"}:
+            if target_ids[0] == player["user_id"]:
+                await self._private_error(game, player, "请选择另一名玩家。")
+                return
+        elif kind == "piper":
+            charmed = set(game.get("charmed_players") or [])
+            if player["user_id"] in target_ids or any(target_id in charmed for target_id in target_ids):
+                await self._private_error(game, player, "吹笛者只能选择尚未被迷惑的其他玩家。")
+                return
+
+        value = target_ids if kind in {"magician", "piper"} else target_ids[0]
+        game["night_actions"][spec["key"]] = value
+        if kind == "mechanical_learn":
+            learned = targets[0]["role"]
+            if learned == "cursed_fox":
+                game["night_actions"].setdefault("learned_foxes", []).append(targets[0]["user_id"])
+            player["copied_role"] = learned if learned in COPYABLE_ROLES else None
+            player["copied_resources"] = {
+                "witch_antidote": True,
+                "witch_poison": True,
+                "knight_used": False,
+            }
+            copied_text = ROLE_NAMES[learned] if player["copied_role"] else "无可复制主动技能"
+            await self._private_ack(
+                game,
+                player,
+                f"学习结果：{targets[0]['seat']}号 {targets[0]['name']} 是 {ROLE_NAMES[learned]}；复制结果：{copied_text}。",
+            )
+        elif kind == "wild_child":
+            player["wild_model"] = target_ids[0]
+            await self._private_ack(game, player, f"榜样已选择：{targets[0]['seat']}号 {targets[0]['name']}。")
+        elif kind == "mixed_blood":
+            player["mixed_support"] = target_ids[0]
+            await self._private_ack(game, player, f"支持对象已选择：{targets[0]['seat']}号 {targets[0]['name']}。")
+        else:
+            await self._private_ack(game, player, "技能目标已记录，在本阶段结束前可以修改。")
+        labels = "与".join(self._history_player_label(target) for target in targets)
+        self._record_action(game, f"{self._history_player_label(player)}使用{ROLE_NAMES[spec['source_role']]}技能选择{labels}。")
         self._save()
         await self._maybe_finish_initial_night(game)
 
     async def _maybe_finish_initial_night(self, game):
         if game["phase"] != "night_actions":
             return
-        actions = game["night_actions"]
-        required = []
-        cupid = self._living_role(game, "cupid")
-        if game["night"] == 1 and cupid and not game.get("lovers"):
-            required.append("cupid")
-        if self._living_role(game, "guard"):
-            required.append("guard")
-        if self._living_role(game, "seer"):
-            required.append("seer")
-        wolf_ids = [p["user_id"] for p in self._living(game) if p["role"] in WOLF_ROLES]
-        complete = all(key in actions for key in required) and all(uid in actions.get("wolves", {}) for uid in wolf_ids)
-        if not complete:
+        specs = self._night_decision_specs(game)
+        if not all(self._night_spec_complete(game, spec) for spec in specs):
             return
+        await self._resolve_initial_night_actions(game, specs)
+        game["phase"] = "witch"
+        self._save()
+        witch_specs = self._witch_specs(game)
+        if not witch_specs:
+            self._record_action(game, "女巫类技能无可执行操作，系统自动跳过。")
+            await self._resolve_night(game)
+            return
+        game["night_actions"]["witch_actor_keys"] = [spec["key"] for spec in witch_specs]
+        self._save()
+        for spec in witch_specs:
+            await self._send_private(game, spec["player"], self._witch_prompt_for_spec(game, spec))
 
-        if "cupid" in actions and actions["cupid"]:
-            game["lovers"] = list(actions["cupid"])
+    async def _resolve_initial_night_actions(self, game, specs):
+        actions = game["night_actions"]
+        magic_pairs = []
+        for spec in specs:
+            if spec["kind"] != "magician":
+                continue
+            pair = actions.get(spec["key"])
+            if pair:
+                magic_pairs.append(list(pair))
+                spec["player"]["last_magic_pair"] = list(pair)
+        actions["magic_pairs"] = magic_pairs
+
+        cupid_spec = next((spec for spec in specs if spec["kind"] == "cupid"), None)
+        if cupid_spec and actions.get(cupid_spec["key"]):
+            game["lovers"] = [self._night_target(game, uid) for uid in actions[cupid_spec["key"]]]
             first, second = [self._player(game, uid) for uid in game["lovers"]]
             game["lovers_cross"] = self._camp(first["role"]) != self._camp(second["role"])
             await self._send_private(game, first, f"你的情侣是 {second['seat']}号 {second['name']}。")
             await self._send_private(game, second, f"你的情侣是 {first['seat']}号 {first['name']}。")
 
+        guards = []
+        dream_links = {}
+        crow_targets = []
+        silenced_ids = []
+        for spec in specs:
+            raw = actions.get(spec["key"])
+            if raw is None:
+                continue
+            kind = spec["kind"]
+            player = spec["player"]
+            if kind == "guard":
+                target = self._night_target(game, raw)
+                guards.append(target)
+                player["last_guard_target"] = raw
+                if player["role"] == "guard":
+                    game["last_guard_target"] = raw
+            elif kind == "dreamer":
+                target = self._night_target(game, raw)
+                dream_links[player["user_id"]] = target
+                player["last_dream_target"] = raw
+            elif kind == "crow":
+                crow_targets.append(self._night_target(game, raw))
+            elif kind == "silencer":
+                silenced_ids.append(self._night_target(game, raw))
+                player["last_silenced_target"] = raw
+            elif kind == "wolf_beauty":
+                target = self._player(game, self._night_target(game, raw))
+                player["wolf_beauty_target"] = None if target and target["role"] == "rogue" else (target["user_id"] if target else None)
+            elif kind == "piper":
+                for target_id in raw:
+                    resolved = self._night_target(game, target_id)
+                    if resolved not in game.setdefault("charmed_players", []):
+                        game["charmed_players"].append(resolved)
+            elif kind in {"seer", "exact_check"}:
+                target = self._player(game, self._night_target(game, raw))
+                if not target:
+                    continue
+                if kind == "seer":
+                    result = self._seer_alignment(target)
+                    player["last_seer_result"] = {
+                        "night": game["night"], "seat": target["seat"], "name": target["name"], "result": result,
+                    }
+                    self._record_action(game, f"{self._history_player_label(player)}查验{self._history_player_label(target)}：{result}。")
+                    await self._send_private(game, player, f"查验结果：{target['seat']}号 {target['name']} 属于{result}。")
+                    if target["role"] == "evil_knight":
+                        actions.setdefault("evil_reflections", []).append(player["user_id"])
+                else:
+                    player["last_exact_result"] = {
+                        "night": game["night"], "seat": target["seat"], "name": target["name"], "role": target["role"],
+                    }
+                    self._record_action(game, f"{self._history_player_label(player)}精确查验{self._history_player_label(target)}。")
+                    await self._send_private(game, player, f"窥视结果：{target['seat']}号 {target['name']} 是 {ROLE_NAMES[target['role']]}。")
+                if target["role"] == "cursed_fox":
+                    actions.setdefault("checked_foxes", []).append(target["user_id"])
+
+        actions["resolved_guards"] = guards
+        actions["dream_links"] = dream_links
+        game["crow_targets"] = crow_targets
+        game["crow_target"] = crow_targets[0] if crow_targets else None
+        game["silenced_ids"] = silenced_ids
+        game["silenced_id"] = silenced_ids[0] if silenced_ids else None
+
         wolf_choices = [uid for uid in actions.get("wolves", {}).values() if uid]
-        actions["wolf_target"] = self._plurality(wolf_choices)
-        game["phase"] = "witch"
-        self._save()
-        witch = self._living_role(game, "witch")
-        can_act = witch and (game.get("witch_poison") or (game.get("witch_antidote") and actions["wolf_target"]))
-        if not can_act:
-            actions["witch"] = {"heal": False, "poison": None}
-            await self._resolve_night(game)
-            return
-        await self._send_private(game, witch, self._witch_prompt(game, witch))
+        raw_wolf_target = self._plurality(wolf_choices)
+        actions["wolf_target"] = self._night_target(game, raw_wolf_target)
+        wolf_target = self._player(game, actions["wolf_target"])
+        if wolf_target:
+            self._record_action(game, f"狼队最终刀口为{self._history_player_label(wolf_target)}。")
+        else:
+            self._record_action(game, "狼队未形成唯一刀口，本夜空刀。")
+
+        charmed = [self._player(game, uid) for uid in game.get("charmed_players", [])]
+        charmed_labels = "、".join(f"{player['seat']}号 {player['name']}" for player in charmed if player)
+        for player in charmed:
+            if player and player.get("alive"):
+                await self._send_private(game, player, "当前被吹笛者迷惑的玩家：" + (charmed_labels or "无"))
+
+    def _witch_specs(self, game):
+        if self._good_skills_sealed(game):
+            return []
+        specs = []
+        for player in self._living(game):
+            if not self._has_ability(player, "witch"):
+                continue
+            key = self._night_action_key(player, "witch", "witch")
+            resources = self._witch_resources(game, player)
+            target = game.get("night_actions", {}).get("wolf_target")
+            can_heal = bool(resources.get("antidote") and target and self._witch_can_heal(game, player, target))
+            if resources.get("poison") or can_heal:
+                specs.append(self._night_spec(player, "witch", key, "witch"))
+        return specs
+
+    @staticmethod
+    def _witch_resources(game, player):
+        if player.get("role") == "witch":
+            return {"antidote": bool(game.get("witch_antidote")), "poison": bool(game.get("witch_poison"))}
+        resources = player.setdefault("copied_resources", {})
+        return {"antidote": bool(resources.get("witch_antidote")), "poison": bool(resources.get("witch_poison"))}
+
+    def _witch_prompt_for_spec(self, game, spec):
+        return self._witch_prompt(game, spec["player"])
 
     async def _witch_action(self, game, player, command, args):
-        if game["phase"] != "witch" or not player.get("alive") or player["role"] != "witch":
+        if game["phase"] != "witch" or not player.get("alive") or not self._has_ability(player, "witch"):
             await self._private_error(game, player, "当前不能使用女巫技能。")
             return
+        key = self._night_action_key(player, "witch", "witch")
+        if key not in game.get("night_actions", {}).get("witch_actor_keys", []):
+            await self._private_error(game, player, "你本夜没有可用的女巫操作。")
+            return
         wolf_target = game["night_actions"].get("wolf_target")
+        resources = self._witch_resources(game, player)
         heal = command in ("救", "救毒")
         poison = None
         if heal:
-            if not wolf_target or not game.get("witch_antidote"):
+            if not wolf_target or not resources.get("antidote"):
                 await self._private_error(game, player, "当前没有可以使用解药的目标。")
                 return
             if not self._witch_can_heal(game, player, wolf_target):
                 await self._private_error(game, player, "本局规则不允许此时自救。")
                 return
         if command in ("毒", "救毒"):
-            if not game.get("witch_poison"):
+            if not resources.get("poison"):
                 await self._private_error(game, player, "毒药已经用完。")
                 return
             target_player = self._single_target(game, args)
@@ -1315,31 +2008,88 @@ class WerewolfPlugin:
         if command == "过":
             heal = False
             poison = None
-        game["night_actions"]["witch"] = {"heal": heal, "poison": poison}
+        game["night_actions"][key] = {"heal": heal, "poison": poison}
+        if player["role"] == "witch":
+            if heal:
+                game["witch_antidote"] = False
+            if poison:
+                game["witch_poison"] = False
+        else:
+            if heal:
+                player["copied_resources"]["witch_antidote"] = False
+            if poison:
+                player["copied_resources"]["witch_poison"] = False
+        choices = []
         if heal:
-            game["witch_antidote"] = False
+            choices.append(f"使用解药救{self._history_player_label(self._player(game, wolf_target))}")
         if poison:
-            game["witch_poison"] = False
+            choices.append(f"使用毒药毒{self._history_player_label(self._player(game, poison))}")
+        if not choices:
+            choices.append("不使用药物")
+        self._record_action(game, f"{self._history_player_label(player)}{'，'.join(choices)}。")
         self._save()
         await self._private_ack(game, player, "女巫操作已确认。")
-        await self._resolve_night(game)
+        keys = game["night_actions"].get("witch_actor_keys") or []
+        if all(key in game["night_actions"] for key in keys):
+            await self._resolve_night(game)
 
     async def _resolve_night(self, game):
         actions = game["night_actions"]
-        guard = actions.get("guard")
-        game["last_guard_target"] = guard
         wolf_target = actions.get("wolf_target")
-        witch = actions.get("witch") or {"heal": False, "poison": None}
+        guards = set(actions.get("resolved_guards") or [])
+        witch_actions = []
+        for key in actions.get("witch_actor_keys") or []:
+            choice = actions.get(key) or {"heal": False, "poison": None}
+            actor_id = ""
+            if key == "witch":
+                actor = self._living_role(game, "witch") or next(
+                    (player for player in game["players"] if player.get("role") == "witch"), None
+                )
+                actor_id = actor["user_id"] if actor else ""
+            elif key.startswith("copy:"):
+                actor = self._by_seat(game, int(key.split(":", 2)[1]))
+                actor_id = actor["user_id"] if actor else ""
+            witch_actions.append((actor_id, choice))
+        healed = any(choice.get("heal") for _, choice in witch_actions)
         deaths = []
         if wolf_target:
-            protected = guard == wolf_target
-            healed = bool(witch.get("heal"))
-            if (protected and healed) or (not protected and not healed):
+            target = self._player(game, wolf_target)
+            protected = wolf_target in guards
+            immune = target and target["role"] in {"evil_knight", "cursed_fox"}
+            dreamed = wolf_target in set((actions.get("dream_links") or {}).values())
+            if not immune and not dreamed and ((protected and healed) or (not protected and not healed)):
                 deaths.append((wolf_target, "wolf"))
-        if witch.get("poison"):
-            deaths.append((witch["poison"], "poison"))
+        for actor_id, choice in witch_actions:
+            raw_poison = choice.get("poison")
+            if not raw_poison:
+                continue
+            poison_id = self._night_target(game, raw_poison)
+            target = self._player(game, poison_id)
+            if not target:
+                continue
+            if target["role"] == "evil_knight":
+                deaths.append((actor_id, "evil_reflect"))
+                continue
+            if target["role"] == "rogue" or poison_id in set((actions.get("dream_links") or {}).values()):
+                continue
+            deaths.append((poison_id, "poison"))
+        deaths.extend((uid, "evil_reflect") for uid in actions.get("evil_reflections", []))
+        deaths.extend((uid, "fox_checked") for uid in actions.get("checked_foxes", []))
+        learned_foxes = actions.get("learned_foxes") or []
+        deaths.extend((uid, "fox_checked") for uid in learned_foxes)
+        doomed = game.get("blood_moon_doomed")
+        if doomed and int(doomed.get("night") or 0) == int(game["night"]):
+            deaths.append((doomed["user_id"], "blood_moon_delayed"))
+            game["blood_moon_doomed"] = None
+        dreamed_ids = set((actions.get("dream_links") or {}).values())
+        deaths = [
+            (uid, cause) for uid, cause in deaths
+            if cause == "blood_moon_delayed" or str(uid) not in dreamed_ids
+        ]
         game["transition_after_shots"] = "day"
         newly_dead = self._apply_deaths(game, deaths)
+        if not newly_dead:
+            self._record_action(game, "夜间结算：无人死亡。")
         self._save()
         if newly_dead:
             names = [f"{player['seat']}号 {player['name']}" for player in newly_dead]
@@ -1367,6 +2117,27 @@ class WerewolfPlugin:
             player["alive"] = False
             player["death_causes"] = sorted(causes.get(uid) or {"unknown"})
             newly_dead.append(player)
+            cause_names = {
+                "wolf": "狼刀",
+                "poison": "毒药",
+                "shot": "开枪",
+                "exile": "公投",
+                "heartbreak": "情侣殉情",
+                "duel": "骑士决斗",
+                "duel_failed": "决斗失败",
+                "white_wolf_blast": "白狼王自爆带走",
+                "white_wolf_blast_self": "白狼王自爆",
+                "blood_moon_blast": "血月使徒血爆",
+                "blood_moon_delayed": "血月使徒延迟死亡",
+                "evil_reflect": "恶灵骑士反伤",
+                "fox_checked": "咒狐被查验",
+                "dream_follow": "摄梦人死亡牵连",
+                "beauty_follow": "狼美人魅惑殉情",
+                "tails_exhausted": "九尾耗尽",
+                "unknown": "未知原因",
+            }
+            labels = "、".join(cause_names.get(cause, cause) for cause in player["death_causes"])
+            self._record_action(game, f"{self._history_player_label(player)}死亡，原因：{labels}。")
             if uid in game.get("lovers", []):
                 for lover_id in game["lovers"]:
                     if lover_id != uid:
@@ -1374,10 +2145,55 @@ class WerewolfPlugin:
                         if lover and lover.get("alive"):
                             causes.setdefault(lover_id, set()).add("heartbreak")
                             queue.append(lover_id)
-            if player["role"] in ("hunter", "wolf_king") and "poison" not in causes.get(uid, set()):
+            night_death_resolution = game.get("phase") in {"night_actions", "witch"} or (
+                game.get("phase") == "death_shot" and game.get("transition_after_shots") == "day"
+            )
+            dream_target = (
+                (game.get("night_actions", {}).get("dream_links") or {}).get(uid)
+                if night_death_resolution else None
+            )
+            if dream_target:
+                target = self._player(game, dream_target)
+                if target and target.get("alive"):
+                    causes.setdefault(dream_target, set()).add("dream_follow")
+                    queue.append(dream_target)
+            if self._has_ability(player, "wolf_beauty"):
+                beauty_target = player.get("wolf_beauty_target")
+                target = self._player(game, beauty_target) if beauty_target else None
+                if target and target.get("alive") and target.get("role") != "rogue":
+                    causes.setdefault(beauty_target, set()).add("beauty_follow")
+                    queue.append(beauty_target)
+            tail_loss = 2 if player.get("role") in DIVINE_ROLES else (1 if self._is_ordinary_good(player) else 0)
+            if tail_loss:
+                fox = self._living_role(game, "nine_tailed_fox")
+                if fox and fox["user_id"] != uid:
+                    fox["nine_tails"] = max(0, int(fox.get("nine_tails", 9)) - tail_loss)
+                    self._record_action(
+                        game,
+                        f"{self._history_player_label(fox)}因好人死亡失去 {tail_loss} 条尾巴，剩余 {fox['nine_tails']} 条。",
+                    )
+                    if fox["nine_tails"] == 0:
+                        causes.setdefault(fox["user_id"], set()).add("tails_exhausted")
+                        queue.append(fox["user_id"])
+            for wild in list(self._living(game)):
+                if wild.get("role") == "wild_child" and wild.get("wild_model") == uid:
+                    wild["role"] = "wolf"
+                    wild["wolf_active"] = True
+                    game.setdefault("role_notifications", []).append({
+                        "user_id": wild["user_id"],
+                        "text": "你的榜样已经死亡，你现在加入狼人阵营并从下一夜起参与刀人和狼聊。",
+                    })
+                    self._record_action(game, f"{self._history_player_label(wild)}的榜样死亡，转化为狼人。")
+            blocks_shot = bool({"poison", "duel"} & causes.get(uid, set()))
+            if (player["role"] == "wolf_king" or self._has_ability(player, "hunter")) and not blocks_shot:
                 if uid not in game.setdefault("pending_shots", []):
                     game["pending_shots"].append(uid)
         return newly_dead
+
+    @staticmethod
+    def _is_ordinary_good(player):
+        role = player.get("role")
+        return role in VILLAGER_ROLES or role == "wild_child" or (role == "angel" and player.get("angel_converted"))
 
     async def _continue_death_resolution(self, game):
         while game.get("pending_shots"):
@@ -1408,18 +2224,43 @@ class WerewolfPlugin:
                 return
         game["pending_shots"].pop(0)
         if target:
-            await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 开枪带走了 {target['seat']}号 {target['name']}。")
-            newly_dead = self._apply_deaths(game, [(target["user_id"], "shot")])
+            self._record_action(
+                game,
+                f"{self._history_player_label(player)}开枪射击{self._history_player_label(target)}。",
+            )
+            night_resolution = game.get("transition_after_shots") == "day"
+            dreamed = target["user_id"] in set((game.get("night_actions", {}).get("dream_links") or {}).values())
+            immune = night_resolution and (target.get("role") == "evil_knight" or dreamed)
+            if immune:
+                newly_dead = []
+                await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 开枪射击 {target['seat']}号 {target['name']}，但目标免疫本次夜间伤害。")
+            else:
+                await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 开枪带走了 {target['seat']}号 {target['name']}。")
+                newly_dead = self._apply_deaths(game, [(target["user_id"], "shot")])
             chained = [item for item in newly_dead if item["user_id"] != target["user_id"]]
             if chained:
                 labels = "、".join(f"{item['seat']}号 {item['name']}" for item in chained)
                 await self._safe_send(game["chat_id"], f"情侣殉情：{labels}。")
         else:
+            self._record_action(game, f"{self._history_player_label(player)}放弃开枪。")
             await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 放弃开枪。")
         self._save()
         await self._continue_death_resolution(game)
 
     async def _after_deaths(self, game):
+        activated = self._activate_dormant_wolves(game)
+        for player in activated:
+            game.setdefault("role_notifications", []).append({
+                "user_id": player["user_id"],
+                "text": "其他可刀狼人已经死亡，你已激活并加入当前狼队，从下一夜起可以刀人和使用狼聊。",
+            })
+        pack_changed = bool(activated) or any(
+            "加入狼人阵营" in str(notification.get("text") or "")
+            for notification in game.get("role_notifications", [])
+        )
+        await self._deliver_role_notifications(game)
+        if pack_changed:
+            await self._notify_wolf_pack(game)
         winner = self._winner(game)
         if winner:
             await self._finish_game(game, winner)
@@ -1428,23 +2269,78 @@ class WerewolfPlugin:
         self._save()
         if transition == "night":
             await self._begin_night(game)
+        elif transition == "discussion":
+            living_ids = {player["user_id"] for player in self._living(game)}
+            game["phase"] = "discussion"
+            game["ready"] = [user_id for user_id in game.get("ready", []) if user_id in living_ids]
+            self._save()
+            await self._safe_send(game["chat_id"], "骑士决斗结算完毕，继续白天讨论。")
         else:
             await self._begin_day(game)
+
+    async def _deliver_role_notifications(self, game):
+        notifications = list(game.get("role_notifications") or [])
+        game["role_notifications"] = []
+        self._save()
+        for notification in notifications:
+            player = self._player(game, notification.get("user_id"))
+            if player:
+                await self._send_private(game, player, notification.get("text") or "身份状态已变化。")
+
+    async def _notify_wolf_pack(self, game):
+        pack = self._wolf_pack(game)
+        if not pack:
+            return
+        labels = "、".join(f"{player['seat']}号 {player['name']}（{ROLE_NAMES[player['role']]}）" for player in pack)
+        for wolf in pack:
+            await self._send_private(game, wolf, "当前狼队成员：" + labels)
 
     async def _begin_day(self, game):
         game["day"] = int(game.get("day") or 0) + 1
         game["phase"] = "discussion"
         game["ready"] = []
         game["votes"] = {}
+        game["vote_patterns"] = []
         game["discussion_human_messages"] = 0
         game["ai_round_robin_seat"] = 0
         for player in game["players"]:
             if player.get("virtual"):
                 player["ai_daily_replies"] = 0
                 player["ai_ready_day"] = 0
+        self._record_action(game, "天亮，进入自由讨论。")
         self._save()
         needed = self._ready_needed(game)
-        await self._safe_send(game["chat_id"], f"第 {game['day']} 天天亮，请开始讨论。存活玩家发送 {self.prefix} 结束发言；达到 {needed} 人后进入投票。")
+        announcements = []
+        bear = self._living_role(game, "bear_tamer")
+        if bear and not self._good_skills_sealed(game):
+            roars = self._bear_roars(game, bear)
+            announcements.append("驯熊师的熊发出咆哮，邻近存活玩家中有狼人阵营。" if roars else "驯熊师的熊没有咆哮。")
+            self._record_action(game, f"驯熊师清晨判定：{'咆哮' if roars else '未咆哮'}。")
+        silenced = [self._player(game, uid) for uid in game.get("silenced_ids", [])]
+        silenced = [player for player in silenced if player and player.get("alive")]
+        if silenced:
+            announcements.append("今日被禁言：" + "、".join(f"{player['seat']}号 {player['name']}" for player in silenced) + "。")
+        crowed = [self._player(game, uid) for uid in game.get("crow_targets", [])]
+        crowed = [player for player in crowed if player and player.get("alive")]
+        if crowed:
+            announcements.append("乌鸦加票目标：" + "、".join(f"{player['seat']}号 {player['name']}" for player in crowed) + "。")
+        suffix = ("\n" + "\n".join(announcements)) if announcements else ""
+        await self._safe_send(
+            game["chat_id"],
+            f"第 {game['day']} 天天亮，请开始讨论。存活且未被禁言的玩家发送 {self.prefix} 结束发言；达到 {needed} 人后进入投票。{suffix}",
+        )
+
+    @staticmethod
+    def _bear_roars(game, bear):
+        living = sorted((player for player in game["players"] if player.get("alive")), key=lambda item: item["seat"])
+        if len(living) <= 1:
+            return False
+        index = living.index(bear)
+        neighbors = {living[(index - 1) % len(living)]["user_id"], living[(index + 1) % len(living)]["user_id"]}
+        return any(
+            player["user_id"] in neighbors and player.get("role") in WOLF_ROLES
+            for player in living
+        )
 
     async def _day_ready(self, game, user_id):
         if game["phase"] != "discussion":
@@ -1454,27 +2350,154 @@ class WerewolfPlugin:
         if not player or not player.get("alive"):
             await self._safe_send(game["chat_id"], "只有存活玩家可以确认结束发言。")
             return
+        if self._is_silenced(game, player):
+            await self._safe_send(game["chat_id"], "你本日被禁言，不能确认结束发言，但仍可参与私密投票。")
+            return
         if user_id not in game["ready"]:
             game["ready"].append(user_id)
+            self._record_action(game, f"{self._history_player_label(player)}确认结束发言。")
             self._save()
         needed = self._ready_needed(game)
         await self._safe_send(game["chat_id"], f"结束发言确认：{len(game['ready'])}/{needed}。")
         if len(game["ready"]) >= needed:
             await self._begin_vote(game, round_number=1, candidates=None)
 
+    async def _knight_duel(self, game, user_id, args):
+        if game.get("phase") != "discussion":
+            await self._safe_send(game["chat_id"], "骑士只能在白天讨论阶段发起决斗。")
+            return
+        knight = self._player(game, user_id)
+        if not knight or not knight.get("alive") or not self._has_ability(knight, "knight"):
+            await self._safe_send(game["chat_id"], "只有存活的骑士可以发起决斗。")
+            return
+        if self._skill_used(knight, "knight"):
+            await self._safe_send(game["chat_id"], "骑士的决斗已经使用过。")
+            return
+        target = self._single_target(game, args)
+        if not target or target["user_id"] == knight["user_id"]:
+            await self._safe_send(game["chat_id"], f"格式：{self.prefix} 决斗 <另一名存活玩家座位>")
+            return
+
+        if knight["role"] == "knight":
+            knight["knight_used"] = True
+        else:
+            knight.setdefault("copied_resources", {})["knight_used"] = True
+        self._record_action(
+            game,
+            f"{self._history_player_label(knight)}公开决斗{self._history_player_label(target)}。",
+        )
+        if target["role"] in WOLF_ROLES:
+            await self._safe_send(
+                game["chat_id"],
+                f"{knight['seat']}号 {knight['name']} 翻牌为骑士并决斗 {target['seat']}号 {target['name']}。"
+                "目标属于狼人阵营，立即死亡且不能发动死亡技能，本日不再投票。",
+            )
+            game["transition_after_shots"] = "night"
+            newly_dead = self._apply_deaths(game, [(target["user_id"], "duel")])
+        else:
+            await self._safe_send(
+                game["chat_id"],
+                f"{knight['seat']}号 {knight['name']} 翻牌为骑士并决斗 {target['seat']}号 {target['name']}。"
+                "目标不属于狼人阵营，骑士以死谢罪，白天讨论继续。",
+            )
+            game["transition_after_shots"] = "discussion"
+            newly_dead = self._apply_deaths(game, [(knight["user_id"], "duel_failed")])
+        primary_id = target["user_id"] if target["role"] in WOLF_ROLES else knight["user_id"]
+        chained = [player for player in newly_dead if player["user_id"] != primary_id]
+        if chained:
+            labels = "、".join(f"{player['seat']}号 {player['name']}" for player in chained)
+            await self._safe_send(game["chat_id"], f"情侣殉情：{labels}。")
+        self._save()
+        await self._continue_death_resolution(game)
+
+    async def _white_wolf_blast(self, game, user_id, args):
+        if game.get("phase") != "discussion":
+            await self._safe_send(game["chat_id"], "白狼王只能在白天讨论阶段自爆。")
+            return
+        white_wolf = self._player(game, user_id)
+        if not white_wolf or not white_wolf.get("alive") or not self._has_ability(white_wolf, "white_wolf_king"):
+            await self._safe_send(game["chat_id"], "只有存活的白狼王可以发动自爆。")
+            return
+        target = self._single_target(game, args)
+        if not target or target["user_id"] == white_wolf["user_id"]:
+            await self._safe_send(game["chat_id"], f"格式：{self.prefix} 自爆 <另一名存活玩家座位>")
+            return
+
+        self._record_action(
+            game,
+            f"{self._history_player_label(white_wolf)}公开自爆并带走{self._history_player_label(target)}。",
+        )
+        await self._safe_send(
+            game["chat_id"],
+            f"{white_wolf['seat']}号 {white_wolf['name']} 翻牌为白狼王并自爆，带走 "
+            f"{target['seat']}号 {target['name']}；本日不再投票。",
+        )
+        game["transition_after_shots"] = "night"
+        newly_dead = self._apply_deaths(game, [
+            (white_wolf["user_id"], "white_wolf_blast_self"),
+            (target["user_id"], "white_wolf_blast"),
+        ])
+        primary_ids = {white_wolf["user_id"], target["user_id"]}
+        chained = [player for player in newly_dead if player["user_id"] not in primary_ids]
+        if chained:
+            labels = "、".join(f"{player['seat']}号 {player['name']}" for player in chained)
+            await self._safe_send(game["chat_id"], f"情侣殉情：{labels}。")
+        self._save()
+        await self._continue_death_resolution(game)
+
+    async def _blood_moon_blast(self, game, user_id):
+        if game.get("phase") != "discussion":
+            await self._safe_send(game["chat_id"], "血月使徒只能在白天讨论阶段血爆。")
+            return
+        player = self._player(game, user_id)
+        if not player or not player.get("alive") or not self._has_ability(player, "blood_moon"):
+            await self._safe_send(game["chat_id"], "只有存活且拥有血月使徒技能的玩家可以血爆。")
+            return
+        if player.get("blood_blast_used"):
+            await self._safe_send(game["chat_id"], "血爆技能已经使用。")
+            return
+        player["blood_blast_used"] = True
+        game["good_skills_sealed_night"] = int(game.get("night") or 0) + 1
+        game["transition_after_shots"] = "night"
+        self._record_action(game, f"{self._history_player_label(player)}公开血爆，封印下一夜好人技能。")
+        await self._safe_send(
+            game["chat_id"],
+            f"{player['seat']}号 {player['name']} 发动血爆并死亡；下一夜所有好人主动和信息技能被封印，本日不再投票。",
+        )
+        self._apply_deaths(game, [(player["user_id"], "blood_moon_blast")])
+        self._save()
+        await self._continue_death_resolution(game)
+
     def _ready_needed(self, game):
-        return max(1, math.ceil(float(game["settings"]["day_ready_threshold"]) * len(self._living(game))))
+        eligible = [player for player in self._living(game) if not self._is_silenced(game, player)]
+        return max(1, math.ceil(float(game["settings"]["day_ready_threshold"]) * len(eligible)))
+
+    @staticmethod
+    def _is_silenced(game, player):
+        return bool(player and player["user_id"] in set(game.get("silenced_ids") or []))
 
     async def _begin_vote(self, game, round_number, candidates):
         game["phase"] = "vote"
         game["vote_round"] = round_number
         game["vote_candidates"] = list(candidates or [p["user_id"] for p in self._living(game)])
         game["votes"] = {}
+        candidates_text = "、".join(
+            self._history_player_label(self._player(game, uid)) for uid in game["vote_candidates"]
+        )
+        self._record_action(game, f"第 {round_number} 轮投票开始，候选人：{candidates_text}。")
         self._save()
         candidate_players = [self._player(game, uid) for uid in game["vote_candidates"]]
         labels = "、".join(f"{p['seat']}号 {p['name']}" for p in candidate_players)
         title = "平票加赛" if round_number == 2 else "投票开始"
-        await self._safe_send(game["chat_id"], f"{title}，候选人：{labels}。请在临时会话提交，具体票型不会公开。")
+        await self._safe_send(
+            game["chat_id"],
+            f"{title}，候选人：{labels}。请在临时会话提交；"
+            + (
+                "具体票型将在下一夜开始时公开。"
+                if game.get("settings", {}).get("show_vote_pattern", False)
+                else "游戏进行中隐藏具体票型，结束复盘时统一公开。"
+            ),
+        )
         voters = self._eligible_voters(game)
         if not voters:
             await self._finish_vote_without_exile(game)
@@ -1508,28 +2531,46 @@ class WerewolfPlugin:
                 return
             target_id = target["user_id"]
         game["votes"][player["user_id"]] = target_id
+        if target_id:
+            choice = f"投票给{self._history_player_label(self._player(game, target_id))}"
+        else:
+            choice = "选择弃票"
+        self._record_action(game, f"{self._history_player_label(player)}{choice}。")
         self._save()
         await self._private_ack(game, player, "投票已记录，在本轮结束前可以修改。")
         if all(voter["user_id"] in game["votes"] for voter in self._eligible_voters(game)):
             await self._resolve_vote(game)
 
     async def _resolve_vote(self, game):
+        self._capture_vote_pattern(game)
         choices = [uid for uid in game["votes"].values() if uid]
-        if not choices:
+        counts = {uid: choices.count(uid) for uid in set(choices)}
+        candidates = set(game.get("vote_candidates") or [])
+        for target_id in game.get("crow_targets") or []:
+            if target_id in candidates:
+                counts[target_id] = counts.get(target_id, 0) + 1
+                target = self._player(game, target_id)
+                self._record_action(game, f"乌鸦效果为{self._history_player_label(target)}增加一票。")
+        if not counts:
             await self._finish_vote_without_exile(game)
             return
-        counts = {uid: choices.count(uid) for uid in set(choices)}
         top_count = max(counts.values())
         top = [uid for uid, count in counts.items() if count == top_count]
         if len(top) > 1:
             policy = game["settings"]["tie_policy"]
             labels = "、".join(f"{self._player(game, uid)['seat']}号 {self._player(game, uid)['name']}" for uid in top)
+            history_labels = "、".join(self._history_player_label(self._player(game, uid)) for uid in top)
+            self._record_action(game, f"投票结果平票：{history_labels}，各得 {top_count} 票。")
             await self._safe_send(game["chat_id"], f"本轮最高票平票：{labels}。")
             if policy == "runoff" and int(game.get("vote_round") or 1) == 1:
                 await self._begin_vote(game, round_number=2, candidates=top)
                 return
             if policy == "random":
                 exile_id = self.rng.choice(top)
+                self._record_action(
+                    game,
+                    f"按随机出局规则选中{self._history_player_label(self._player(game, exile_id))}。",
+                )
             else:
                 await self._finish_vote_without_exile(game)
                 return
@@ -1537,25 +2578,88 @@ class WerewolfPlugin:
             exile_id = top[0]
         await self._exile(game, exile_id)
 
+    def _capture_vote_pattern(self, game):
+        votes = game.get("votes") or {}
+        pattern = {
+            "round": int(game.get("vote_round") or 1),
+            "votes": [
+                {"voter": voter["user_id"], "target": votes.get(voter["user_id"])}
+                for voter in self._eligible_voters(game)
+                if voter["user_id"] in votes
+            ],
+        }
+        game.setdefault("vote_patterns", []).append(pattern)
+
+    def _vote_patterns_text(self, game):
+        if not game.get("settings", {}).get("show_vote_pattern", False):
+            return ""
+        sections = []
+        for pattern in game.get("vote_patterns") or []:
+            lines = [f"【第 {int(pattern.get('round') or 1)} 轮票型】"]
+            for choice in pattern.get("votes") or []:
+                voter = self._player(game, choice.get("voter"))
+                if not voter:
+                    continue
+                voter_label = f"{voter['seat']}号 {voter['name']}"
+                target = self._player(game, choice.get("target"))
+                target_label = f"{target['seat']}号 {target['name']}" if target else "弃票"
+                lines.append(f"{voter_label} 投给 {target_label}")
+            if len(lines) == 1:
+                lines.append("无人投票")
+            sections.append("\n".join(lines))
+        return "\n\n".join(sections)
+
     async def _finish_vote_without_exile(self, game):
+        self._record_action(game, "本轮投票无人出局。")
         await self._safe_send(game["chat_id"], "本轮无人出局。")
+        await self._convert_angel_after_first_vote(game)
         game["transition_after_shots"] = "night"
         self._save()
         await self._after_deaths(game)
 
     async def _exile(self, game, user_id):
         player = self._player(game, user_id)
+        if player["role"] == "angel" and int(game.get("day") or 0) == 1 and not player.get("angel_converted"):
+            self._record_action(game, f"{self._history_player_label(player)}第一天被公投，达成天使胜利。")
+            self._apply_deaths(game, [(user_id, "exile")])
+            await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 第一天被公投，翻牌为天使并独自获胜。")
+            await self._finish_game(game, "angel")
+            return
+        living_wolves = [item for item in self._living(game) if item["role"] in WOLF_ROLES]
+        if player["role"] == "blood_moon" and len(living_wolves) == 1:
+            game["blood_moon_doomed"] = {
+                "user_id": player["user_id"],
+                "night": int(game.get("night") or 0) + 1,
+            }
+            self._record_action(game, f"{self._history_player_label(player)}作为最后一狼被公投，延迟至下一天清晨死亡。")
+            await self._safe_send(
+                game["chat_id"],
+                f"{player['seat']}号 {player['name']} 翻牌为最后一名血月使徒，将存活完成最后一夜并在天亮时死亡。",
+            )
+            await self._convert_angel_after_first_vote(game)
+            game["transition_after_shots"] = "night"
+            self._save()
+            await self._after_deaths(game)
+            return
         if player["role"] == "idiot" and not player.get("idiot_revealed"):
             player["idiot_revealed"] = True
             player["no_vote"] = True
+            self._record_action(
+                game,
+                f"{self._history_player_label(player)}被公投，发动白痴技能免死并失去投票权。",
+            )
             self._save()
             await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 被公投，但其身份是白痴，翻牌免死并永久失去投票权。")
+            await self._convert_angel_after_first_vote(game)
             game["transition_after_shots"] = "night"
             await self._after_deaths(game)
             return
+        self._record_action(game, f"公投决定放逐{self._history_player_label(player)}。")
         await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 被公投出局。")
         game["transition_after_shots"] = "night"
         newly_dead = self._apply_deaths(game, [(user_id, "exile")])
+        game["last_exile"] = user_id
+        await self._convert_angel_after_first_vote(game)
         chained = [item for item in newly_dead if item["user_id"] != user_id]
         if chained:
             labels = "、".join(f"{item['seat']}号 {item['name']}" for item in chained)
@@ -1563,8 +2667,21 @@ class WerewolfPlugin:
         self._save()
         await self._continue_death_resolution(game)
 
+    async def _convert_angel_after_first_vote(self, game):
+        if int(game.get("day") or 0) != 1:
+            return
+        angel = self._living_role(game, "angel")
+        if not angel or angel.get("angel_converted"):
+            return
+        if not angel.get("original_role"):
+            angel["original_role"] = "angel"
+        angel["role"] = "villager"
+        angel["angel_converted"] = True
+        self._record_action(game, f"{self._history_player_label(angel)}未在首日被公投，转化为普通村民。")
+        await self._send_private(game, angel, "你未在第一天被公投，天使胜利条件失效；你现在是普通村民。")
+
     async def _wolf_relay(self, game, player, text):
-        if game["phase"] not in ("night_actions", "witch") or not player.get("alive") or player["role"] not in WOLF_ROLES:
+        if game["phase"] not in ("night_actions", "witch") or not self._is_active_pack_wolf(player):
             await self._private_error(game, player, "当前不能使用狼聊。")
             return
         text = text.strip()
@@ -1572,12 +2689,11 @@ class WerewolfPlugin:
             await self._private_error(game, player, f"格式：{self.prefix} 狼聊 <内容>")
             return
         payload = f"【狼聊】{player['seat']}号 {player['name']}：{text}"
-        for wolf in self._living(game):
-            if wolf["role"] in WOLF_ROLES:
-                if wolf.get("virtual"):
-                    wolf.setdefault("ai_wolf_chat", []).append(payload)
-                    wolf["ai_wolf_chat"] = wolf["ai_wolf_chat"][-30:]
-                await self._send_private(game, wolf, payload)
+        for wolf in self._wolf_pack(game):
+            if wolf.get("virtual"):
+                wolf.setdefault("ai_wolf_chat", []).append(payload)
+                wolf["ai_wolf_chat"] = wolf["ai_wolf_chat"][-30:]
+            await self._send_private(game, wolf, payload)
         self._save()
         if not player.get("virtual"):
             await self._handle_virtual_wolf_chat(game)
@@ -1587,35 +2703,46 @@ class WerewolfPlugin:
             await self._safe_send(game["chat_id"], "只有房主可以推进游戏。")
             return
         phase = game["phase"]
-        if phase == "dealing":
+        if phase == "thief_choice":
+            thief = self._living_role(game, "thief")
+            choices = game.get("thief_choices") or []
+            if thief and len(choices) == 2:
+                index = 1
+                if all(role in WOLF_ROLES for role in choices):
+                    index = 1
+                self._record_action(game, "房主强制推进盗贼选择。")
+                await self._thief_action(game, thief, [str(index)])
+        elif phase == "dealing":
+            self._record_action(game, "房主强制推进身份送达阶段。")
             await self._deliver_start(game)
         elif phase == "discussion":
+            self._record_action(game, "房主强制结束讨论并进入投票。")
             await self._begin_vote(game, 1, None)
         elif phase == "night_actions":
+            self._record_action(game, "房主强制补全未提交的夜间行动。")
             actions = game["night_actions"]
-            cupid = self._living_role(game, "cupid")
-            if game["night"] == 1 and cupid and not game.get("lovers"):
-                actions.setdefault("cupid", None)
-            if self._living_role(game, "guard"):
-                actions.setdefault("guard", None)
-            if self._living_role(game, "seer"):
-                actions.setdefault("seer", None)
-            for wolf in self._living(game):
-                if wolf["role"] in WOLF_ROLES:
-                    actions.setdefault("wolves", {}).setdefault(wolf["user_id"], None)
+            for spec in self._night_decision_specs(game):
+                if spec["kind"] == "wolf":
+                    actions.setdefault("wolves", {}).setdefault(spec["key"], None)
+                else:
+                    actions.setdefault(spec["key"], None)
             self._save()
             await self._maybe_finish_initial_night(game)
         elif phase == "witch":
-            game["night_actions"]["witch"] = {"heal": False, "poison": None}
+            self._record_action(game, "房主强制所有女巫类技能跳过行动。")
+            for key in game["night_actions"].get("witch_actor_keys") or []:
+                game["night_actions"].setdefault(key, {"heal": False, "poison": None})
             self._save()
             await self._resolve_night(game)
         elif phase == "vote":
+            self._record_action(game, "房主强制未投票玩家弃票并结算投票。")
             for voter in self._eligible_voters(game):
                 game["votes"].setdefault(voter["user_id"], None)
             self._save()
             await self._resolve_vote(game)
         elif phase == "death_shot":
             shooter = self._player(game, game["pending_shots"].pop(0))
+            self._record_action(game, f"房主强制{self._history_player_label(shooter)}放弃开枪。")
             await self._safe_send(game["chat_id"], f"房主推进：{shooter['seat']}号 {shooter['name']} 视为放弃开枪。")
             self._save()
             await self._continue_death_resolution(game)
@@ -1630,6 +2757,18 @@ class WerewolfPlugin:
         self._save()
         await self._safe_send(game["chat_id"], "本局游戏已取消，身份不会公开。")
 
+    async def _terminate_game(self, game, user_id):
+        if not self._is_host(game, user_id):
+            await self._safe_send(game["chat_id"], "只有房主可以提前结束游戏。")
+            return
+        if game.get("phase") == "ended":
+            await self._safe_send(game["chat_id"], "本局已经结束。")
+            return
+        host = self._player(game, user_id)
+        label = self._history_player_label(host) if host else "房主"
+        self._record_action(game, f"{label}提前结束本局。")
+        await self._finish_game(game, "terminated")
+
     async def _clear(self, game, user_id):
         if not self._is_host(game, user_id) or game["phase"] != "ended":
             await self._safe_send(game["chat_id"], "只有房主可以清理已结束的游戏。")
@@ -1640,6 +2779,13 @@ class WerewolfPlugin:
 
     def _winner(self, game):
         living = self._living(game)
+        if game.get("blood_moon_doomed"):
+            return None
+        piper = next((player for player in living if player["role"] == "piper"), None)
+        if piper:
+            other_ids = {player["user_id"] for player in living if player["user_id"] != piper["user_id"]}
+            if other_ids <= set(game.get("charmed_players") or []):
+                return "piper"
         lovers = game.get("lovers") or []
         living_ids = {p["user_id"] for p in living}
         if game.get("lovers_cross") and len(lovers) == 2 and set(lovers) == living_ids:
@@ -1648,35 +2794,146 @@ class WerewolfPlugin:
             return None
         wolves = [p for p in living if p["role"] in WOLF_ROLES]
         if not wolves:
-            return "good"
-        if game["settings"]["victory"] == "slaughter_side":
-            villagers = [p for p in living if p["role"] == "villager"]
+            faction_winner = "good"
+        elif game["settings"]["victory"] == "slaughter_side":
+            villagers = [p for p in living if self._is_ordinary_good(p)]
             gods = [p for p in living if p["role"] in DIVINE_ROLES]
-            if not villagers or not gods:
-                return "wolves"
+            faction_winner = "wolves" if not villagers or not gods else None
         else:
-            if not [p for p in living if p["role"] not in WOLF_ROLES]:
-                return "wolves"
-        return None
+            faction_winner = "wolves" if not [p for p in living if p["role"] not in WOLF_ROLES] else None
+        if faction_winner and any(player["role"] == "cursed_fox" for player in living):
+            return "fox"
+        return faction_winner
 
     async def _finish_game(self, game, winner):
+        if winner != "terminated":
+            winner_name = {
+                "good": "好人阵营",
+                "wolves": "狼人阵营",
+                "lovers": "跨阵营情侣",
+                "piper": "吹笛者",
+                "fox": "咒狐",
+                "angel": "天使",
+            }[winner]
+            self._record_action(game, f"胜负判定：{winner_name}获胜。")
+        game["result_winners"] = self._result_winner_ids(game, winner)
         game["phase"] = "ended"
         game["winner"] = winner
+        game["result_announced"] = False
+        game["result_delivery_index"] = 0
         self._save()
         await self._announce_result(game)
 
+    def _result_winner_ids(self, game, winner):
+        if winner == "terminated":
+            return []
+        if winner == "good":
+            winners = [player["user_id"] for player in game["players"] if self._camp(player["role"]) == "good"]
+        elif winner == "wolves":
+            winners = [player["user_id"] for player in game["players"] if player["role"] in WOLF_ROLES]
+        elif winner == "lovers":
+            winners = list(game.get("lovers") or [])
+        else:
+            role = {"piper": "piper", "fox": "cursed_fox", "angel": "angel"}[winner]
+            winners = [player["user_id"] for player in game["players"] if player.get("original_role") == role or player["role"] == role]
+        winner_set = set(winners)
+        for player in game["players"]:
+            if (
+                (player.get("original_role") == "mixed_blood" or player.get("role") == "mixed_blood")
+                and player.get("mixed_support") in winner_set
+            ):
+                winners.append(player["user_id"])
+        return list(dict.fromkeys(winners))
+
     async def _announce_result(self, game):
         winner = game["winner"]
-        winner_name = {"good": "好人阵营", "wolves": "狼人阵营", "lovers": "跨阵营情侣"}[winner]
-        roles = "\n".join(f"{p['seat']}号 {p['name']}：{ROLE_NAMES[p['role']]}" for p in game["players"])
+        if winner == "terminated":
+            result_line = "游戏结束，本局由房主提前终止。"
+        else:
+            winner_name = {
+                "good": "好人阵营", "wolves": "狼人阵营", "lovers": "跨阵营情侣",
+                "piper": "吹笛者", "fox": "咒狐", "angel": "天使",
+            }[winner]
+            result_line = f"游戏结束，{winner_name}获胜。"
+        role_lines = []
+        for player in game["players"]:
+            final_role = ROLE_NAMES.get(player.get("role"), "未分配")
+            original = player.get("original_role")
+            suffix = f"（原身份：{ROLE_NAMES.get(original, original)}）" if original and original != player.get("role") else ""
+            role_lines.append(f"{player['seat']}号 {player['name']}：{final_role}{suffix}")
+        roles = "\n".join(role_lines)
         lover_text = "无"
         if game.get("lovers"):
             pair = [self._player(game, uid) for uid in game["lovers"]]
             lover_text = " 与 ".join(f"{p['seat']}号 {p['name']}" for p in pair)
-        text = f"游戏结束，{winner_name}获胜。\n【身份公开】\n{roles}\n情侣：{lover_text}"
-        if await self._safe_send(game["chat_id"], text):
-            game["result_announced"] = True
+        winners = [self._player(game, uid) for uid in game.get("result_winners", [])]
+        winner_text = "、".join(f"{player['seat']}号 {player['name']}" for player in winners if player) or "无"
+        messages = [f"{result_line}\n【获胜玩家】{winner_text}\n【身份公开】\n{roles}\n情侣：{lover_text}"]
+        messages.extend(self._action_account_messages(game))
+        index = min(int(game.get("result_delivery_index") or 0), len(messages))
+        while index < len(messages):
+            if not await self._safe_send(game["chat_id"], messages[index]):
+                return
+            index += 1
+            game["result_delivery_index"] = index
             self._save()
+        game["result_announced"] = True
+        self._save()
+
+    def _record_action(self, game, text, context=None):
+        history = game.setdefault("action_history", [])
+        history.append({
+            "context": str(context or self._action_context(game)),
+            "text": str(text),
+        })
+
+    @staticmethod
+    def _action_context(game):
+        phase = game.get("phase")
+        if phase in ("night_actions", "witch"):
+            return f"第 {game.get('night', 0)} 夜"
+        if phase == "death_shot":
+            if game.get("transition_after_shots") == "night":
+                return f"第 {game.get('day', 0)} 天"
+            return f"第 {game.get('night', 0)} 夜"
+        if phase in ("discussion", "vote"):
+            return f"第 {game.get('day', 0)} 天"
+        if phase == "ended":
+            return "结束"
+        return "开局前" if phase in ("lobby", "setup", "ready") else "开局"
+
+    @staticmethod
+    def _history_player_label(player):
+        if not player:
+            return "未知玩家"
+        role = ROLE_NAMES.get(player.get("role"), "未分配")
+        return f"{player['seat']}号 {player['name']}（{role}）"
+
+    def _action_account_messages(self, game, limit=3500):
+        history = game.get("action_history") or []
+        lines = []
+        for index, entry in enumerate(history, 1):
+            if isinstance(entry, dict):
+                context = str(entry.get("context") or "未知阶段")
+                text = str(entry.get("text") or "")
+            else:
+                context = "未知阶段"
+                text = str(entry)
+            lines.append(f"{index}. 【{context}】{text}")
+        if not lines:
+            lines = ["暂无行动记录。"]
+
+        chunks = []
+        current = "【全局行动记录】"
+        for line in lines:
+            addition = "\n" + line
+            if len(current) + len(addition) > limit and current != "【全局行动记录】":
+                chunks.append(current)
+                current = "【全局行动记录（续）】\n" + line
+            else:
+                current += addition
+        chunks.append(current)
+        return chunks
 
     async def _preflight_virtual_model(self):
         config_error = self._virtual_config_error()
@@ -1805,6 +3062,11 @@ class WerewolfPlugin:
         tie = TIE_NAMES.get(game.get("settings", {}).get("tie_policy"), "尚未配置")
         witch_self = WITCH_SELF_NAMES.get(game.get("settings", {}).get("witch_self"), "尚未配置")
         double = "允许" if game.get("settings", {}).get("witch_double") else "不允许"
+        ballot_visibility = (
+            "Individual ballots are revealed publicly at the start of the next night."
+            if game.get("settings", {}).get("show_vote_pattern", False)
+            else "Individual ballots are revealed only in the postgame action account."
+        )
         wolf_targets = (
             "允许；狼人可选择任意存活玩家，包括狼队友和自己"
             if game.get("settings", {}).get("wolf_can_kill_wolves", False)
@@ -1816,6 +3078,10 @@ class WerewolfPlugin:
             if victory_key == "slaughter_side"
             else "屠城：狼人消灭全部非狼人玩家才获胜"
         )
+        configured_rules = "\n".join(
+            f"  - {ROLE_NAMES[role]}: {ROLE_HELP[role]}"
+            for role, count in counts.items() if int(count)
+        )
         return (
             "Authoritative game rules and public state:\n"
             f"- Current phase: {game.get('phase')}; night {game.get('night', 0)}; day {game.get('day', 0)}; "
@@ -1823,47 +3089,61 @@ class WerewolfPlugin:
             f"- Seats: {self._seat_list(game, include_status=True)}\n"
             f"- Public role counts: {role_counts}.\n"
             f"- Day completion threshold: {game.get('settings', {}).get('day_ready_threshold', self.day_ready_threshold):.0%}. "
-            "Votes are private and individual ballots are never published.\n"
+            f"Votes are submitted privately. {ballot_visibility}\n"
             f"- Tie rule: {tie}.\n"
-            "- Phase flow: at night Cupid (night one), guard, wolves, and seer act first; the witch acts after the "
-            "wolf target is fixed. Living wolves submit individual kill choices; plurality selects the victim and a "
+            "- Phase flow: setup and initial night abilities resolve first, then all ordinary night targets are redirected "
+            "and fixed; witch-type abilities act after the wolf target is fixed. Living active-pack wolves submit individual kill choices; plurality selects the victim and a "
             "top tie means no wolf kill. Night deaths resolve together before triggered shots and victory checks. "
             "During the day, living players discuss, confirm readiness, then vote privately.\n"
             f"- Witch: {witch_self}; {double} same-night antidote and poison use.\n"
             f"- Wolf friendly fire: {wolf_targets}.\n"
             "- Guard may protect self, may not protect the same player on consecutive nights, and guard plus antidote "
             "on the wolf victim still causes that victim to die.\n"
-            "- Hunter and wolf king may shoot after any death except poison. The idiot survives the first public exile, "
+            "- Hunter and wolf king may shoot after any death except poison or a direct Knight duel. The idiot survives the first public exile, "
             "is revealed, and permanently loses voting rights.\n"
+            "- During daytime discussion, the Knight may publicly duel one other living player once. A wolf target "
+            "dies without triggering a death shot and the game proceeds toward night; a non-wolf target survives, "
+            "the Knight dies, and discussion continues.\n"
+            "- During daytime discussion, the White Wolf King may publicly explode and take one other living player "
+            "down with it. Both die, eligible death shots resolve, voting is skipped, and the game proceeds toward night.\n"
             "- Cupid links two lovers. One lover dying kills the other. Same-camp lovers retain their faction. "
             "Cross-camp lovers win only as the final two survivors and suspend normal faction victory while both live.\n"
-            "- Role rules: villagers have no night action; wolves coordinate and choose a kill; the seer privately "
-            "checks wolf alignment; the witch has one antidote and one poison; the hunter and wolf king may shoot "
-            "after eligible deaths; the guard protects one player; the idiot has one exile immunity; Cupid links "
-            "two lovers on night one. The wolf king belongs to the wolf faction; seer, witch, hunter, guard, idiot, "
-            "and Cupid are divine roles.\n"
-            "- Good wins by eliminating every wolf and wolf king. "
+            "- Dormant Gargoyle and Hidden Wolf do not know or chat with the active pack and cannot kill until the active pack is gone.\n"
+            "- The Hidden Wolf appears non-wolf to Seer alignment checks; exact-role checks still reveal it.\n"
+            "- Knight may publicly duel during discussion; White Wolf King may publicly explode with a target; Blood Moon may publicly explode without a target.\n"
+            "- Configured role rules:\n"
+            f"{configured_rules}\n"
+            "- Good wins by eliminating every wolf-aligned role. Neutral roles use their documented personal conditions. "
             f"Wolf victory setting: {victory}."
         )
 
     def _ai_private_knowledge(self, game, player):
         role = player["role"]
-        objective = (
-            "Help the wolf faction achieve the configured wolf victory condition."
-            if role in WOLF_ROLES
-            else "Help the good faction eliminate every wolf and wolf king."
-        )
+        if role in WOLF_ROLES:
+            objective = "Help the wolf faction achieve the configured wolf victory condition."
+        elif role == "piper":
+            objective = "Charm every other living player and win alone."
+        elif role == "cursed_fox":
+            objective = "Remain alive until a faction would win, then take the victory."
+        elif role == "mixed_blood":
+            objective = "Ensure your privately selected supported player becomes a final winner."
+        elif role == "angel" and not player.get("angel_converted"):
+            objective = "Be publicly exiled on day one; otherwise continue as a villager."
+        else:
+            objective = "Help the good faction eliminate every wolf-aligned role."
         lines = [
             "Private knowledge. This section is authoritative and visible only to you:",
             f"- Seat: {player['seat']}; display name: {player['name']}; role: {ROLE_NAMES[role]}.",
             f"- Original faction objective: {objective}",
             f"- Role ability: {ROLE_HELP[role]}",
         ]
-        if role in WOLF_ROLES:
-            wolves = [f"{item['seat']}号 {item['name']}（{ROLE_NAMES[item['role']]}）" for item in game["players"] if item["role"] in WOLF_ROLES]
-            lines.append("- Known wolf teammates: " + "、".join(wolves))
+        if self._is_active_pack_wolf(player):
+            wolves = [f"{item['seat']}号 {item['name']}（{ROLE_NAMES[item['role']]}）" for item in self._wolf_pack(game)]
+            lines.append("- Known active-pack teammates: " + "、".join(wolves))
             chat = player.get("ai_wolf_chat") or []
             lines.append("- Private wolf chat: " + (" | ".join(chat[-10:]) if chat else "none"))
+        elif role in DORMANT_WOLF_ROLES:
+            lines.append("- You are dormant: no teammates are known, and you cannot kill or use wolf chat until activated.")
         if player["user_id"] in game.get("lovers", []):
             other_id = next(uid for uid in game["lovers"] if uid != player["user_id"])
             other = self._player(game, other_id)
@@ -1871,13 +3151,32 @@ class WerewolfPlugin:
         result = player.get("last_seer_result")
         if result:
             lines.append(f"- Latest seer result: night {result['night']}, {result['seat']}号 {result['name']} is {result['result']}.")
-        if role == "witch" and game.get("phase") == "witch":
+        if self._has_ability(player, "witch") and game.get("phase") == "witch":
             target = self._player(game, game.get("night_actions", {}).get("wolf_target"))
             victim = f"{target['seat']}号 {target['name']}" if target else "none"
-            lines.append(f"- Current wolf victim: {victim}; antidote available: {bool(game.get('witch_antidote'))}; poison available: {bool(game.get('witch_poison'))}.")
-        if role == "guard":
-            previous = self._player(game, game.get("last_guard_target")) if game.get("last_guard_target") else None
+            resources = self._witch_resources(game, player)
+            lines.append(f"- Current wolf victim: {victim}; antidote available: {resources['antidote']}; poison available: {resources['poison']}.")
+        if self._has_ability(player, "guard"):
+            previous = self._player(game, player.get("last_guard_target")) if player.get("last_guard_target") else None
             lines.append("- Previous guard target: " + (f"{previous['seat']}号 {previous['name']}" if previous else "none"))
+        if self._has_ability(player, "knight"):
+            lines.append(f"- Knight duel already used: {self._skill_used(player, 'knight')}.")
+        if role == "white_wolf_king":
+            lines.append(f"- White Wolf King considered exploding today: {int(player.get('ai_white_wolf_decision_day') or 0) == int(game.get('day') or 0)}.")
+        if player.get("copied_role"):
+            lines.append(f"- Mechanical Wolf copied active skill: {ROLE_NAMES[player['copied_role']]}. Resources: {json.dumps(player.get('copied_resources') or {}, ensure_ascii=False)}")
+        if role == "nine_tailed_fox":
+            lines.append(f"- Remaining tails: {player.get('nine_tails', 9)}.")
+        if player.get("wild_model"):
+            model = self._player(game, player["wild_model"])
+            lines.append(f"- Role model: {model['seat']}号 {model['name']} ({'alive' if model.get('alive') else 'dead'}).")
+        if player.get("mixed_support"):
+            supported = self._player(game, player["mixed_support"])
+            lines.append(f"- Supported player: {supported['seat']}号 {supported['name']}.")
+        if player["user_id"] in game.get("charmed_players", []):
+            lines.append("- You are charmed by the Piper.")
+        if self._is_silenced(game, player):
+            lines.append("- You are silenced today: do not speak, confirm readiness, or use public daytime skills; you may vote.")
         if player.get("ai_last_decision"):
             lines.append("- Your previous recorded decision: " + json.dumps(player["ai_last_decision"], ensure_ascii=False))
         return "\n".join(lines)
@@ -1917,10 +3216,24 @@ class WerewolfPlugin:
                 "submitting your kill choice yet. Schema: {\"wolf_message\":\"...\"}."
             ),
             "cupid": f"Choose two different living players from [{labels}]. Schema: {{\"action\":\"link\",\"seats\":[2,5]}}.",
+            "thief": "Choose one offered undealt role card. Schema: {\"action\":\"choose\",\"card\":1}.",
             "guard": f"Choose a legal guard target from [{labels}], or pass. Schema: {{\"action\":\"guard\",\"seat\":2}} or {{\"action\":\"pass\"}}.",
             "wolf": f"Choose a {wolf_target_rule} from [{labels}], or pass. Optionally add a concise private team message. Schema: {{\"action\":\"kill\",\"seat\":3,\"wolf_message\":\"...\"}} or {{\"action\":\"pass\"}}.",
             "seer": f"Inspect one legal player from [{labels}]. Schema: {{\"action\":\"inspect\",\"seat\":4}}.",
+            "magician": f"Swap two legal night targets from [{labels}]. Schema: {{\"action\":\"swap\",\"seats\":[2,5]}}.",
+            "dreamer": f"Dream one legal player from [{labels}]. Schema: {{\"action\":\"dream\",\"seat\":4}}.",
+            "crow": f"Give one legal player an extra vote from [{labels}]. Schema: {{\"action\":\"mark\",\"seat\":4}}.",
+            "silencer": f"Silence one legal player from [{labels}]. Schema: {{\"action\":\"silence\",\"seat\":4}}.",
+            "wolf_beauty": f"Charm one non-pack player from [{labels}]. Schema: {{\"action\":\"charm\",\"seat\":4}}.",
+            "exact_check": f"Inspect one player's exact identity from [{labels}]. Schema: {{\"action\":\"inspect_role\",\"seat\":4}}.",
+            "mechanical_learn": f"Learn one player's identity and copy eligible active skill from [{labels}]. Schema: {{\"action\":\"learn\",\"seat\":4}}.",
+            "piper": f"Charm one or two uncharmed players from [{labels}]. Schema: {{\"action\":\"charm_players\",\"seats\":[2,5]}}.",
+            "wild_child": f"Choose one role model from [{labels}]. Schema: {{\"action\":\"model\",\"seat\":4}}.",
+            "mixed_blood": f"Choose one player to support from [{labels}]. Schema: {{\"action\":\"support\",\"seat\":4}}.",
             "witch": self._ai_witch_instruction(game, player, labels),
+            "knight": f"Choose one living player to duel publicly from [{labels}], or pass for this day. Schema: {{\"action\":\"duel\",\"seat\":4}} or {{\"action\":\"pass\"}}.",
+            "white_wolf_blast": f"Choose one other living player to take down by publicly exploding from [{labels}], or pass for this day. Schema: {{\"action\":\"explode\",\"seat\":4}} or {{\"action\":\"pass\"}}.",
+            "blood_moon_blast": "Choose whether to publicly blood-explode today. Schema: {\"action\":\"blood_explode\"} or {\"action\":\"pass\"}.",
             "shot": f"Choose a living target from [{labels}], or decline. Schema: {{\"action\":\"shoot\",\"seat\":4}} or {{\"action\":\"pass\"}}.",
             "vote": f"Vote for a legal candidate from [{labels}], or abstain. Schema: {{\"action\":\"vote\",\"seat\":3}} or {{\"action\":\"pass\"}}.",
         }
@@ -1928,13 +3241,14 @@ class WerewolfPlugin:
 
     def _ai_witch_instruction(self, game, player, labels):
         target_id = game.get("night_actions", {}).get("wolf_target")
-        can_heal = bool(game.get("witch_antidote") and target_id and self._witch_can_heal(game, player, target_id))
+        resources = self._witch_resources(game, player)
+        can_heal = bool(resources.get("antidote") and target_id and self._witch_can_heal(game, player, target_id))
         actions = ["{\"action\":\"pass\"}"]
         if can_heal:
             actions.append("{\"action\":\"heal\"}")
-        if game.get("witch_poison"):
+        if resources.get("poison"):
             actions.append('{"action":"poison","seat":5}')
-        if can_heal and game.get("witch_poison") and game.get("settings", {}).get("witch_double"):
+        if can_heal and resources.get("poison") and game.get("settings", {}).get("witch_double"):
             actions.append('{"action":"heal_and_poison","seat":5}')
         return f"Choose one legal witch action. Poison targets, if used, must be from [{labels}]. Allowed schemas: " + " or ".join(actions) + "."
 
@@ -1943,14 +3257,30 @@ class WerewolfPlugin:
         if kind == "cupid":
             return living
         if kind == "guard":
-            return [item for item in living if item["user_id"] != game.get("last_guard_target")]
+            return [item for item in living if item["user_id"] != player.get("last_guard_target")]
         if kind == "wolf":
             if game.get("settings", {}).get("wolf_can_kill_wolves", False):
                 return living
-            return [item for item in living if item["role"] not in WOLF_ROLES]
-        if kind == "seer":
+            return [item for item in living if not self._is_active_pack_wolf(item)]
+        if kind in {"seer", "exact_check", "mechanical_learn", "wild_child", "mixed_blood", "crow"}:
             return [item for item in living if item["user_id"] != player["user_id"]]
+        if kind == "dreamer":
+            return [item for item in living if item["user_id"] not in {player["user_id"], player.get("last_dream_target")}]
+        if kind == "magician":
+            previous = set(player.get("last_magic_pair") or [])
+            return [item for item in living if item["user_id"] not in previous]
+        if kind == "silencer":
+            return [item for item in living if item["user_id"] not in {player["user_id"], player.get("last_silenced_target")}]
+        if kind == "wolf_beauty":
+            return [item for item in living if item["user_id"] != player["user_id"] and not self._is_active_pack_wolf(item)]
+        if kind == "piper":
+            charmed = set(game.get("charmed_players") or [])
+            return [item for item in living if item["user_id"] != player["user_id"] and item["user_id"] not in charmed]
         if kind == "witch":
+            return [item for item in living if item["user_id"] != player["user_id"]]
+        if kind == "knight":
+            return [item for item in living if item["user_id"] != player["user_id"]]
+        if kind == "white_wolf_blast":
             return [item for item in living if item["user_id"] != player["user_id"]]
         if kind == "shot":
             return living
@@ -1986,21 +3316,51 @@ class WerewolfPlugin:
         action = payload.get("action")
         legal = self._legal_ai_targets(game, player, kind)
         legal_seats = {item["seat"]: item for item in legal}
-        if action == "pass" and kind in ("guard", "wolf", "witch", "shot", "vote") and set(payload) == {"action"}:
-            return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "shot": "不开枪", "vote": "弃票"}[kind], "args": []}
+        if action == "pass" and kind in ("guard", "wolf", "witch", "knight", "white_wolf_blast", "blood_moon_blast", "shot", "vote") and set(payload) == {"action"}:
+            return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "knight": "过", "white_wolf_blast": "过", "blood_moon_blast": "过", "shot": "不开枪", "vote": "弃票"}[kind], "args": []}
+        if kind == "thief":
+            card = payload.get("card")
+            if set(payload) != {"action", "card"} or action != "choose" or card not in (1, 2) or isinstance(card, bool):
+                raise ValueError("Thief must choose card 1 or 2")
+            return {"command": "选牌", "args": [str(card)]}
         if kind == "cupid":
             seats = payload.get("seats")
             if set(payload) != {"action", "seats"} or action != "link" or not isinstance(seats, list) or len(seats) != 2 or seats[0] == seats[1] or any(not self._valid_json_seat(seat, legal_seats) for seat in seats):
                 raise ValueError("Cupid must link two different legal seats")
             return {"command": "连结", "args": [str(seats[0]), str(seats[1])]}
-        expected = {"guard": "guard", "wolf": "kill", "seer": "inspect", "shot": "shoot", "vote": "vote"}.get(kind)
+        if kind in {"magician", "piper"}:
+            seats = payload.get("seats")
+            expected_action = "swap" if kind == "magician" else "charm_players"
+            valid_length = len(seats) == 2 if isinstance(seats, list) and kind == "magician" else isinstance(seats, list) and len(seats) in (1, 2)
+            if (
+                set(payload) != {"action", "seats"} or action != expected_action or not valid_length
+                or len(set(seats)) != len(seats)
+                or any(not self._valid_json_seat(seat, legal_seats) for seat in seats)
+            ):
+                raise ValueError(f"{kind} must choose legal distinct seats")
+            command = "交换" if kind == "magician" else "迷惑"
+            return {"command": command, "args": [str(seat) for seat in seats]}
+        expected_actions = {
+            "guard": "guard", "wolf": "kill", "seer": "inspect", "dreamer": "dream",
+            "crow": "mark", "silencer": "silence", "wolf_beauty": "charm",
+            "exact_check": "inspect_role", "mechanical_learn": "learn", "wild_child": "model",
+            "mixed_blood": "support", "knight": "duel", "white_wolf_blast": "explode",
+            "shot": "shoot", "vote": "vote",
+        }
+        expected = expected_actions.get(kind)
         if expected:
             seat = payload.get("seat")
             allowed_keys = {"action", "seat", "wolf_message"} if kind == "wolf" else {"action", "seat"}
             if action != expected or set(payload) - allowed_keys or not self._valid_json_seat(seat, legal_seats):
                 raise ValueError(f"{kind} decision has an illegal action or seat")
             decision = {
-                "command": {"guard": "守护", "wolf": "刀", "seer": "查验", "shot": "开枪", "vote": "投票"}[kind],
+                "command": {
+                    "guard": "守护", "wolf": "刀", "seer": "查验", "dreamer": "摄梦",
+                    "crow": "加票", "silencer": "禁言", "wolf_beauty": "魅惑",
+                    "exact_check": "窥视", "mechanical_learn": "学习", "wild_child": "榜样",
+                    "mixed_blood": "支持", "knight": "决斗", "white_wolf_blast": "自爆",
+                    "shot": "开枪", "vote": "投票",
+                }[kind],
                 "args": [str(seat)],
             }
             if kind == "wolf" and payload.get("wolf_message") is not None:
@@ -2010,14 +3370,17 @@ class WerewolfPlugin:
                 decision["wolf_message"] = message.strip()
             return decision
         if kind == "witch":
-            if set(payload) == {"action"} and action == "heal" and game.get("witch_antidote") and game.get("night_actions", {}).get("wolf_target") and self._witch_can_heal(game, player, game["night_actions"]["wolf_target"]):
+            resources = self._witch_resources(game, player)
+            if set(payload) == {"action"} and action == "heal" and resources.get("antidote") and game.get("night_actions", {}).get("wolf_target") and self._witch_can_heal(game, player, game["night_actions"]["wolf_target"]):
                 return {"command": "救", "args": []}
             seat = payload.get("seat")
-            if set(payload) == {"action", "seat"} and action == "poison" and game.get("witch_poison") and self._valid_json_seat(seat, legal_seats):
+            if set(payload) == {"action", "seat"} and action == "poison" and resources.get("poison") and self._valid_json_seat(seat, legal_seats):
                 return {"command": "毒", "args": [str(seat)]}
-            if set(payload) == {"action", "seat"} and action == "heal_and_poison" and game.get("settings", {}).get("witch_double") and game.get("witch_poison") and game.get("witch_antidote") and game.get("night_actions", {}).get("wolf_target") and self._witch_can_heal(game, player, game["night_actions"]["wolf_target"]) and self._valid_json_seat(seat, legal_seats):
+            if set(payload) == {"action", "seat"} and action == "heal_and_poison" and game.get("settings", {}).get("witch_double") and resources.get("poison") and resources.get("antidote") and game.get("night_actions", {}).get("wolf_target") and self._witch_can_heal(game, player, game["night_actions"]["wolf_target"]) and self._valid_json_seat(seat, legal_seats):
                 return {"command": "救毒", "args": [str(seat)]}
             raise ValueError("witch decision is not legal under the current potion rules")
+        if kind == "blood_moon_blast" and set(payload) == {"action"} and action == "blood_explode":
+            return {"command": "血爆", "args": []}
         raise ValueError(f"unsupported AI decision kind: {kind}")
 
     @staticmethod
@@ -2030,14 +3393,27 @@ class WerewolfPlugin:
             return {"speech": "我暂时没有更多线索，先听听大家的判断。"}
         if kind == "wolf_chat":
             return {"wolf_message": "收到，我会结合这个信息判断今晚目标。"}
+        if kind == "thief":
+            return {"command": "选牌", "args": ["1"]}
         if kind == "cupid":
             self.rng.shuffle(legal)
             return {"command": "连结", "args": [str(legal[0]["seat"]), str(legal[1]["seat"])]}
-        if kind in ("guard", "wolf", "seer", "vote") and legal:
+        if kind in {"magician", "piper"} and legal:
+            self.rng.shuffle(legal)
+            if kind == "magician" and len(legal) < 2:
+                return {"command": "过", "args": []}
+            count = 2 if len(legal) >= 2 else 1
+            command = "交换" if kind == "magician" else "迷惑"
+            return {"command": command, "args": [str(player["seat"]) for player in legal[:count]]}
+        command_map = {
+            "guard": "守护", "wolf": "刀", "seer": "查验", "dreamer": "摄梦", "crow": "加票",
+            "silencer": "禁言", "wolf_beauty": "魅惑", "exact_check": "窥视",
+            "mechanical_learn": "学习", "wild_child": "榜样", "mixed_blood": "支持", "vote": "投票",
+        }
+        if kind in command_map and legal:
             target = self.rng.choice(legal)
-            command = {"guard": "守护", "wolf": "刀", "seer": "查验", "vote": "投票"}[kind]
-            return {"command": command, "args": [str(target["seat"])]}
-        return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "shot": "不开枪", "vote": "弃票"}.get(kind, "过"), "args": []}
+            return {"command": command_map[kind], "args": [str(target["seat"])]}
+        return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "knight": "过", "white_wolf_blast": "过", "blood_moon_blast": "过", "shot": "不开枪", "vote": "弃票"}.get(kind, "过"), "args": []}
 
     async def _drive_virtual_game(self, game):
         if not any(player.get("virtual") for player in game.get("players", [])):
@@ -2064,31 +3440,53 @@ class WerewolfPlugin:
     def _pending_virtual_decisions(self, game):
         phase = game.get("phase")
         pending = []
-        if phase == "night_actions":
+        if phase == "thief_choice":
+            thief = self._living_role(game, "thief")
+            if thief and thief.get("virtual"):
+                pending.append((thief, "thief"))
+        elif phase == "night_actions":
             actions = game["night_actions"]
-            cupid = self._living_role(game, "cupid")
-            if cupid and cupid.get("virtual") and game["night"] == 1 and not game.get("lovers") and "cupid" not in actions:
-                pending.append((cupid, "cupid"))
-            guard = self._living_role(game, "guard")
-            if guard and guard.get("virtual") and "guard" not in actions:
-                pending.append((guard, "guard"))
-            seer = self._living_role(game, "seer")
-            if seer and seer.get("virtual") and "seer" not in actions:
-                pending.append((seer, "seer"))
-            human_wolves = [item for item in self._living(game) if item["role"] in WOLF_ROLES and not item.get("virtual")]
+            human_wolves = [item for item in self._wolf_pack(game) if not item.get("virtual")]
             humans_ready = all(item["user_id"] in actions.get("wolves", {}) for item in human_wolves)
-            if humans_ready:
-                for wolf in self._living(game):
-                    if wolf.get("virtual") and wolf["role"] in WOLF_ROLES and wolf["user_id"] not in actions.get("wolves", {}):
-                        pending.append((wolf, "wolf"))
+            for spec in self._night_decision_specs(game):
+                if not spec["player"].get("virtual") or self._night_spec_complete(game, spec):
+                    continue
+                if spec["kind"] == "wolf" and not humans_ready:
+                    continue
+                pending.append((spec["player"], spec["kind"]))
+            priority = {
+                "mechanical_learn": 0, "wild_child": 1, "mixed_blood": 2, "magician": 3,
+                "dreamer": 4, "cupid": 5, "guard": 6, "seer": 7, "exact_check": 8,
+                "wolf_beauty": 9, "crow": 10, "silencer": 11, "piper": 12, "wolf": 13,
+            }
+            pending.sort(key=lambda item: (priority.get(item[1], 99), item[0]["seat"]))
         elif phase == "witch":
-            witch = self._living_role(game, "witch")
-            if witch and witch.get("virtual") and "witch" not in game["night_actions"]:
-                pending.append((witch, "witch"))
+            actions = game["night_actions"]
+            for key in actions.get("witch_actor_keys") or []:
+                if key in actions:
+                    continue
+                if key == "witch":
+                    actor = self._living_role(game, "witch")
+                else:
+                    actor = self._by_seat(game, int(key.split(":", 2)[1]))
+                if actor and actor.get("virtual"):
+                    pending.append((actor, "witch"))
         elif phase == "death_shot" and game.get("pending_shots"):
             shooter = self._player(game, game["pending_shots"][0])
             if shooter and shooter.get("virtual"):
                 pending.append((shooter, "shot"))
+        elif phase == "discussion":
+            for player in self._living(game):
+                if not player.get("virtual") or self._is_silenced(game, player):
+                    continue
+                day = int(game.get("day") or 0)
+                tokens = player.setdefault("ai_role_decision_tokens", {})
+                if self._has_ability(player, "knight") and not self._skill_used(player, "knight") and int(tokens.get("knight") or player.get("ai_knight_decision_day") or 0) != day:
+                    pending.append((player, "knight"))
+                if self._has_ability(player, "white_wolf_king") and int(tokens.get("white_wolf_blast") or player.get("ai_white_wolf_decision_day") or 0) != day:
+                    pending.append((player, "white_wolf_blast"))
+                if self._has_ability(player, "blood_moon") and not player.get("blood_blast_used") and int(tokens.get("blood_moon_blast") or 0) != day:
+                    pending.append((player, "blood_moon_blast"))
         elif phase == "vote":
             for voter in self._eligible_voters(game):
                 if voter.get("virtual") and voter["user_id"] not in game["votes"]:
@@ -2112,23 +3510,45 @@ class WerewolfPlugin:
             await self._wolf_relay(game, player, decision["wolf_message"])
         command = decision["command"]
         args = decision.get("args") or []
-        if kind in ("cupid", "guard", "wolf", "seer"):
+        if kind == "thief":
+            await self._thief_action(game, player, args)
+        elif kind in ("cupid", "guard", "wolf", "seer"):
             await self._night_action(game, player, command, args)
+        elif kind in {"magician", "dreamer", "crow", "silencer", "wolf_beauty", "exact_check", "mechanical_learn", "piper", "wild_child", "mixed_blood"}:
+            await self._special_night_action(game, player, command, args)
         elif kind == "witch":
             await self._witch_action(game, player, command, args)
         elif kind == "shot":
             await self._shot_action(game, player, command, args)
+        elif kind == "knight":
+            player["ai_knight_decision_day"] = int(game.get("day") or 0)
+            player.setdefault("ai_role_decision_tokens", {})["knight"] = int(game.get("day") or 0)
+            self._save()
+            if command == "决斗":
+                await self._knight_duel(game, player["user_id"], args)
+        elif kind == "white_wolf_blast":
+            player["ai_white_wolf_decision_day"] = int(game.get("day") or 0)
+            player.setdefault("ai_role_decision_tokens", {})["white_wolf_blast"] = int(game.get("day") or 0)
+            self._save()
+            if command == "自爆":
+                await self._white_wolf_blast(game, player["user_id"], args)
+        elif kind == "blood_moon_blast":
+            player.setdefault("ai_role_decision_tokens", {})["blood_moon_blast"] = int(game.get("day") or 0)
+            self._save()
+            if command == "血爆":
+                await self._blood_moon_blast(game, player["user_id"])
         elif kind == "vote":
             await self._vote_action(game, player, command, args)
 
     async def _handle_virtual_discussion(self, game, message):
         sender_id = str(message.get("sender_id") or message.get("user_id") or "")
         sender = self._player(game, sender_id)
-        if not sender or sender.get("virtual") or not sender.get("alive"):
+        if not sender or sender.get("virtual") or not sender.get("alive") or self._is_silenced(game, sender):
             return
         candidates = [
             player for player in self._living(game)
-            if player.get("virtual") and player.get("ai_daily_replies", 0) < self._virtual_int("max_replies_per_day", 3, 1, 20)
+            if player.get("virtual") and not self._is_silenced(game, player)
+            and player.get("ai_daily_replies", 0) < self._virtual_int("max_replies_per_day", 3, 1, 20)
         ]
         if not candidates:
             return
@@ -2159,6 +3579,7 @@ class WerewolfPlugin:
         if selected["user_id"] not in game["ready"]:
             game["ready"].append(selected["user_id"])
             selected["ai_ready_day"] = game["day"]
+            self._record_action(game, f"{self._history_player_label(selected)}确认结束发言。")
             newly_ready = True
         self._save()
         if newly_ready:
@@ -2169,8 +3590,8 @@ class WerewolfPlugin:
 
     async def _handle_virtual_wolf_chat(self, game):
         candidates = [
-            player for player in self._living(game)
-            if player.get("virtual") and player["role"] in WOLF_ROLES and int(player.get("ai_wolf_replies") or 0) < 3
+            player for player in self._wolf_pack(game)
+            if player.get("virtual") and int(player.get("ai_wolf_replies") or 0) < 3
         ]
         if not candidates or game.get("phase") not in ("night_actions", "witch"):
             return
@@ -2197,6 +3618,7 @@ class WerewolfPlugin:
             "lobby": "报名",
             "setup": "配置",
             "ready": "等待开始",
+            "thief_choice": "盗贼选牌",
             "dealing": "身份送达",
             "night_actions": "夜间行动",
             "witch": "女巫行动",
@@ -2206,29 +3628,66 @@ class WerewolfPlugin:
             "ended": "已结束",
         }
         lines = [f"当前阶段：{phase_names.get(game['phase'], game['phase'])}", self._seat_list(game, include_status=game["phase"] != "lobby")]
-        if game["phase"] == "night_actions":
-            done, required = self._night_progress(game)
-            lines.append(f"夜间必要行动：{done}/{required}")
-        elif game["phase"] == "vote":
-            lines.append(f"投票完成：{len(game['votes'])}/{len(self._eligible_voters(game))}")
-        elif game["phase"] == "discussion":
-            lines.append(f"结束发言确认：{len(game['ready'])}/{self._ready_needed(game)}")
+        blocker = self._blocker_status_line(game)
+        if blocker:
+            lines.append(blocker)
         return "\n".join(lines)
 
-    def _night_progress(self, game):
-        actions = game["night_actions"]
-        required_keys = []
-        if game["night"] == 1 and self._living_role(game, "cupid") and not game.get("lovers"):
-            required_keys.append(("single", "cupid"))
-        if self._living_role(game, "guard"):
-            required_keys.append(("single", "guard"))
-        if self._living_role(game, "seer"):
-            required_keys.append(("single", "seer"))
-        for wolf in self._living(game):
-            if wolf["role"] in WOLF_ROLES:
-                required_keys.append(("wolf", wolf["user_id"]))
-        done = sum(1 for kind, key in required_keys if (key in actions if kind == "single" else key in actions.get("wolves", {})))
-        return done, len(required_keys)
+    def _blocker_status_line(self, game):
+        if game["phase"] == "thief_choice":
+            return "等待行动角色：盗贼"
+        if game["phase"] == "dealing":
+            pending = [player.get("role") for player in game["players"] if not player.get("identity_delivered")]
+            return "等待身份送达角色：" + self._format_role_blockers(pending)
+        if game["phase"] == "night_actions":
+            return "等待行动角色：" + self._format_role_blockers(self._pending_night_roles(game))
+        if game["phase"] == "witch":
+            pending = []
+            keys = game.get("night_actions", {}).get("witch_actor_keys") or []
+            for key in keys:
+                if key in game.get("night_actions", {}):
+                    continue
+                if key == "witch":
+                    pending.append("witch")
+                elif key.startswith("copy:"):
+                    pending.append("mechanical_wolf")
+            return "等待行动角色：" + self._format_role_blockers(pending)
+        if game["phase"] == "death_shot":
+            shooter = self._player(game, (game.get("pending_shots") or [None])[0])
+            return "等待行动角色：" + self._format_role_blockers([shooter.get("role") if shooter else None])
+        if game["phase"] == "vote":
+            pending = [
+                voter.get("role") for voter in self._eligible_voters(game)
+                if voter["user_id"] not in game.get("votes", {})
+            ]
+            return "等待投票角色：" + self._format_role_blockers(pending)
+        if game["phase"] == "discussion":
+            remaining = max(0, self._ready_needed(game) - len(game.get("ready", [])))
+            return f"等待结束发言：还需 {remaining} 名存活玩家（任意角色）"
+        return ""
+
+    def _pending_night_roles(self, game):
+        priority = {
+            "mechanical_learn": 0, "wild_child": 0, "mixed_blood": 0, "magician": 1,
+            "dreamer": 2, "cupid": 3, "guard": 4, "wolf": 5, "seer": 6,
+            "exact_check": 7, "wolf_beauty": 8, "crow": 9, "silencer": 10, "piper": 11,
+        }
+        pending = [
+            spec for spec in self._night_decision_specs(game)
+            if not self._night_spec_complete(game, spec)
+        ]
+        pending.sort(key=lambda spec: (priority.get(spec["kind"], 99), spec["player"]["seat"]))
+        return [spec["player"]["role"] for spec in pending]
+
+    @staticmethod
+    def _format_role_blockers(roles):
+        counts = {}
+        for role in roles:
+            name = ROLE_NAMES.get(role, "系统结算")
+            counts[name] = counts.get(name, 0) + 1
+        if not counts:
+            return "无（正在结算）"
+        return "、".join(f"{name}×{count}" if count > 1 else name for name, count in counts.items())
 
     def _private_status(self, game, player):
         if not player.get("role"):
@@ -2239,9 +3698,34 @@ class WerewolfPlugin:
             other = self._player(game, other_id)
             lines.append(f"情侣：{other['seat']}号 {other['name']}")
         lines.append(f"当前阶段：{game['phase']}")
+        blocker = self._blocker_status_line(game)
+        if blocker:
+            lines.append(blocker)
         result = player.get("last_seer_result")
         if result:
             lines.append(f"最近查验（第 {result['night']} 夜）：{result['seat']}号 {result['name']} 属于{result['result']}。")
+        exact = player.get("last_exact_result")
+        if exact:
+            lines.append(f"最近精确查验（第 {exact['night']} 夜）：{exact['seat']}号 {exact['name']} 是{ROLE_NAMES[exact['role']]}。")
+        if player.get("last_grave_result"):
+            lines.append("最近守墓信息：" + player["last_grave_result"])
+        if player.get("role") == "nine_tailed_fox":
+            lines.append(f"剩余尾巴：{player.get('nine_tails', 9)} 条。")
+        if player.get("copied_role"):
+            lines.append(f"已复制主动技能：{ROLE_NAMES[player['copied_role']]}。")
+        if player.get("wild_model"):
+            model = self._player(game, player["wild_model"])
+            if model:
+                lines.append(f"榜样：{model['seat']}号 {model['name']}（{'存活' if model.get('alive') else '已死亡'}）。")
+        if player.get("mixed_support"):
+            supported = self._player(game, player["mixed_support"])
+            if supported:
+                lines.append(f"支持对象：{supported['seat']}号 {supported['name']}。")
+        if player["user_id"] in game.get("charmed_players", []):
+            charmed = [self._player(game, uid) for uid in game.get("charmed_players", [])]
+            lines.append("被吹笛者迷惑的玩家：" + "、".join(f"{item['seat']}号 {item['name']}" for item in charmed if item))
+        if self._is_silenced(game, player):
+            lines.append("你今日被禁言：不能确认结束发言或使用公开白天技能，但仍可投票。")
         if not player.get("alive"):
             lines.append("你已死亡，不能再提交普通游戏操作。")
         else:
@@ -2253,19 +3737,24 @@ class WerewolfPlugin:
     def _current_private_prompt(self, game, player):
         phase = game["phase"]
         role = player["role"]
+        if phase == "thief_choice" and role == "thief":
+            return f"当前操作：{self.prefix} 选牌 <1|2>"
         if phase == "night_actions":
-            if role == "cupid" and game["night"] == 1 and not game.get("lovers"):
-                return f"当前操作：{self.prefix} 连结 <座位1> <座位2>"
-            if role == "guard":
-                return f"当前操作：{self.prefix} 守护 <座位>，或 {self.prefix} 空守"
-            if role in WOLF_ROLES:
-                return f"当前操作：{self.prefix} 刀 <座位>、{self.prefix} 空刀，或 {self.prefix} 狼聊 <内容>"
-            if role == "seer":
-                if "seer" in game["night_actions"]:
-                    return "本夜查验已经提交。"
-                return f"当前操作：{self.prefix} 查验 <座位>"
-        if phase == "witch" and role == "witch":
+            pending = [
+                spec for spec in self._night_decision_specs(game)
+                if spec["player"]["user_id"] == player["user_id"] and not self._night_spec_complete(game, spec)
+            ]
+            if pending:
+                return "\n".join("当前操作：" + self._night_spec_prompt(game, spec) for spec in pending)
+            return "本夜所需操作已经全部提交。"
+        if phase == "witch" and self._has_ability(player, "witch"):
             return self._witch_prompt(game, player)
+        if phase == "discussion" and self._has_ability(player, "knight") and not self._skill_used(player, "knight"):
+            return f"公开技能：在群聊发送 {self.prefix} 决斗 <座位>；每局限一次。"
+        if phase == "discussion" and self._has_ability(player, "white_wolf_king"):
+            return f"公开技能：在群聊发送 {self.prefix} 自爆 <座位>，自爆并带走一名其他存活玩家。"
+        if phase == "discussion" and self._has_ability(player, "blood_moon") and not player.get("blood_blast_used"):
+            return f"公开技能：在群聊发送 {self.prefix} 血爆，死亡并封印下一夜好人技能。"
         if phase == "death_shot" and game.get("pending_shots") and game["pending_shots"][0] == player["user_id"]:
             return f"当前操作：{self.prefix} 开枪 <座位>，或 {self.prefix} 不开枪"
         if phase == "vote" and player in self._eligible_voters(game):
@@ -2279,12 +3768,13 @@ class WerewolfPlugin:
         target = self._player(game, target_id) if target_id else None
         victim = f"{target['seat']}号 {target['name']}" if target else "无人"
         options = [f"狼刀目标：{victim}。"]
-        can_heal = bool(game.get("witch_antidote") and target and self._witch_can_heal(game, witch, target_id))
+        resources = self._witch_resources(game, witch)
+        can_heal = bool(resources.get("antidote") and target and self._witch_can_heal(game, witch, target_id))
         if can_heal:
             options.append(f"使用解药：{self.prefix} 救")
-        if game.get("witch_poison"):
+        if resources.get("poison"):
             options.append(f"使用毒药：{self.prefix} 毒 <座位>")
-        if can_heal and game.get("witch_poison") and game["settings"].get("witch_double"):
+        if can_heal and resources.get("poison") and game["settings"].get("witch_double"):
             options.append(f"同时使用：{self.prefix} 救毒 <座位>")
         options.append(f"不使用：{self.prefix} 过")
         return "\n".join(options)
@@ -2343,8 +3833,63 @@ class WerewolfPlugin:
         return next((player for player in self._living(game) if player["role"] == role), None)
 
     @staticmethod
+    def _is_active_pack_wolf(player):
+        if not player or not player.get("alive"):
+            return False
+        role = player.get("role")
+        return role in PACK_WOLF_ROLES or (role in DORMANT_WOLF_ROLES and bool(player.get("wolf_active")))
+
+    def _wolf_pack(self, game):
+        return [player for player in self._living(game) if self._is_active_pack_wolf(player)]
+
+    @staticmethod
+    def _seer_alignment(player):
+        if not player or player.get("role") == "hidden_wolf":
+            return "非狼人阵营"
+        return "狼人阵营" if player.get("role") in WOLF_ROLES else "非狼人阵营"
+
+    @staticmethod
     def _camp(role):
-        return "wolf" if role in WOLF_ROLES else "good"
+        if role in WOLF_ROLES:
+            return "wolf"
+        if role in NEUTRAL_ROLES:
+            return "neutral"
+        return "good"
+
+    @staticmethod
+    def _has_ability(player, role):
+        return bool(player and (player.get("role") == role or player.get("copied_role") == role))
+
+    @staticmethod
+    def _skill_used(player, skill):
+        if skill == "knight":
+            if player.get("role") == "knight":
+                return bool(player.get("knight_used"))
+            return bool(player.get("copied_resources", {}).get("knight_used"))
+        return False
+
+    @staticmethod
+    def _night_action_key(player, kind, source_role=None):
+        if kind == "exact_check":
+            return f"exact_check:{player['seat']}"
+        if source_role and player.get("role") == "mechanical_wolf" and source_role != "mechanical_wolf":
+            return f"copy:{player['seat']}:{kind}"
+        return kind
+
+    @staticmethod
+    def _night_target(game, user_id):
+        if user_id is None:
+            return None
+        target = str(user_id)
+        pairs = game.get("night_actions", {}).get("magic_pairs") or []
+        for pair in pairs:
+            if len(pair) != 2:
+                continue
+            if target == str(pair[0]):
+                target = str(pair[1])
+            elif target == str(pair[1]):
+                target = str(pair[0])
+        return target
 
     @staticmethod
     def _plurality(values):
