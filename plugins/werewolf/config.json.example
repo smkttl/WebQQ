@@ -2,11 +2,11 @@
   "command_prefix": "/wolf",
   "min_players": 6,
   "max_players": 12,
-  "day_ready_threshold": 0.6,
+  "day_ready_threshold": 1.0,
   "admin_uids": ["123456789"],
   "virtual_players": {
     "enabled": false,
-    "names": ["Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace"],
+    "names": ["Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace", "Helen", "Ivy", "Jack", "Kate", "Leo"],
     "api_key": "",
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",

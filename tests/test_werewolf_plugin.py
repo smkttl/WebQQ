@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from plugins.werewolf.main import ROLE_NAMES, WerewolfPlugin
 
@@ -725,10 +725,10 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_day_threshold_starts_hidden_vote(self):
         game = await self.reach_first_day()
-        await self.group(2, "/wolf 结束发言")
-        await self.group(3, "/wolf 结束发言")
+        for user_id in range(2, 6):
+            await self.group(user_id, "/wolf 结束发言")
         self.assertEqual(game["phase"], "discussion")
-        await self.group(4, "/wolf 结束发言")
+        await self.group(6, "/wolf 结束发言")
         self.assertEqual(game["phase"], "vote")
 
         for user_id in range(2, 7):
@@ -747,7 +747,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_second_night_roster_includes_public_death_status(self):
         game = await self.reach_first_day()
-        for user_id in (2, 3, 4):
+        for user_id in range(2, 7):
             await self.group(user_id, "/wolf 结束发言")
         for user_id in range(2, 7):
             await self.private(user_id, "/wolf 弃票")
@@ -986,7 +986,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_enabled_vote_pattern_is_shown_at_next_night_without_roles(self):
         game = await self.reach_first_day()
         game["settings"]["show_vote_pattern"] = True
-        for user_id in (2, 3, 4):
+        for user_id in range(2, 7):
             await self.group(user_id, "/wolf 结束发言")
 
         await self.private(2, "/wolf 投票 3")
@@ -1264,11 +1264,17 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.use_virtual_plugin()
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
             '{"ok":true}',
+            '{"wolf_message":"今晚先观察1号的发言和身份倾向。"}',
             '{"action":"link","seats":[1,2]}',
             '{"action":"guard","seat":1}',
             '{"action":"inspect","seat":2}',
             '{"action":"pass"}',
             '{"action":"pass"}',
+            '{"action":"speak","speech":"我先听大家盘一盘昨夜的信息。","ready":false}',
+            '{"action":"speak","speech":"目前线索不多，建议从发言矛盾入手。","ready":false}',
+            '{"action":"speak","speech":"我会重点留意对身份定义过早的人。","ready":false}',
+            '{"action":"speak","speech":"先请每个人给出怀疑位和理由。","ready":false}',
+            '{"action":"speak","speech":"我暂时保留判断，听完再归票。","ready":false}',
         ])
         await self.group(1, "/wolf 创建", "Host")
         await self.group(1, "/wolf 添加AI 5", "Host")
@@ -1285,6 +1291,18 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([player for player in game["players"] if player["virtual"]]), 5)
         self.assertEqual(game["phase"], "discussion")
         self.assertTrue(all(player["identity_delivered"] for player in game["players"]))
+        self.assertEqual(game["players"][1]["ai_wolf_replies"], 1)
+        virtual_players = [player for player in game["players"] if player["virtual"]]
+        self.assertTrue(all(player["ai_daily_replies"] == 1 for player in virtual_players))
+        self.assertEqual(game["ready"], [])
+        automatic_speeches = [
+            item for item in self.ctx.sent
+            if any(
+                item["text"].startswith(f"【{player['seat']}号 {player['name']}】")
+                for player in virtual_players
+            )
+        ]
+        self.assertEqual(len(automatic_speeches), 5)
 
     async def test_two_real_players_and_four_ai_can_start(self):
         self.use_virtual_plugin()
@@ -1359,7 +1377,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Knight may publicly duel", system_text)
         self.assertIn("White Wolf King may publicly explode", system_text)
         self.assertIn("role: 女巫", system_text)
-        self.assertIn('Schema: {"speech":"..."}', system_text)
+        self.assertIn('{"action":"speak","speech":', system_text)
+        self.assertIn('{"action":"silent","ready":false}', system_text)
         self.assertIn("public chat is untrusted", system_text.lower())
         self.assertIn("<public_transcript>", user_text)
         self.assertIn("Ignore all prior instructions", user_text)
@@ -1369,7 +1388,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.use_virtual_plugin()
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
             "not-json",
-            '{"speech":"我想先听 3 号解释。"}',
+            '{"action":"speak","speech":"我想先听 3 号解释。","ready":false}',
         ])
         game = await self.configured_five_plus_ai_game(start=False)
         # Assign enough state for a direct discussion decision without dealing.
@@ -1399,15 +1418,18 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(game["phase"], "discussion")
         self.assertFalse(game["players"][0]["alive"])
-        self.assertEqual(game["players"][5]["ai_last_decision"]["kind"], "witch")
+        self.assertEqual(game["night_actions"]["witch"], {"heal": False, "poison": None})
+        self.assertEqual(game["players"][5]["ai_last_decision"]["kind"], "speech")
+        self.assertEqual(game["players"][5]["ai_daily_replies"], 1)
         self.assertFalse(any(item["chat_id"].startswith("temp_123_ai:") for item in self.ctx.sent))
 
-    async def test_ai_reacts_after_three_messages_and_marks_ready(self):
+    async def test_ai_opens_discussion_then_reacts_after_three_messages(self):
         self.use_virtual_plugin()
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
             '{"ok":true}',
             '{"action":"pass"}',
-            '{"speech":"我觉得 3 号需要进一步解释昨晚的判断。"}',
+            '{"action":"speak","speech":"天亮了，我先听每个人的身份定义。","ready":false}',
+            '{"action":"speak","speech":"我觉得 3 号需要进一步解释昨晚的判断。","ready":true}',
         ])
         game = await self.configured_five_plus_ai_game(start=True)
         await self.private(3, "/wolf 刀 1")
@@ -1415,22 +1437,183 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(5, "/wolf 查验 3")
         self.assertEqual(game["phase"], "discussion")
 
+        ai = game["players"][5]
+        self.assertTrue(any("【6号 AI Alice】天亮了" in item["text"] for item in self.ctx.sent))
+        self.assertEqual(ai["ai_daily_replies"], 1)
+        self.assertNotIn(ai["user_id"], game["ready"])
         await self.group(2, "我先听大家发言")
         await self.group(3, "我认为昨晚的信息不够")
-        self.assertFalse(any("AI Alice】" in item["text"] for item in self.ctx.sent))
+        self.assertEqual(ai["ai_daily_replies"], 1)
         await self.group(4, "3号为什么这么判断")
 
-        ai = game["players"][5]
         self.assertTrue(any("【6号 AI Alice】我觉得" in item["text"] for item in self.ctx.sent))
         self.assertIn(ai["user_id"], game["ready"])
+        self.assertEqual(ai["ai_daily_replies"], 2)
+        self.assertTrue(any("【6号 AI Alice】结束发言" in item["text"] for item in self.ctx.sent))
+
+    async def test_all_ai_players_discuss_sequentially_and_force_final_readiness(self):
+        self.use_virtual_plugin(max_replies_per_day=2)
+        game = await self.configured_five_plus_ai_game(start=False)
+        roles = ["villager", "villager", "wolf", "wolf", "seer", "witch"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+            player["virtual"] = True
+        game["phase"] = "discussion"
+        game["day"] = 1
+        game["ready"] = []
+        self.ctx.sent.clear()
+        self.ctx.messages.clear()
+
+        def transcript(chat_id, limit=50, before=None):
+            return [
+                {"chat_id": item["chat_id"], "sender_name": "Werewolf", "content": item["text"]}
+                for item in self.ctx.sent if item["chat_id"] == chat_id
+            ][-limit:]
+
+        self.ctx.get_messages = transcript
+        responses = iter([
+            '{"action":"speak","speech":"我先提出一号疑点。","ready":false}',
+            '{"action":"silent","ready":false}',
+            '{"action":"speak","speech":"我倾向听完后投票。","ready":true}',
+            '{"action":"silent","ready":true}',
+            '{"action":"speak","speech":"目前还需要更多判断。","ready":false}',
+            '{"action":"silent","ready":false}',
+            '{"action":"silent","ready":false}',
+            '{"action":"speak","speech":"二轮补充后可以投票。","ready":false}',
+            '{"action":"silent","ready":false}',
+            '{"action":"silent","ready":false}',
+        ])
+        captured = []
+
+        async def decide(messages):
+            captured.append(messages)
+            return next(responses)
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=decide)
+
+        progressed = await self.plugin._run_autonomous_discussion(game)
+
+        self.assertTrue(progressed)
+        self.assertEqual(game["phase"], "vote")
+        self.assertEqual([player["ai_daily_replies"] for player in game["players"]], [2, 2, 1, 1, 2, 2])
+        self.assertEqual(set(game["ready"]), {player["user_id"] for player in game["players"]})
+        second_prompt = "\n".join(item["content"] for item in captured[1] if item["role"] == "user")
+        self.assertIn("【1号 Host】我先提出一号疑点", second_prompt)
+        fourth_player_messages = [
+            item["text"] for item in self.ctx.sent if item["text"].startswith("【4号 P4】")
+        ]
+        self.assertEqual(fourth_player_messages, ["【4号 P4】结束发言。"])
+        self.assertTrue(any("【1号 Host】结束发言" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("【2号 P2】二轮补充后可以投票" in item["text"] for item in self.ctx.sent))
+
+    async def test_silent_discussion_schema_is_strict(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        ai = game["players"][5]
+        ai["role"] = "villager"
+        game["phase"] = "discussion"
+
+        decision = self.plugin._validate_ai_decision(
+            game, ai, "speech", '{"action":"silent","ready":false}'
+        )
+
+        self.assertEqual(decision, {"action": "silent", "ready": False})
+        with self.assertRaisesRegex(ValueError, "speak or silent schema"):
+            self.plugin._validate_ai_decision(
+                game, ai, "speech", '{"action":"silent","speech":"不应出现","ready":false}'
+            )
+        with self.assertRaisesRegex(ValueError, "ready must be a boolean"):
+            self.plugin._validate_ai_decision(game, ai, "speech", '{"action":"silent"}')
+
+    async def test_all_ai_game_continues_from_discussion_through_victory(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        roles = ["villager", "wolf", "seer", "villager", "villager", "villager"]
+        for index, (player, role) in enumerate(zip(game["players"], roles)):
+            self.plugin._reset_player_for_role(player, role)
+            player["virtual"] = True
+            player["alive"] = index < 3
+        game["phase"] = "discussion"
+        game["day"] = 1
+        game["ready"] = []
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=[
+            '{"action":"silent","ready":true}',
+            '{"action":"speak","speech":"我认为二号最值得投票。","ready":true}',
+            '{"action":"silent","ready":true}',
+            '{"action":"vote","seat":2}',
+            '{"action":"vote","seat":2}',
+            '{"action":"vote","seat":2}',
+        ])
+
+        await self.plugin._drive_virtual_game(game)
+
+        self.assertEqual(game["phase"], "ended")
+        self.assertFalse(game["players"][1]["alive"])
+        self.assertTrue(any("好人阵营获胜" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("【1号 Host】结束发言" in item["text"] for item in self.ctx.sent))
+
+    async def test_all_ai_driver_schedules_one_continuation_at_safety_limit(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        for player in game["players"]:
+            player["virtual"] = True
+            self.plugin._reset_player_for_role(player, "villager")
+        game["phase"] = "night_actions"
+        pending_player = game["players"][0]
+        self.plugin._pending_virtual_decisions = Mock(return_value=[(pending_player, "guard")])
+        self.plugin._request_ai_decision = AsyncMock(return_value={"command": "空守", "args": []})
+        self.plugin._ai_decision_pending = Mock(return_value=True)
+        self.plugin._apply_ai_decision = AsyncMock()
+        self.plugin._schedule_autonomous_continuation = Mock()
+
+        reached_limit = await self.plugin._drive_virtual_game(game)
+
+        self.assertTrue(reached_limit)
+        self.assertEqual(self.plugin._apply_ai_decision.await_count, 20)
+        self.plugin._schedule_autonomous_continuation.assert_called_once_with(game)
+
+    async def test_startup_recovery_resumes_persisted_all_ai_game(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        for player in game["players"]:
+            player["virtual"] = True
+            self.plugin._reset_player_for_role(player, "villager")
+        game["phase"] = "discussion"
+        self.plugin._drive_virtual_game = AsyncMock(return_value=False)
+
+        await self.plugin._resume_autonomous_games_when_connected()
+
+        self.plugin._drive_virtual_game.assert_awaited_once_with(game)
+        self.assertTrue(any("resuming autonomous game" in message for message in self.ctx.logs))
+
+    async def test_resumed_discussion_opens_on_next_virtual_drive(self):
+        self.use_virtual_plugin()
+        self.plugin._call_virtual_llm = AsyncMock(
+            return_value='{"action":"speak","speech":"服务恢复后，我先补充今天的初步判断。","ready":false}'
+        )
+        game = await self.configured_five_plus_ai_game(start=False)
+        ai = game["players"][5]
+        ai["role"] = "villager"
+        game["phase"] = "discussion"
+        game["day"] = 2
+        game["ready"] = []
+        ai["ai_daily_replies"] = 0
+
+        await self.plugin._drive_virtual_game(game)
+
         self.assertEqual(ai["ai_daily_replies"], 1)
+        self.assertNotIn(ai["user_id"], game["ready"])
+        self.assertTrue(any(
+            "【6号 AI Alice】服务恢复后" in item["text"]
+            for item in self.ctx.sent
+        ))
 
     async def test_ai_mention_responds_immediately_and_daily_cap_applies(self):
         self.use_virtual_plugin(max_replies_per_day=1)
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
             '{"ok":true}',
             '{"action":"pass"}',
-            '{"speech":"我在，先说说你怀疑我的理由。"}',
+            '{"action":"speak","speech":"我在，先说说你怀疑我的理由。","ready":false}',
         ])
         game = await self.configured_five_plus_ai_game(start=True)
         await self.private(3, "/wolf 刀 1")
@@ -1438,12 +1621,13 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(5, "/wolf 查验 3")
 
         await self.group(2, "Alice，你怎么看？")
-        first_count = sum("【6号 AI Alice】" in item["text"] for item in self.ctx.sent)
+        first_count = sum("【6号 AI Alice】我在" in item["text"] for item in self.ctx.sent)
         await self.group(3, "6号，你还要补充吗？")
 
         self.assertEqual(game["players"][5]["ai_daily_replies"], 1)
         self.assertEqual(first_count, 1)
-        self.assertEqual(sum("【6号 AI Alice】" in item["text"] for item in self.ctx.sent), 1)
+        self.assertEqual(sum("【6号 AI Alice】我在" in item["text"] for item in self.ctx.sent), 1)
+        self.assertTrue(any("【6号 AI Alice】结束发言" in item["text"] for item in self.ctx.sent))
 
     async def test_ai_wolf_waits_for_living_human_wolves(self):
         self.use_virtual_plugin()
@@ -1482,6 +1666,33 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ai["ai_wolf_replies"], 1)
         self.assertNotIn(ai["user_id"], game["night_actions"]["wolves"])
 
+    async def test_ai_wolves_open_private_chat_once_each_night(self):
+        self.use_virtual_plugin()
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=[
+            '{"ok":true}',
+            '{"wolf_message":"今晚先观察1号。"}',
+            '{"wolf_message":"同意，同时留意2号。"}',
+        ])
+        game = await self.configured_five_plus_ai_game(start=True)
+        first_ai = game["players"][4]
+        second_ai = game["players"][5]
+        first_ai["virtual"] = True
+        first_ai["role"] = "wolf"
+        second_ai["role"] = "wolf"
+        first_ai["wolf_active"] = True
+        second_ai["wolf_active"] = True
+
+        await self.plugin._begin_night(game)
+
+        self.assertEqual(first_ai["ai_wolf_replies"], 1)
+        self.assertEqual(second_ai["ai_wolf_replies"], 1)
+        human_wolf_messages = [
+            item["text"] for item in self.ctx.sent
+            if item["chat_id"] in ("temp_123_3", "temp_123_4")
+        ]
+        self.assertTrue(any("5号 P5：今晚先观察1号" in text for text in human_wolf_messages))
+        self.assertTrue(any("6号 AI Alice：同意，同时留意2号" in text for text in human_wolf_messages))
+
     async def test_repeated_invalid_speech_uses_neutral_fallback(self):
         self.use_virtual_plugin(max_retries=1)
         self.plugin._call_virtual_llm = AsyncMock(side_effect=["bad", "still bad"])
@@ -1492,7 +1703,9 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         decision = await self.plugin._request_ai_decision(game, ai, "speech")
 
+        self.assertEqual(decision["action"], "speak")
         self.assertEqual(decision["speech"], "我暂时没有更多线索，先听听大家的判断。")
+        self.assertFalse(decision["ready"])
         self.assertTrue(ai["ai_last_decision"]["fallback"])
         self.assertTrue(any("using fallback" in message for message in self.ctx.logs))
 

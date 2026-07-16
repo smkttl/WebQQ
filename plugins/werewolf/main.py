@@ -11,7 +11,10 @@ import aiohttp
 
 
 STATE_VERSION = 3
-DEFAULT_AI_NAMES = ["Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace"]
+DEFAULT_AI_NAMES = [
+    "Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace",
+    "Helen", "Ivy", "Jack", "Kate", "Leo",
+]
 
 ROLE_NAMES = {
     "villager": "村民",
@@ -156,7 +159,7 @@ class WerewolfPlugin:
         self.min_players = self._config_int("min_players", 6, 3, 50)
         self.max_players = self._config_int("max_players", 12, self.min_players, 50)
         try:
-            self.day_ready_threshold = float(ctx.config.get("day_ready_threshold", 0.6))
+            self.day_ready_threshold = float(ctx.config.get("day_ready_threshold", 1.0))
         except (TypeError, ValueError):
             raise ValueError("day_ready_threshold must be a number in (0, 1]")
         if not 0 < self.day_ready_threshold <= 1:
@@ -174,9 +177,21 @@ class WerewolfPlugin:
         if not isinstance(self.virtual_config, dict):
             raise ValueError("virtual_players must be an object")
         self.ai_semaphore = asyncio.Semaphore(self._virtual_int("max_parallel_decisions", 4, 1, 20))
+        self.autonomous_tasks = {}
+        self.resume_task = None
         self.state, migrated = self._load_state()
         if migrated:
             self._save()
+        if any(
+            game.get("phase") != "ended" and self._all_living_players_virtual(game)
+            for game in self.state["games"].values()
+        ):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                self.resume_task = loop.create_task(self._resume_autonomous_games_when_connected())
 
     def _config_int(self, key, default, minimum, maximum):
         try:
@@ -1509,6 +1524,7 @@ class WerewolfPlugin:
             night_text = f"{vote_patterns}\n\n{night_text}"
         await self._safe_send(game["chat_id"], night_text)
         await self._send_night_prompts(game)
+        await self._open_virtual_wolf_chat(game)
         await self._maybe_finish_initial_night(game)
 
     async def _send_night_prompts(self, game):
@@ -3011,6 +3027,8 @@ class WerewolfPlugin:
             try:
                 raw = await self._call_virtual_llm(messages)
                 decision = self._validate_ai_decision(game, player, kind, raw)
+                if kind == "speech" and self._discussion_turn_is_final(player):
+                    decision["ready"] = True
                 player["ai_last_decision"] = {"kind": kind, "decision": decision}
                 self._save()
                 return decision
@@ -3206,14 +3224,31 @@ class WerewolfPlugin:
             if game.get("settings", {}).get("wolf_can_kill_wolves", False)
             else "living non-wolf player"
         )
+        reply_number = int(player.get("ai_daily_replies") or 0) + 1
+        max_replies = self._virtual_int("max_replies_per_day", 3, 1, 20)
+        ready_count = len(game.get("ready") or [])
+        ready_needed = self._ready_needed(game) if game.get("phase") == "discussion" else 0
+        final_turn_note = (
+            "This is your final allowed discussion turn, so ready must be true."
+            if reply_number >= max_replies else
+            "Set ready=true only when you believe it is strategically time to proceed to voting."
+        )
         instructions = {
             "speech": (
-                "Write one natural Chinese Werewolf discussion contribution of at most 120 characters. "
-                "Use public evidence and your legitimate private knowledge. Schema: {\"speech\":\"...\"}."
+                f"This is your discussion turn {reply_number}/{max_replies}; currently {ready_count}/{ready_needed} "
+                "eligible players are ready. Choose whether to contribute or remain strategically silent. Speak only "
+                "when you can add useful analysis, an accusation, a defense, a claim, or a response; choose silence "
+                "when speaking would merely repeat others, reveal harmful information, or add no strategic value. "
+                f"{final_turn_note} A ready player will not speak again today. Use exactly one schema: "
+                "{\"action\":\"speak\",\"speech\":\"Chinese text of at most 120 characters\",\"ready\":false} "
+                "or {\"action\":\"silent\",\"ready\":false}. The ready value must be the JSON Boolean true or "
+                "false; for example, use {\"action\":\"silent\",\"ready\":true} to end your discussion without "
+                "speaking, or set ready=true on a speak action to speak and then finish."
             ),
             "wolf_chat": (
-                "Reply privately to your wolf teammates in at most 120 Chinese characters. Discuss strategy without "
-                "submitting your kill choice yet. Schema: {\"wolf_message\":\"...\"}."
+                "Send one natural private strategy message to your wolf teammates in at most 120 Chinese characters. "
+                "Discuss likely targets, risks, or claims without submitting your kill choice yet. "
+                "Schema: {\"wolf_message\":\"...\"}."
             ),
             "cupid": f"Choose two different living players from [{labels}]. Schema: {{\"action\":\"link\",\"seats\":[2,5]}}.",
             "thief": "Choose one offered undealt role card. Schema: {\"action\":\"choose\",\"card\":1}.",
@@ -3297,13 +3332,22 @@ class WerewolfPlugin:
         if not isinstance(payload, dict):
             raise ValueError("response must be one JSON object")
         if kind == "speech":
+            action = payload.get("action")
+            ready = payload.get("ready")
+            if not isinstance(ready, bool):
+                raise ValueError("discussion ready must be a boolean")
+            if action == "silent" and set(payload) == {"action", "ready"}:
+                return {"action": "silent", "ready": ready}
             speech = payload.get("speech")
-            if set(payload) != {"speech"} or not isinstance(speech, str) or not speech.strip():
-                raise ValueError("speech response must contain only a nonempty speech string")
+            if (
+                action != "speak" or set(payload) != {"action", "speech", "ready"}
+                or not isinstance(speech, str) or not speech.strip()
+            ):
+                raise ValueError("discussion response must use exactly one speak or silent schema")
             speech = speech.strip()
             if len(speech) > 120:
                 raise ValueError("speech exceeds 120 characters")
-            return {"speech": speech}
+            return {"action": "speak", "speech": speech, "ready": ready}
         if kind == "wolf_chat":
             message = payload.get("wolf_message")
             if set(payload) != {"wolf_message"} or not isinstance(message, str) or not message.strip():
@@ -3390,7 +3434,11 @@ class WerewolfPlugin:
     def _fallback_ai_decision(self, game, player, kind):
         legal = list(self._legal_ai_targets(game, player, kind))
         if kind == "speech":
-            return {"speech": "我暂时没有更多线索，先听听大家的判断。"}
+            return {
+                "action": "speak",
+                "speech": "我暂时没有更多线索，先听听大家的判断。",
+                "ready": self._discussion_turn_is_final(player),
+            }
         if kind == "wolf_chat":
             return {"wolf_message": "收到，我会结合这个信息判断今晚目标。"}
         if kind == "thief":
@@ -3415,27 +3463,102 @@ class WerewolfPlugin:
             return {"command": command_map[kind], "args": [str(target["seat"])]}
         return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "knight": "过", "white_wolf_blast": "过", "blood_moon_blast": "过", "shot": "不开枪", "vote": "弃票"}.get(kind, "过"), "args": []}
 
-    async def _drive_virtual_game(self, game):
+    def _discussion_turn_is_final(self, player):
+        return int(player.get("ai_daily_replies") or 0) + 1 >= self._virtual_int(
+            "max_replies_per_day", 3, 1, 20
+        )
+
+    async def _drive_virtual_game(self, game, schedule_on_limit=True):
         if not any(player.get("virtual") for player in game.get("players", [])):
-            return
+            return False
         for _ in range(20):
             pending = self._pending_virtual_decisions(game)
-            if not pending:
-                return
-            phase_token = self._ai_phase_token(game)
-            decisions = await asyncio.gather(*[
-                self._request_ai_decision(game, player, kind)
-                for player, kind in pending
-            ])
-            applied = False
-            for (player, kind), decision in zip(pending, decisions):
-                if not self._ai_decision_pending(game, player, kind, phase_token):
+            if pending:
+                phase_token = self._ai_phase_token(game)
+                decisions = await asyncio.gather(*[
+                    self._request_ai_decision(game, player, kind)
+                    for player, kind in pending
+                ])
+                applied = False
+                for (player, kind), decision in zip(pending, decisions):
+                    if not self._ai_decision_pending(game, player, kind, phase_token):
+                        continue
+                    await self._apply_ai_decision(game, player, kind, decision)
+                    applied = True
+                if not applied:
+                    return False
+                continue
+            if game.get("phase") == "discussion":
+                if self._all_living_players_virtual(game):
+                    progressed = await self._run_autonomous_discussion(game)
+                else:
+                    progressed = await self._open_virtual_discussion(game)
+                if game.get("phase") != "discussion":
                     continue
-                await self._apply_ai_decision(game, player, kind, decision)
-                applied = True
-            if not applied:
-                return
+                if not progressed:
+                    return False
+                return False
+            return False
         self.ctx.log(f"AI decision loop limit reached for {game.get('chat_id')}")
+        if schedule_on_limit and self._all_living_players_virtual(game) and game.get("phase") != "ended":
+            self._schedule_autonomous_continuation(game)
+        return True
+
+    def _all_living_players_virtual(self, game):
+        living = self._living(game)
+        return bool(living) and all(player.get("virtual") for player in living)
+
+    def _schedule_autonomous_continuation(self, game):
+        chat_id = game.get("chat_id")
+        current = self.autonomous_tasks.get(chat_id)
+        if current and not current.done():
+            return
+        task = asyncio.create_task(self._continue_autonomous_game(chat_id))
+        self.autonomous_tasks[chat_id] = task
+
+        def cleanup(completed):
+            if self.autonomous_tasks.get(chat_id) is completed:
+                self.autonomous_tasks.pop(chat_id, None)
+            if not completed.cancelled() and completed.exception():
+                self.ctx.log(f"autonomous game continuation failed for {chat_id}: {completed.exception()}")
+
+        task.add_done_callback(cleanup)
+
+    async def _continue_autonomous_game(self, chat_id):
+        while True:
+            await asyncio.sleep(0.25)
+            async with self.lock:
+                game = self.state["games"].get(chat_id)
+                if (
+                    not game or game.get("phase") == "ended"
+                    or not self._all_living_players_virtual(game)
+                ):
+                    return
+                reached_limit = await self._drive_virtual_game(game, schedule_on_limit=False)
+            if not reached_limit:
+                return
+
+    async def _resume_autonomous_games_when_connected(self):
+        manager = getattr(self.ctx, "manager", None)
+        napcat = getattr(manager, "napcat", None) if manager else None
+        if manager:
+            for _ in range(120):
+                if napcat and getattr(napcat, "ws", None) is not None:
+                    break
+                await asyncio.sleep(1)
+            else:
+                self.ctx.log("autonomous game resume deferred because NapCat did not connect")
+                return
+        for chat_id in list(self.state["games"]):
+            async with self.lock:
+                game = self.state["games"].get(chat_id)
+                if (
+                    not game or game.get("phase") == "ended"
+                    or not self._all_living_players_virtual(game)
+                ):
+                    continue
+                self.ctx.log(f"resuming autonomous game for {chat_id}")
+                await self._drive_virtual_game(game)
 
     def _pending_virtual_decisions(self, game):
         phase = game.get("phase")
@@ -3548,6 +3671,7 @@ class WerewolfPlugin:
         candidates = [
             player for player in self._living(game)
             if player.get("virtual") and not self._is_silenced(game, player)
+            and player["user_id"] not in game.get("ready", [])
             and player.get("ai_daily_replies", 0) < self._virtual_int("max_replies_per_day", 3, 1, 20)
         ]
         if not candidates:
@@ -3570,23 +3694,106 @@ class WerewolfPlugin:
             game["ai_round_robin_seat"] = selected["seat"]
         self._save()
         decision = await self._request_ai_decision(game, selected, "speech")
-        if game.get("phase") != "discussion" or not selected.get("alive"):
-            return
-        if not await self._safe_send(game["chat_id"], f"【{selected['seat']}号 {selected['name']}】{decision['speech']}"):
-            return
-        selected["ai_daily_replies"] = int(selected.get("ai_daily_replies") or 0) + 1
-        newly_ready = False
-        if selected["user_id"] not in game["ready"]:
-            game["ready"].append(selected["user_id"])
-            selected["ai_ready_day"] = game["day"]
-            self._record_action(game, f"{self._history_player_label(selected)}确认结束发言。")
-            newly_ready = True
+        await self._apply_virtual_discussion_decision(game, selected, decision)
+
+    async def _open_virtual_discussion(self, game):
+        if game.get("phase") != "discussion":
+            return False
+        candidates = sorted(
+            (
+                player for player in self._living(game)
+                if player.get("virtual")
+                and not self._is_silenced(game, player)
+                and player["user_id"] not in game.get("ready", [])
+                and int(player.get("ai_daily_replies") or 0) == 0
+            ),
+            key=lambda item: item["seat"],
+        )
+        if not candidates:
+            return False
+        decisions = await asyncio.gather(*[
+            self._request_ai_decision(game, player, "speech")
+            for player in candidates
+        ])
+        progressed = False
+        for player, decision in zip(candidates, decisions):
+            if await self._apply_virtual_discussion_decision(game, player, decision):
+                progressed = True
+            if game.get("phase") != "discussion":
+                break
+        return progressed
+
+    async def _run_autonomous_discussion(self, game):
+        if game.get("phase") != "discussion" or not self._all_living_players_virtual(game):
+            return False
+        eligible = [player for player in self._living(game) if not self._is_silenced(game, player)]
+        if not eligible:
+            await self._begin_vote(game, round_number=1, candidates=None)
+            return True
+        needed = self._ready_needed(game)
+        if len(game.get("ready") or []) >= needed:
+            await self._begin_vote(game, round_number=1, candidates=None)
+            return True
+        max_replies = self._virtual_int("max_replies_per_day", 3, 1, 20)
+        max_attempts = max(1, len(eligible) * max_replies)
+        attempts = 0
+        progressed = False
+        while game.get("phase") == "discussion" and attempts < max_attempts:
+            candidates = sorted(
+                (
+                    player for player in eligible
+                    if player.get("alive")
+                    and player["user_id"] not in game.get("ready", [])
+                    and int(player.get("ai_daily_replies") or 0) < max_replies
+                ),
+                key=lambda item: item["seat"],
+            )
+            if not candidates:
+                return progressed
+            round_progress = False
+            for player in candidates:
+                attempts += 1
+                decision = await self._request_ai_decision(game, player, "speech")
+                applied = await self._apply_virtual_discussion_decision(game, player, decision)
+                progressed = progressed or applied
+                round_progress = round_progress or applied
+                if game.get("phase") != "discussion" or attempts >= max_attempts:
+                    break
+            if not round_progress:
+                return progressed
+        return progressed
+
+    async def _apply_virtual_discussion_decision(self, game, player, decision):
+        if (
+            game.get("phase") != "discussion"
+            or not player.get("alive")
+            or self._is_silenced(game, player)
+            or player["user_id"] in game.get("ready", [])
+        ):
+            return False
+        if decision.get("action") == "speak":
+            sent = await self._safe_send(
+                game["chat_id"],
+                f"【{player['seat']}号 {player['name']}】{decision['speech']}",
+            )
+            if not sent:
+                return False
+        elif decision.get("action") != "silent":
+            return False
+        player["ai_daily_replies"] = int(player.get("ai_daily_replies") or 0) + 1
+        if not decision.get("ready"):
+            self._save()
+            return True
+        game.setdefault("ready", []).append(player["user_id"])
+        player["ai_ready_day"] = game.get("day") or 0
+        self._record_action(game, f"{self._history_player_label(player)}确认结束发言。")
         self._save()
-        if newly_ready:
-            needed = self._ready_needed(game)
-            await self._safe_send(game["chat_id"], f"结束发言确认：{len(game['ready'])}/{needed}。")
-            if len(game["ready"]) >= needed:
-                await self._begin_vote(game, round_number=1, candidates=None)
+        await self._safe_send(game["chat_id"], f"【{player['seat']}号 {player['name']}】结束发言。")
+        needed = self._ready_needed(game)
+        await self._safe_send(game["chat_id"], f"结束发言确认：{len(game['ready'])}/{needed}。")
+        if len(game["ready"]) >= needed:
+            await self._begin_vote(game, round_number=1, candidates=None)
+        return True
 
     async def _handle_virtual_wolf_chat(self, game):
         candidates = [
@@ -3602,6 +3809,34 @@ class WerewolfPlugin:
         player["ai_wolf_replies"] = int(player.get("ai_wolf_replies") or 0) + 1
         self._save()
         await self._wolf_relay(game, player, decision["wolf_message"])
+
+    async def _open_virtual_wolf_chat(self, game):
+        if game.get("phase") not in ("night_actions", "witch"):
+            return
+        candidates = sorted(
+            (
+                player for player in self._wolf_pack(game)
+                if player.get("virtual") and int(player.get("ai_wolf_replies") or 0) == 0
+            ),
+            key=lambda item: item["seat"],
+        )
+        if not candidates:
+            return
+        decisions = await asyncio.gather(*[
+            self._request_ai_decision(game, player, "wolf_chat")
+            for player in candidates
+        ])
+        for player, decision in zip(candidates, decisions):
+            if (
+                game.get("phase") not in ("night_actions", "witch")
+                or not player.get("alive")
+                or not self._is_active_pack_wolf(player)
+                or int(player.get("ai_wolf_replies") or 0) != 0
+            ):
+                continue
+            player["ai_wolf_replies"] = 1
+            self._save()
+            await self._wolf_relay(game, player, decision["wolf_message"])
 
     @staticmethod
     def _ai_is_addressed(player, content):
