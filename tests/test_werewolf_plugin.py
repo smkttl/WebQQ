@@ -420,6 +420,27 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("具体票型：下一夜开始时公开", self.ctx.sent[-1]["text"])
         self.assertIn("弃票过半：严格过半则无人出局", self.ctx.sent[-1]["text"])
 
+    async def test_initial_configuration_uses_omitted_rule_defaults(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=2 狼人=2 预言家 女巫 胜利=屠边",
+            "Host",
+        )
+
+        game = self.plugin.state["games"]["group_123"]
+        settings = game["settings"]
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(settings["tie_policy"], "no_exile")
+        self.assertEqual(settings["witch_self"], "first_night")
+        self.assertFalse(settings["witch_double"])
+        self.assertTrue(settings["wolf_can_kill_wolves"])
+        self.assertTrue(settings["show_vote_pattern"])
+        self.assertTrue(settings["abstention_majority_no_exile"])
+
     async def test_ready_room_can_be_reconfigured_before_start(self):
         game = await self.configured_six_player_game(start=False)
 
@@ -440,6 +461,30 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(1, "/wolf 开始", "Host")
         self.assertEqual(game["phase"], "night_actions")
 
+    async def test_ready_reconfiguration_preserves_omitted_rule_options(self):
+        game = await self.configured_six_player_game(start=False)
+        original_rules = {
+            key: game["settings"][key]
+            for key in (
+                "tie_policy", "witch_self", "witch_double", "wolf_can_kill_wolves",
+                "show_vote_pattern", "abstention_majority_no_exile",
+            )
+        }
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=3 狼人 预言家 守卫 胜利=屠城",
+            "Host",
+        )
+
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["roles"]["guard"], 1)
+        self.assertEqual(game["settings"]["victory"], "slaughter_city")
+        self.assertEqual(
+            {key: game["settings"][key] for key in original_rules},
+            original_rules,
+        )
+
     async def test_invalid_ready_room_reconfiguration_is_atomic(self):
         game = await self.configured_six_player_game(start=False)
         original_settings = json.loads(json.dumps(game["settings"]))
@@ -447,13 +492,13 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=3 狼人 预言家 守卫 平票=1 自救=2 双药=是 "
-            "胜利=屠城 狼刀狼人=是 显示票型=1",
+            "狼刀狼人=是 显示票型=1 弃票过半=1",
             "Host",
         )
 
         self.assertEqual(game["phase"], "ready")
         self.assertEqual(game["settings"], original_settings)
-        self.assertIn("缺少必填配置项：弃票过半", self.ctx.sent[-1]["text"])
+        self.assertIn("缺少必填配置项：胜利", self.ctx.sent[-1]["text"])
 
         await self.group(1, "/wolf 配置", "Host")
         self.assertEqual(game["phase"], "ready")
@@ -517,6 +562,66 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["settings"]["roles"]["knight"], 1)
         self.assertEqual(game["settings"]["roles"]["wolf"], 0)
 
+    async def test_common_role_aliases_configure_canonical_roles(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+
+        await self.group(
+            1,
+            "/wolf 配置 平民=2 小狼=2 预 巫 胜利=屠边",
+            "Host",
+        )
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["roles"]["villager"], 2)
+        self.assertEqual(game["settings"]["roles"]["wolf"], 2)
+        self.assertEqual(game["settings"]["roles"]["seer"], 1)
+        self.assertEqual(game["settings"]["roles"]["witch"], 1)
+
+        await self.group(1, "/wolf 取消", "Host")
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        await self.group(1, "/wolf 配置 民=2 狼=2 预言 女巫 胜利=屠边", "Host")
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["roles"]["villager"], 2)
+        self.assertEqual(game["settings"]["roles"]["wolf"], 2)
+
+    async def test_canonical_and_alias_role_duplicates_are_rejected(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        game = self.plugin.state["games"]["group_123"]
+        original_settings = dict(game["settings"])
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=1 平民=1 狼=2 预 巫 胜利=屠边",
+            "Host",
+        )
+
+        self.assertEqual(game["phase"], "lobby")
+        self.assertEqual(game["settings"], original_settings)
+        self.assertIn("角色“村民”不能使用多个名称重复配置", self.ctx.sent[-1]["text"])
+
+    async def test_legacy_role_setup_accepts_aliases(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        game = self.plugin.state["games"]["group_123"]
+        game["phase"] = "setup"
+        game["setup_step"] = "roles"
+
+        await self.group(1, "/wolf 角色 平民=2 狼=2 预 巫", "Host")
+
+        self.assertEqual(game["setup_step"], "tie")
+        self.assertEqual(game["settings"]["roles"]["villager"], 2)
+        self.assertEqual(game["settings"]["roles"]["wolf"], 2)
+
     async def test_non_role_configuration_values_cannot_be_omitted(self):
         await self.group(1, "/wolf 创建", "Host")
         for user_id in range(2, 7):
@@ -542,7 +647,9 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = self.plugin.state["games"]["group_123"]
         text = self.ctx.sent[-1]["text"]
         self.assertEqual(game["phase"], "lobby")
-        self.assertIn("平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0", text)
+        self.assertIn("/wolf 配置 村民=2 狼人=2 预言家 女巫 胜利=屠边", text)
+        self.assertIn("可选规则默认值：平票=2 自救=1 双药=否 狼刀狼人=是 显示票型=1 弃票过半=1", text)
+        self.assertIn("常用角色别名：村民：平民、民；狼人：狼、小狼、普狼", text)
         self.assertIn("屠边：普通村民全部死亡或神职全部死亡时", text)
         self.assertIn("屠城：全部非狼人阵营玩家死亡时", text)
         self.assertIn("狼刀狼人=是时，狼人可刀狼队友或自己", text)
@@ -551,6 +658,26 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("丘比特、骑士", text)
         self.assertIn("骑士、白狼王", text)
         self.assertIn("数量为 1 时可省略“=1”", text)
+
+    async def test_legacy_staged_setup_uses_new_optional_defaults(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        game = self.plugin.state["games"]["group_123"]
+        game["phase"] = "setup"
+        game["setup_step"] = "victory"
+        game["settings"].update({
+            "wolf_can_kill_wolves": False,
+            "show_vote_pattern": False,
+            "abstention_majority_no_exile": False,
+        })
+
+        await self.group(1, "/wolf 胜利 屠边", "Host")
+
+        self.assertEqual(game["phase"], "ready")
+        self.assertTrue(game["settings"]["wolf_can_kill_wolves"])
+        self.assertTrue(game["settings"]["show_vote_pattern"])
+        self.assertTrue(game["settings"]["abstention_majority_no_exile"])
 
     async def test_complete_requested_role_catalog_is_available_without_sheriff(self):
         expected = {
@@ -594,7 +721,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(game["phase"], "lobby")
         self.assertEqual(game["settings"], original_settings)
-        self.assertIn("缺少必填配置项：自救、双药、胜利、狼刀狼人、显示票型、弃票过半", self.ctx.sent[-1]["text"])
+        self.assertIn("缺少必填配置项：胜利", self.ctx.sent[-1]["text"])
 
         await self.group(
             1,

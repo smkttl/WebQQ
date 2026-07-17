@@ -51,7 +51,39 @@ ROLE_NAMES = {
     "mixed_blood": "混血儿",
     "angel": "天使",
 }
-ROLE_KEYS = {name: key for key, name in ROLE_NAMES.items()}
+ROLE_ALIAS_GROUPS = {
+    "villager": ("平民", "民"),
+    "wolf": ("狼", "小狼", "普狼"),
+    "seer": ("预言", "预"),
+    "witch": ("巫",),
+    "hunter": ("猎",),
+    "guard": ("守",),
+    "wolf_king": ("狼枪",),
+    "cupid": ("丘比",),
+    "white_wolf_king": ("白狼",),
+    "gravekeeper": ("守墓",),
+    "dreamer": ("摄梦",),
+    "magician": ("魔术",),
+    "bear_tamer": ("驯熊", "熊"),
+    "silencer": ("禁言",),
+    "nine_tailed_fox": ("九尾",),
+    "rogue": ("流氓",),
+    "wolf_beauty": ("狼美",),
+    "evil_knight": ("恶骑",),
+    "gargoyle": ("石像",),
+    "blood_moon": ("血月",),
+    "mechanical_wolf": ("机械",),
+    "piper": ("吹笛",),
+    "wild_child": ("野孩",),
+    "mixed_blood": ("混血",),
+}
+ROLE_ALIASES = {
+    alias: role for role, aliases in ROLE_ALIAS_GROUPS.items() for alias in aliases
+}
+ROLE_KEYS = {name: key for key, name in ROLE_NAMES.items()} | ROLE_ALIASES
+ROLE_ALIAS_HELP = "；".join(
+    f"{ROLE_NAMES[role]}：{'、'.join(aliases)}" for role, aliases in ROLE_ALIAS_GROUPS.items()
+)
 WOLF_ROLES = {
     "wolf", "wolf_king", "white_wolf_king", "wolf_beauty", "evil_knight", "gargoyle",
     "hidden_wolf", "blood_moon", "wolf_witch", "mechanical_wolf",
@@ -128,6 +160,14 @@ WITCH_SELF_NAMES = {
     "first_night": "仅首夜可以自救",
     "never": "不能自救",
     "always": "任意夜晚可以自救",
+}
+CONFIG_OPTION_DEFAULTS = {
+    "平票": "2",
+    "自救": "1",
+    "双药": "否",
+    "狼刀狼人": "是",
+    "显示票型": "1",
+    "弃票过半": "1",
 }
 
 COMMAND_NAMES = {
@@ -770,8 +810,9 @@ class WerewolfPlugin:
             "players": [self._new_player(host_id, host_name, 1)],
             "settings": {
                 "day_ready_threshold": self.day_ready_threshold,
-                "show_vote_pattern": False,
-                "abstention_majority_no_exile": False,
+                "wolf_can_kill_wolves": True,
+                "show_vote_pattern": True,
+                "abstention_majority_no_exile": True,
             },
             "setup_step": None,
             "night": 0,
@@ -1016,9 +1057,10 @@ class WerewolfPlugin:
             return
 
         role_counts = {key: 0 for key in ROLE_NAMES}
-        options = {}
+        provided_options = {}
         allowed_options = {"平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型", "弃票过半"}
         seen = set()
+        seen_roles = set()
         try:
             for token in args:
                 if "=" in token:
@@ -1031,14 +1073,18 @@ class WerewolfPlugin:
                     raise ValueError("每个配置项必须且只能填写一次。")
                 seen.add(name)
                 if name in ROLE_KEYS:
+                    role_key = ROLE_KEYS[name]
+                    if role_key in seen_roles:
+                        raise ValueError(f"角色“{ROLE_NAMES[role_key]}”不能使用多个名称重复配置。")
+                    seen_roles.add(role_key)
                     if not re.fullmatch(r"[0-9]+", raw_value):
                         raise ValueError("角色数量必须是非负整数。")
                     role_count = int(raw_value)
-                    role_counts[ROLE_KEYS[name]] = role_count
+                    role_counts[role_key] = role_count
                 elif name in allowed_options:
                     if "=" not in token:
                         raise ValueError(f"规则配置项“{name}”不能省略取值。")
-                    options[name] = raw_value
+                    provided_options[name] = raw_value
                 else:
                     raise ValueError(f"未知配置项：{name}。")
         except ValueError as exc:
@@ -1046,16 +1092,15 @@ class WerewolfPlugin:
             await self._safe_send(game["chat_id"], f"{message}\n\n{self._configuration_help(game)}")
             return
 
-        missing = [
-            name for name in ("平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型", "弃票过半")
-            if name not in options
-        ]
-        if missing:
+        if "胜利" not in provided_options:
             await self._safe_send(
                 game["chat_id"],
-                f"缺少必填配置项：{'、'.join(missing)}。\n\n{self._configuration_help(game)}",
+                f"缺少必填配置项：胜利。\n\n{self._configuration_help(game)}",
             )
             return
+        was_ready = game["phase"] == "ready"
+        options = self._current_config_options(game) if was_ready else dict(CONFIG_OPTION_DEFAULTS)
+        options.update(provided_options)
         if options["平票"] not in TIE_POLICIES:
             await self._safe_send(game["chat_id"], "平票必须填写 1、2 或 3。\n\n" + self._configuration_help(game))
             return
@@ -1082,7 +1127,6 @@ class WerewolfPlugin:
             await self._safe_send(game["chat_id"], f"{error}\n\n{self._configuration_help(game)}")
             return
 
-        was_ready = game["phase"] == "ready"
         if was_ready:
             self._cancel_virtual_preflight(game)
         game["settings"] = {
@@ -1105,15 +1149,37 @@ class WerewolfPlugin:
             f"{self._settings_text(game)}",
         )
 
+    @staticmethod
+    def _current_config_options(game):
+        settings = game.get("settings") or {}
+        tie = next(
+            (key for key, value in TIE_POLICIES.items() if value == settings.get("tie_policy")),
+            CONFIG_OPTION_DEFAULTS["平票"],
+        )
+        witch_self = next(
+            (key for key, value in WITCH_SELF_POLICIES.items() if value == settings.get("witch_self")),
+            CONFIG_OPTION_DEFAULTS["自救"],
+        )
+        return {
+            "平票": tie,
+            "自救": witch_self,
+            "双药": "是" if settings.get("witch_double", False) else "否",
+            "狼刀狼人": "是" if settings.get("wolf_can_kill_wolves", True) else "否",
+            "显示票型": "1" if settings.get("show_vote_pattern", True) else "0",
+            "弃票过半": "1" if settings.get("abstention_majority_no_exile", True) else "0",
+        }
+
     def _configuration_help(self, game):
         role_names = "、".join(ROLE_NAMES.values())
         return (
             "【狼人杀一键配置】\n"
-            f"请在一条命令中填写全部设置：\n{self.prefix} 配置 村民=2 狼人=2 预言家 女巫 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0\n"
+            f"请填写角色和胜利条件：\n{self.prefix} 配置 村民=2 狼人=2 预言家 女巫 胜利=屠边\n"
+            "可选规则默认值：平票=2 自救=1 双药=否 狼刀狼人=是 显示票型=1 弃票过半=1；"
+            "需要修改时追加对应 name=value。\n"
             f"当前玩家数：{len(game['players'])}；通常角色牌总数必须与玩家数一致，数量为 1 时可省略“=1”，未填写按 0 计算。\n"
             "配置盗贼时，角色牌总数必须比玩家数多 2，两张未发身份牌供盗贼选择。\n"
             f"可用角色：{role_names}。\n"
+            f"常用角色别名：{ROLE_ALIAS_HELP}。\n"
             "平票：1=再次投票后仍平票则无人出局；2=立即无人出局；3=随机一人出局。\n"
             "自救：1=女巫仅首夜可自救；2=不能自救；3=任意夜晚可自救。双药、狼刀狼人填写 是/否。\n"
             "狼刀狼人=是时，狼人可刀狼队友或自己；填写否时只能刀存活的非狼人玩家。\n"
@@ -1128,17 +1194,22 @@ class WerewolfPlugin:
         return (
             f"配置 1/5：当前 {len(game['players'])} 人，请设置角色数量。\n"
             f"格式：{self.prefix} 角色 狼人=2 村民=2 预言家 女巫\n"
-            f"角色数量为 1 时可省略“=1”。配置盗贼时需多配两张身份牌。可用角色：{role_names}；未填写按 0 计算。"
+            f"角色数量为 1 时可省略“=1”。配置盗贼时需多配两张身份牌。可用角色：{role_names}；"
+            f"常用别名：{ROLE_ALIAS_HELP}；未填写按 0 计算。"
         )
 
     async def _setup_roles(self, game, user_id, args):
         if not await self._setup_allowed(game, user_id, "roles"):
             return
         counts = {key: 0 for key in ROLE_NAMES}
+        seen_roles = set()
         try:
             for token in args:
                 name, raw_count = token.split("=", 1) if "=" in token else (token, "1")
                 key = ROLE_KEYS[name]
+                if key in seen_roles:
+                    raise ValueError
+                seen_roles.add(key)
                 value = int(raw_count)
                 if value < 0:
                     raise ValueError
@@ -1259,9 +1330,9 @@ class WerewolfPlugin:
             await self._safe_send(game["chat_id"], f"请选择 {self.prefix} 胜利 屠边 或 {self.prefix} 胜利 屠城。")
             return
         game["settings"]["victory"] = "slaughter_side" if choice == "屠边" else "slaughter_city"
-        game["settings"].setdefault("wolf_can_kill_wolves", False)
-        game["settings"].setdefault("show_vote_pattern", False)
-        game["settings"].setdefault("abstention_majority_no_exile", False)
+        game["settings"]["wolf_can_kill_wolves"] = True
+        game["settings"]["show_vote_pattern"] = True
+        game["settings"]["abstention_majority_no_exile"] = True
         game["setup_step"] = None
         game["phase"] = "ready"
         self._save()
