@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -62,6 +63,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         }
         self.ctx.messages.append(dict(message))
         await self.plugin.handle_event({"type": "message", "message": message}, self.ctx)
+        await self.wait_for_virtual_tasks()
 
     async def private(self, user_id, content, name=None):
         self.message_number += 1
@@ -74,6 +76,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             "content": content,
         }
         await self.plugin.handle_event({"type": "message", "message": message}, self.ctx)
+        await self.wait_for_virtual_tasks()
 
     async def web_group(self, content, group_id=123):
         self.message_number += 1
@@ -88,6 +91,55 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             "source": "user",
         }
         await self.plugin.handle_event({"type": "message", "message": message}, self.ctx)
+        await self.wait_for_virtual_tasks()
+
+    async def group_without_wait(self, user_id, content, name=None, group_id=123):
+        self.message_number += 1
+        message = {
+            "message_id": f"raw-g-{self.message_number}",
+            "chat_id": f"group_{group_id}",
+            "type": "group",
+            "sender_id": str(user_id),
+            "sender_name": name or f"P{user_id}",
+            "content": content,
+        }
+        self.ctx.messages.append(dict(message))
+        await self.plugin.handle_event({"type": "message", "message": message}, self.ctx)
+
+    async def private_without_wait(self, user_id, content, name=None):
+        self.message_number += 1
+        message = {
+            "message_id": f"raw-p-{self.message_number}",
+            "chat_id": f"private_{user_id}",
+            "type": "private",
+            "sender_id": str(user_id),
+            "sender_name": name or f"P{user_id}",
+            "content": content,
+        }
+        await self.plugin.handle_event({"type": "message", "message": message}, self.ctx)
+
+    async def wait_for_virtual_tasks(self):
+        for _ in range(100):
+            tasks = [
+                task for task in (
+                    list(getattr(self.plugin, "preflight_tasks", {}).values())
+                    + list(getattr(self.plugin, "virtual_driver_tasks", {}).values())
+                )
+                if not task.done()
+            ]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                continue
+            await asyncio.sleep(0)
+            if not any(
+                not task.done()
+                for task in (
+                    list(getattr(self.plugin, "preflight_tasks", {}).values())
+                    + list(getattr(self.plugin, "virtual_driver_tasks", {}).values())
+                )
+            ):
+                return
+        self.fail("virtual-player background tasks did not become idle")
 
     async def configured_six_player_game(self, start=True):
         await self.group(1, "/wolf 创建", "Host")
@@ -133,6 +185,19 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         if start:
             await self.group(1, "/wolf 开始", "Host")
         return self.plugin.state["games"]["group_123"]
+
+    async def make_mixed_virtual_discussion(self, **virtual_overrides):
+        self.use_virtual_plugin(**virtual_overrides)
+        game = await self.configured_five_plus_ai_game(start=False)
+        roles = ["villager", "villager", "wolf", "wolf", "seer", "villager"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["phase"] = "discussion"
+        game["day"] = 1
+        game["ready"] = []
+        game["discussion_revision"] = 1
+        self.plugin._save()
+        return game
 
     async def reach_first_day(self):
         game = await self.configured_six_player_game(start=True)
@@ -269,8 +334,22 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         }, self.ctx)
 
         messages = [item for item in self.ctx.sent if item["chat_id"] == "temp_123_9000"]
-        self.assertEqual(len(messages), 1)
-        self.assertIn("【狼人杀完整调试数据】", messages[0]["text"])
+        self.assertTrue(any("【狼人杀调试复盘】" in item["text"] for item in messages))
+        self.assertTrue(any(item["text"].startswith("【全局行动记录") for item in messages))
+
+        await self.plugin.handle_portal_message({
+            "chat_id": "group_123",
+            "chat_type": "group",
+            "text": "/wolf debug -v",
+            "source": "ui_portal",
+            "self_user": {"user_id": "9000", "name": "WebQQ Admin"},
+        }, self.ctx)
+
+        verbose = [
+            item for item in self.ctx.sent
+            if item["chat_id"] == "temp_123_9000" and "狼人杀完整调试数据" in item["text"]
+        ]
+        self.assertTrue(verbose)
 
     async def test_configured_command_prefix_is_used_in_help(self):
         context = FakeContext({"command_prefix": "/ww"})
@@ -579,7 +658,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(item["chat_id"] == "temp_123_99" for item in self.ctx.sent))
         self.assertIn("正式开局后才能观战", self.ctx.sent[-1]["text"])
 
-    async def test_admin_debug_privately_dumps_complete_current_game_state(self):
+    async def test_admin_debug_privately_sends_readable_live_review(self):
         self.ctx = FakeContext({"admin_uids": [99], "api_key": "must-not-leak"})
         self.state_path = Path(self.tmp.name) / "debug-state.json"
         self.plugin = WerewolfPlugin(self.ctx, state_path=self.state_path, rng=StableRandom())
@@ -590,21 +669,95 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(99, "/wolf debug", "Admin")
 
         messages = [item for item in self.ctx.sent if item["chat_id"] == "temp_123_99"]
-        self.assertEqual(len(messages), 1)
-        text = messages[0]["text"]
-        self.assertIn("【狼人杀完整调试数据】", text)
-        self.assertIn('"phase": "night_actions"', text)
-        self.assertIn('"role": "wolf"', text)
-        self.assertIn('"wolf_can_kill_wolves": false', text)
-        self.assertIn('"wolves": {\n      "3": "1"', text)
+        self.assertGreaterEqual(len(messages), 2)
+        text = "\n".join(item["text"] for item in messages)
+        self.assertIn("【狼人杀调试复盘】", text)
+        self.assertIn("当前阶段：夜间行动", text)
+        self.assertIn("等待行动角色", text)
+        self.assertIn("【本局设置】", text)
+        self.assertIn("结束发言阈值：100%", text)
+        self.assertIn("3号 P3：狼人（存活）", text)
+        self.assertIn("【全局行动记录】", text)
+        self.assertIn("3号 P3（狼人）", text)
+        self.assertNotIn('"phase": "night_actions"', text)
         self.assertNotIn("must-not-leak", text)
         self.assertNotIn("admin_uids", text)
         self.assertEqual(game["phase"], "night_actions")
+
+    async def test_admin_debug_verbose_privately_dumps_complete_raw_state(self):
+        self.ctx = FakeContext({"admin_uids": [99], "api_key": "must-not-leak"})
+        self.state_path = Path(self.tmp.name) / "verbose-debug-state.json"
+        self.plugin = WerewolfPlugin(self.ctx, state_path=self.state_path, rng=StableRandom())
+        self.message_number = 0
+        game = await self.configured_six_player_game(start=True)
+        await self.private(3, "/wolf 刀 1")
+
+        await self.group(99, "/wolf debug -v", "Admin")
+
+        messages = [
+            item["text"] for item in self.ctx.sent
+            if item["chat_id"] == "temp_123_99" and "狼人杀完整调试数据" in item["text"]
+        ]
+        self.assertTrue(messages)
+        payload = "".join(message.split("\n", 1)[1] for message in messages)
+        raw = json.loads(payload)
+        self.assertEqual(raw["phase"], "night_actions")
+        self.assertEqual(raw["night_actions"]["wolves"]["3"], "1")
+        self.assertEqual(raw["players"][2]["role"], "wolf")
+        self.assertFalse(raw["settings"]["wolf_can_kill_wolves"])
+        self.assertNotIn("must-not-leak", payload)
+        self.assertNotIn("admin_uids", payload)
+        self.assertEqual(raw, game)
+
+    async def test_debug_output_is_chunked_and_does_not_mutate_game(self):
+        self.ctx = FakeContext({"admin_uids": [99]})
+        self.state_path = Path(self.tmp.name) / "chunked-debug-state.json"
+        self.plugin = WerewolfPlugin(self.ctx, state_path=self.state_path, rng=StableRandom())
+        self.message_number = 0
+        game = await self.configured_six_player_game(start=True)
+        game["action_history"] = [
+            {"context": "测试", "text": f"记录{index}-" + "内容" * 80}
+            for index in range(80)
+        ]
+        before = json.dumps(game, ensure_ascii=False, sort_keys=True)
+
+        await self.group(99, "/wolf debug", "Admin")
+
+        messages = [item["text"] for item in self.ctx.sent if item["chat_id"] == "temp_123_99"]
+        self.assertGreater(len(messages), 2)
+        self.assertTrue(all(len(message) <= 3500 for message in messages))
+        self.assertTrue(any(message.startswith("【全局行动记录（续）】") for message in messages))
+        self.assertEqual(json.dumps(game, ensure_ascii=False, sort_keys=True), before)
+
+        game["debug_padding"] = "x" * 8000
+        sent_before_verbose = len(self.ctx.sent)
+        await self.group(99, "/wolf debug -v", "Admin")
+        raw_messages = [
+            message for message in self.ctx.sent[sent_before_verbose:]
+            if message["chat_id"] == "temp_123_99" and "狼人杀完整调试数据" in message["text"]
+        ]
+        self.assertGreater(len(raw_messages), 1)
+        self.assertTrue(all(len(message["text"]) <= 3500 for message in raw_messages))
+        payload = "".join(message["text"].split("\n", 1)[1] for message in raw_messages)
+        self.assertEqual(json.loads(payload)["debug_padding"], "x" * 8000)
+
+    async def test_admin_debug_rejects_unknown_arguments(self):
+        self.ctx = FakeContext({"admin_uids": [99]})
+        self.state_path = Path(self.tmp.name) / "invalid-debug-state.json"
+        self.plugin = WerewolfPlugin(self.ctx, state_path=self.state_path, rng=StableRandom())
+        self.message_number = 0
+        await self.configured_six_player_game(start=True)
+
+        await self.group(99, "/wolf debug --verbose", "Admin")
+
+        self.assertFalse(any(item["chat_id"] == "temp_123_99" for item in self.ctx.sent))
+        self.assertIn("格式：/wolf debug [-v]", self.ctx.sent[-1]["text"])
 
     async def test_non_admin_debug_is_rejected_without_private_dump(self):
         await self.configured_six_player_game(start=True)
 
         await self.group(99, "/wolf debug", "Outsider")
+        await self.group(99, "/wolf debug -v", "Outsider")
 
         self.assertFalse(any(item["chat_id"] == "temp_123_99" for item in self.ctx.sent))
         self.assertIn("只有配置文件中的管理员", self.ctx.sent[-1]["text"])
@@ -1260,6 +1413,188 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["players"][2]["name"], "AI Alice")
         self.assertNotEqual(game["players"][2]["user_id"], first_ai_id)
 
+    async def test_ai_request_does_not_block_commands_actions_or_other_groups(self):
+        game = await self.make_mixed_virtual_discussion(max_replies_per_day=2)
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+        calls = 0
+
+        async def held_decision(messages):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                request_started.set()
+                await release_request.wait()
+            return '{"action":"speak","speech":"我会继续听取大家的判断。","ready":false}'
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=held_decision)
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+        driver = self.plugin.virtual_driver_tasks[game["chat_id"]]
+        self.assertFalse(self.plugin._schedule_virtual_driver(game["chat_id"]))
+        self.assertIs(self.plugin.virtual_driver_tasks[game["chat_id"]], driver)
+
+        await asyncio.wait_for(self.group_without_wait(2, "/wolf 状态"), timeout=1)
+        await asyncio.wait_for(self.group_without_wait(2, "/wolf 结束发言"), timeout=1)
+        await asyncio.wait_for(self.group_without_wait(20, "/wolf 创建", "Other Host", group_id=456), timeout=1)
+
+        self.assertIn("2", game["ready"])
+        self.assertIn("group_456", self.plugin.state["games"])
+        self.assertTrue(any("当前阶段" in item["text"] for item in self.ctx.sent))
+        release_request.set()
+        await self.wait_for_virtual_tasks()
+        self.assertEqual(game["players"][5]["ai_daily_replies"], 1)
+        self.assertEqual(calls, 2)
+
+    async def test_new_discussion_message_discards_and_regenerates_stale_ai_speech(self):
+        game = await self.make_mixed_virtual_discussion(
+            max_replies_per_day=2,
+            discussion_messages_per_reply=1,
+        )
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+        calls = 0
+
+        async def held_decision(messages):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                request_started.set()
+                await release_request.wait()
+                return '{"action":"speak","speech":"STALE","ready":false}'
+            return '{"action":"speak","speech":"FRESH","ready":false}'
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=held_decision)
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+
+        await asyncio.wait_for(self.group_without_wait(2, "Alice，请结合这条新信息判断。"), timeout=1)
+        release_request.set()
+        await self.wait_for_virtual_tasks()
+
+        group_text = "\n".join(item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123")
+        self.assertNotIn("STALE", group_text)
+        self.assertIn("FRESH", group_text)
+        self.assertEqual(calls, 2)
+
+    async def test_new_wolf_chat_discards_and_regenerates_stale_ai_reply(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        roles = ["wolf", "villager", "villager", "villager", "seer", "wolf"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["phase"] = "night_actions"
+        game["night"] = 1
+        game["night_actions"] = {"wolves": {}}
+        game["ai_pending_wolf_replies"] = []
+        game["wolf_chat_revision"] = 1
+        self.plugin._save()
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+        calls = 0
+
+        async def held_decision(messages):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                request_started.set()
+                await release_request.wait()
+                return '{"wolf_message":"STALE WOLF REPLY"}'
+            return '{"wolf_message":"FRESH WOLF REPLY"}'
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=held_decision)
+        await self.private_without_wait(1, "/wolf 狼聊 第一条判断")
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+
+        await asyncio.wait_for(self.private_without_wait(1, "/wolf 狼聊 新的判断"), timeout=1)
+        release_request.set()
+        await self.wait_for_virtual_tasks()
+
+        private_text = "\n".join(item["text"] for item in self.ctx.sent if item["chat_id"] == "temp_123_1")
+        self.assertNotIn("STALE WOLF REPLY", private_text)
+        self.assertIn("FRESH WOLF REPLY", private_text)
+        self.assertEqual(calls, 2)
+
+    async def test_phase_change_discards_stale_ai_result(self):
+        game = await self.make_mixed_virtual_discussion(max_replies_per_day=2)
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+        calls = 0
+
+        async def held_decision(messages):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                request_started.set()
+                await release_request.wait()
+                return '{"action":"speak","speech":"STALE PHASE SPEECH","ready":false}'
+            return '{"action":"vote","seat":1}'
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=held_decision)
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+
+        await asyncio.wait_for(self.group_without_wait(1, "/wolf 推进", "Host"), timeout=1)
+        self.assertEqual(game["phase"], "vote")
+        release_request.set()
+        await self.wait_for_virtual_tasks()
+
+        self.assertFalse(any("STALE PHASE SPEECH" in item["text"] for item in self.ctx.sent))
+        self.assertEqual(game["votes"].get(game["players"][5]["user_id"]), game["players"][0]["user_id"])
+        self.assertEqual(calls, 2)
+
+    async def test_virtual_preflight_is_async_and_deduplicated(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+        calls = 0
+
+        async def held_preflight(messages):
+            nonlocal calls
+            calls += 1
+            request_started.set()
+            await release_request.wait()
+            return '{"ok":true}'
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=held_preflight)
+        await asyncio.wait_for(self.group_without_wait(1, "/wolf 开始", "Host"), timeout=1)
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+        task = self.plugin.preflight_tasks[game["chat_id"]]
+
+        await asyncio.wait_for(self.group_without_wait(1, "/wolf 开始", "Host"), timeout=1)
+        self.assertIs(self.plugin.preflight_tasks[game["chat_id"]], task)
+        self.assertEqual(calls, 1)
+        self.assertTrue(any("预检正在进行" in item["text"] for item in self.ctx.sent))
+
+        release_request.set()
+        await self.wait_for_virtual_tasks()
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertTrue(all(player["role"] for player in game["players"]))
+
+    async def test_ending_game_cancels_inflight_ai_request(self):
+        game = await self.make_mixed_virtual_discussion(max_replies_per_day=2)
+        request_started = asyncio.Event()
+        request_cancelled = asyncio.Event()
+        never_release = asyncio.Event()
+
+        async def held_decision(messages):
+            request_started.set()
+            try:
+                await never_release.wait()
+            finally:
+                request_cancelled.set()
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=held_decision)
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+
+        await asyncio.wait_for(self.group_without_wait(1, "/wolf 结束", "Host"), timeout=1)
+        await asyncio.wait_for(request_cancelled.wait(), timeout=1)
+
+        self.assertEqual(game["phase"], "ended")
+        self.assertFalse(any("【6号 AI Alice】" in item["text"] for item in self.ctx.sent))
+
     async def test_one_real_player_and_five_ai_can_start(self):
         self.use_virtual_plugin()
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
@@ -1552,7 +1887,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("好人阵营获胜" in item["text"] for item in self.ctx.sent))
         self.assertTrue(any("【1号 Host】结束发言" in item["text"] for item in self.ctx.sent))
 
-    async def test_all_ai_driver_schedules_one_continuation_at_safety_limit(self):
+    async def test_virtual_driver_reports_safety_limit_to_background_runner(self):
         self.use_virtual_plugin()
         game = await self.configured_five_plus_ai_game(start=False)
         for player in game["players"]:
@@ -1564,13 +1899,11 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._request_ai_decision = AsyncMock(return_value={"command": "空守", "args": []})
         self.plugin._ai_decision_pending = Mock(return_value=True)
         self.plugin._apply_ai_decision = AsyncMock()
-        self.plugin._schedule_autonomous_continuation = Mock()
 
         reached_limit = await self.plugin._drive_virtual_game(game)
 
         self.assertTrue(reached_limit)
         self.assertEqual(self.plugin._apply_ai_decision.await_count, 20)
-        self.plugin._schedule_autonomous_continuation.assert_called_once_with(game)
 
     async def test_startup_recovery_resumes_persisted_all_ai_game(self):
         self.use_virtual_plugin()
@@ -1582,9 +1915,10 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._drive_virtual_game = AsyncMock(return_value=False)
 
         await self.plugin._resume_autonomous_games_when_connected()
+        await self.wait_for_virtual_tasks()
 
-        self.plugin._drive_virtual_game.assert_awaited_once_with(game)
-        self.assertTrue(any("resuming autonomous game" in message for message in self.ctx.logs))
+        self.plugin._drive_virtual_game.assert_awaited_once_with("group_123", schedule_on_limit=False)
+        self.assertTrue(any("resuming virtual game" in message for message in self.ctx.logs))
 
     async def test_resumed_discussion_opens_on_next_virtual_drive(self):
         self.use_virtual_plugin()
@@ -1683,6 +2017,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         second_ai["wolf_active"] = True
 
         await self.plugin._begin_night(game)
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await self.wait_for_virtual_tasks()
 
         self.assertEqual(first_ai["ai_wolf_replies"], 1)
         self.assertEqual(second_ai["ai_wolf_replies"], 1)

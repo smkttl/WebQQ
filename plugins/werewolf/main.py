@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import math
 import os
@@ -177,13 +178,15 @@ class WerewolfPlugin:
         if not isinstance(self.virtual_config, dict):
             raise ValueError("virtual_players must be an object")
         self.ai_semaphore = asyncio.Semaphore(self._virtual_int("max_parallel_decisions", 4, 1, 20))
-        self.autonomous_tasks = {}
+        self.virtual_driver_tasks = {}
+        self.virtual_driver_wakes = {}
+        self.preflight_tasks = {}
         self.resume_task = None
         self.state, migrated = self._load_state()
         if migrated:
             self._save()
         if any(
-            game.get("phase") != "ended" and self._all_living_players_virtual(game)
+            game.get("phase") != "ended" and any(player.get("virtual") for player in game.get("players", []))
             for game in self.state["games"].values()
         ):
             try:
@@ -236,6 +239,13 @@ class WerewolfPlugin:
             game.setdefault("ai_sequence", 0)
             game.setdefault("discussion_human_messages", 0)
             game.setdefault("ai_round_robin_seat", 0)
+            game.setdefault("ai_pending_speeches", [])
+            game.setdefault("ai_pending_wolf_replies", [])
+            game.setdefault("ai_revision", 0)
+            game.setdefault("discussion_revision", 0)
+            game.setdefault("wolf_chat_revision", 0)
+            if game.pop("ai_preflight_pending", False):
+                migrated = True
             game.setdefault("host_action_proposal", None)
             game.setdefault("action_history", [])
             game.setdefault("result_delivery_index", 0)
@@ -304,6 +314,7 @@ class WerewolfPlugin:
         if not sender_id:
             return
 
+        drive_chat_id = None
         async with self.lock:
             if chat_type == "group" and chat_id.startswith("group_"):
                 self._refresh_player_name(chat_id, sender_id, message.get("sender_name"))
@@ -329,25 +340,50 @@ class WerewolfPlugin:
                         return
                     if message_id:
                         self._remember_message_id(message_id)
+                    before = self._game_mutation_fingerprint(game)
                     await self._handle_virtual_discussion(game, message)
-                    await self._drive_virtual_game(game)
-                return
-            message_id = str(message.get("message_id") or "")
-            if message_id and message_id in self.state["processed_ids"]:
-                return
-            if message_id:
-                self._remember_message_id(message_id)
-
-            if chat_type == "group" and chat_id.startswith("group_"):
-                await self._handle_group(message, command, args)
-                game = self.state["games"].get(chat_id)
-            elif chat_type == "private" or chat_id.startswith("private_"):
-                await self._handle_private(message, command, args)
-                game = self._active_game_for_user(sender_id)
+                    self._mark_human_game_mutation(game, before)
+                    drive_chat_id = game["chat_id"]
             else:
-                game = None
-            if game and game.get("phase") != "ended":
-                await self._drive_virtual_game(game)
+                message_id = str(message.get("message_id") or "")
+                if message_id and message_id in self.state["processed_ids"]:
+                    return
+                if message_id:
+                    self._remember_message_id(message_id)
+
+                if chat_type == "group" and chat_id.startswith("group_"):
+                    game = self.state["games"].get(chat_id)
+                    before = self._game_mutation_fingerprint(game)
+                    await self._handle_group(message, command, args)
+                    game = self.state["games"].get(chat_id)
+                elif chat_type == "private" or chat_id.startswith("private_"):
+                    game = self._active_game_for_user(sender_id)
+                    before = self._game_mutation_fingerprint(game)
+                    await self._handle_private(message, command, args)
+                    game = self._active_game_for_user(sender_id) or game
+                else:
+                    game = None
+                    before = None
+                if game and self.state["games"].get(game.get("chat_id")) is game:
+                    self._mark_human_game_mutation(game, before)
+                    if game.get("phase") != "ended":
+                        drive_chat_id = game["chat_id"]
+
+        if drive_chat_id:
+            self._schedule_virtual_driver(drive_chat_id)
+
+    @staticmethod
+    def _game_mutation_fingerprint(game):
+        if not game:
+            return None
+        payload = {key: value for key, value in game.items() if key != "ai_revision"}
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    def _mark_human_game_mutation(self, game, before):
+        if before == self._game_mutation_fingerprint(game):
+            return
+        game["ai_revision"] = int(game.get("ai_revision") or 0) + 1
+        self._save()
 
     async def handle_portal_message(self, message, ctx):
         chat_id = str(message.get("chat_id") or "")
@@ -494,7 +530,7 @@ class WerewolfPlugin:
         elif command == "观战":
             await self._spectate(game, user_id)
         elif command == "debug":
-            await self._debug(game, str(message.get("trusted_ui_user_id") or user_id))
+            await self._debug(game, str(message.get("trusted_ui_user_id") or user_id), args)
         elif command == "配置":
             await self._start_setup(game, user_id, args)
         elif command == "角色":
@@ -700,14 +736,19 @@ class WerewolfPlugin:
         lines.append("观战信息包含未公开身份，请勿向场上玩家泄露。")
         return "\n".join(lines)
 
-    async def _debug(self, game, user_id):
+    async def _debug(self, game, user_id, args):
         if user_id not in self.admin_uids:
             await self._safe_send(game["chat_id"], "只有配置文件中的管理员可以使用 debug。")
             return
+        if args not in ([], ["-v"]):
+            await self._safe_send(game["chat_id"], f"格式：{self.prefix} debug [-v]")
+            return
         debug_chat = self._temp_id(game, user_id)
-        payload = "【狼人杀完整调试数据】\n" + json.dumps(game, ensure_ascii=False, indent=2, sort_keys=True)
-        if not await self._safe_send(debug_chat, payload):
-            await self._safe_send(game["chat_id"], "无法发送 debug 临时会话，请确认该账号可以接收群临时消息。")
+        messages = self._verbose_debug_messages(game) if args == ["-v"] else self._debug_review_messages(game)
+        for message in messages:
+            if not await self._safe_send(debug_chat, message):
+                await self._safe_send(game["chat_id"], "无法发送 debug 临时会话，请确认该账号可以接收群临时消息。")
+                return
 
     async def _create_game(self, chat_id, host_id, host_name):
         existing = self.state["games"].get(chat_id)
@@ -744,6 +785,11 @@ class WerewolfPlugin:
             "ai_sequence": 0,
             "discussion_human_messages": 0,
             "ai_round_robin_seat": 0,
+            "ai_pending_speeches": [],
+            "ai_pending_wolf_replies": [],
+            "ai_revision": 0,
+            "discussion_revision": 0,
+            "wolf_chat_revision": 0,
             "host_action_proposal": None,
             "action_history": [],
             "result_delivery_index": 0,
@@ -1230,10 +1276,17 @@ class WerewolfPlugin:
             await self._safe_send(game["chat_id"], "请先完成报名和配置。")
             return
         if any(player.get("virtual") for player in game["players"]):
-            error = await self._preflight_virtual_model()
-            if error:
-                await self._safe_send(game["chat_id"], f"AI 模型预检失败，暂未发牌：{error}")
-                return
+            if self._schedule_virtual_preflight(game):
+                await self._safe_send(game["chat_id"], "AI 模型预检已启动；通过后将自动发牌。")
+            else:
+                await self._safe_send(game["chat_id"], "AI 模型预检正在进行，请稍候。")
+            return
+
+        await self._start_game_after_preflight(game)
+
+    async def _start_game_after_preflight(self, game):
+        if game.get("phase") != "ready":
+            return
 
         roles, thief_choices = self._deal_roles(game)
         for player, role in zip(game["players"], roles):
@@ -1247,6 +1300,8 @@ class WerewolfPlugin:
         game["last_exile"] = None
         game["blood_moon_doomed"] = None
         game["result_winners"] = []
+        game["ai_pending_speeches"] = []
+        game["ai_pending_wolf_replies"] = []
         self._record_action(game, "游戏开始，身份分配完成。", context="开局")
         game["intro_index"] = 0
         thief = next((player for player in game["players"] if player["role"] == "thief"), None)
@@ -1484,7 +1539,7 @@ class WerewolfPlugin:
     def _command_text(self):
         return (
             "【命令列表】\n"
-            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、开始、结束（提前终止并复盘）、观战、debug（管理员）、决斗 <座位>、自爆 <座位>、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
+            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、决斗 <座位>、自爆 <座位>、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
             f"白天公开技能：{self.prefix} 决斗 <座位>、自爆 <座位>、血爆\n"
             f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
@@ -1512,10 +1567,17 @@ class WerewolfPlugin:
         game["votes"] = {}
         game["silenced_id"] = None
         game["crow_target"] = None
+        game["ai_pending_speeches"] = []
+        game["ai_pending_wolf_replies"] = []
+        game["wolf_chat_revision"] = int(game.get("wolf_chat_revision") or 0) + 1
         for player in game["players"]:
             if player.get("virtual"):
                 player["ai_wolf_chat"] = []
                 player["ai_wolf_replies"] = 0
+        game["ai_pending_wolf_replies"] = [
+            player["user_id"] for player in sorted(self._wolf_pack(game), key=lambda item: item["seat"])
+            if player.get("virtual")
+        ]
         self._record_action(game, "夜晚开始。")
         self._save()
         night_text = f"第 {game['night']} 夜开始。\n{self._seat_list(game, include_status=True)}"
@@ -1524,7 +1586,6 @@ class WerewolfPlugin:
             night_text = f"{vote_patterns}\n\n{night_text}"
         await self._safe_send(game["chat_id"], night_text)
         await self._send_night_prompts(game)
-        await self._open_virtual_wolf_chat(game)
         await self._maybe_finish_initial_night(game)
 
     async def _send_night_prompts(self, game):
@@ -2319,6 +2380,9 @@ class WerewolfPlugin:
         game["vote_patterns"] = []
         game["discussion_human_messages"] = 0
         game["ai_round_robin_seat"] = 0
+        game["ai_pending_speeches"] = []
+        game["ai_pending_wolf_replies"] = []
+        game["discussion_revision"] = int(game.get("discussion_revision") or 0) + 1
         for player in game["players"]:
             if player.get("virtual"):
                 player["ai_daily_replies"] = 0
@@ -2710,9 +2774,17 @@ class WerewolfPlugin:
                 wolf.setdefault("ai_wolf_chat", []).append(payload)
                 wolf["ai_wolf_chat"] = wolf["ai_wolf_chat"][-30:]
             await self._send_private(game, wolf, payload)
-        self._save()
+        game["wolf_chat_revision"] = int(game.get("wolf_chat_revision") or 0) + 1
         if not player.get("virtual"):
-            await self._handle_virtual_wolf_chat(game)
+            pending = game.setdefault("ai_pending_wolf_replies", [])
+            for wolf in sorted(self._wolf_pack(game), key=lambda item: item["seat"]):
+                if (
+                    wolf.get("virtual")
+                    and int(wolf.get("ai_wolf_replies") or 0) < 3
+                    and wolf["user_id"] not in pending
+                ):
+                    pending.append(wolf["user_id"])
+        self._save()
 
     async def _force_advance(self, game, user_id):
         if not self._is_host(game, user_id):
@@ -2769,7 +2841,9 @@ class WerewolfPlugin:
         if not self._is_host(game, user_id):
             await self._safe_send(game["chat_id"], "只有房主可以取消游戏。")
             return
-        del self.state["games"][game["chat_id"]]
+        chat_id = game["chat_id"]
+        self._cancel_virtual_tasks(chat_id)
+        del self.state["games"][chat_id]
         self._save()
         await self._safe_send(game["chat_id"], "本局游戏已取消，身份不会公开。")
 
@@ -2789,7 +2863,9 @@ class WerewolfPlugin:
         if not self._is_host(game, user_id) or game["phase"] != "ended":
             await self._safe_send(game["chat_id"], "只有房主可以清理已结束的游戏。")
             return
-        del self.state["games"][game["chat_id"]]
+        chat_id = game["chat_id"]
+        self._cancel_virtual_tasks(chat_id)
+        del self.state["games"][chat_id]
         self._save()
         await self._safe_send(game["chat_id"], "已清理上一局记录，可以创建新房间。")
 
@@ -2837,8 +2913,20 @@ class WerewolfPlugin:
         game["winner"] = winner
         game["result_announced"] = False
         game["result_delivery_index"] = 0
+        game["ai_pending_speeches"] = []
+        game["ai_pending_wolf_replies"] = []
+        game["ai_preflight_pending"] = False
+        self._cancel_virtual_tasks(game["chat_id"])
         self._save()
         await self._announce_result(game)
+
+    def _cancel_virtual_tasks(self, chat_id):
+        current = asyncio.current_task()
+        for tasks in (self.virtual_driver_tasks, self.preflight_tasks):
+            task = tasks.get(chat_id)
+            if task and task is not current and not task.done():
+                task.cancel()
+        self.virtual_driver_wakes.pop(chat_id, None)
 
     def _result_winner_ids(self, game, winner):
         if winner == "terminated":
@@ -2871,17 +2959,8 @@ class WerewolfPlugin:
                 "piper": "吹笛者", "fox": "咒狐", "angel": "天使",
             }[winner]
             result_line = f"游戏结束，{winner_name}获胜。"
-        role_lines = []
-        for player in game["players"]:
-            final_role = ROLE_NAMES.get(player.get("role"), "未分配")
-            original = player.get("original_role")
-            suffix = f"（原身份：{ROLE_NAMES.get(original, original)}）" if original and original != player.get("role") else ""
-            role_lines.append(f"{player['seat']}号 {player['name']}：{final_role}{suffix}")
-        roles = "\n".join(role_lines)
-        lover_text = "无"
-        if game.get("lovers"):
-            pair = [self._player(game, uid) for uid in game["lovers"]]
-            lover_text = " 与 ".join(f"{p['seat']}号 {p['name']}" for p in pair)
+        roles = "\n".join(self._role_reveal_lines(game))
+        lover_text = self._lover_text(game)
         winners = [self._player(game, uid) for uid in game.get("result_winners", [])]
         winner_text = "、".join(f"{player['seat']}号 {player['name']}" for player in winners if player) or "无"
         messages = [f"{result_line}\n【获胜玩家】{winner_text}\n【身份公开】\n{roles}\n情侣：{lover_text}"]
@@ -2895,6 +2974,104 @@ class WerewolfPlugin:
             self._save()
         game["result_announced"] = True
         self._save()
+
+    def _debug_review_messages(self, game):
+        phase_names = {
+            "lobby": "报名", "setup": "配置", "ready": "等待开始", "thief_choice": "盗贼选牌",
+            "dealing": "身份送达", "night_actions": "夜间行动", "witch": "女巫行动",
+            "death_shot": "死亡技能", "discussion": "白天讨论", "vote": "投票", "ended": "已结束",
+        }
+        lines = [
+            f"当前阶段：{phase_names.get(game.get('phase'), game.get('phase'))}",
+            f"当前进度：第 {int(game.get('day') or 0)} 天 / 第 {int(game.get('night') or 0)} 夜",
+        ]
+        blocker = self._blocker_status_line(game)
+        if blocker:
+            lines.append(blocker)
+        winner = game.get("winner")
+        if winner:
+            winner_name = {
+                "good": "好人阵营", "wolves": "狼人阵营", "lovers": "跨阵营情侣",
+                "piper": "吹笛者", "fox": "咒狐", "angel": "天使", "terminated": "房主提前终止",
+            }.get(winner, str(winner))
+            lines.append(f"本局结果：{winner_name}")
+            winners = [self._player(game, uid) for uid in game.get("result_winners", [])]
+            lines.append("获胜玩家：" + ("、".join(
+                f"{player['seat']}号 {player['name']}" for player in winners if player
+            ) or "无"))
+        lines.extend(["", self._debug_settings_text(game), "", "【身份公开】"])
+        lines.extend(self._role_reveal_lines(game, include_status=True))
+        lines.append("情侣：" + self._lover_text(game))
+        messages = self._titled_text_chunks("狼人杀调试复盘", "\n".join(lines))
+        messages.extend(self._action_account_messages(game))
+        return messages
+
+    def _debug_settings_text(self, game):
+        settings = game.get("settings") or {}
+        lines = ["【本局设置】"]
+        counts = settings.get("roles")
+        if isinstance(counts, dict):
+            roles = "、".join(
+                f"{ROLE_NAMES.get(key, key)}×{value}" for key, value in counts.items() if int(value or 0)
+            )
+            lines.append("角色：" + (roles or "尚未配置"))
+        tie_policy = settings.get("tie_policy")
+        if tie_policy:
+            lines.append("平票：" + TIE_NAMES.get(tie_policy, str(tie_policy)))
+        witch_self = settings.get("witch_self")
+        if witch_self:
+            double = "允许" if settings.get("witch_double") else "不允许"
+            lines.append(f"女巫：{WITCH_SELF_NAMES.get(witch_self, witch_self)}，{double}同夜双药")
+        victory = settings.get("victory")
+        if victory:
+            lines.append("胜利条件：" + (
+                "屠边（普通村民全部死亡或神职全部死亡时，狼人胜利）"
+                if victory == "slaughter_side" else
+                "屠城（全部非狼人阵营玩家死亡时，狼人胜利）"
+            ))
+        lines.append("狼人刀人：" + (
+            "允许刀狼队友和自己" if settings.get("wolf_can_kill_wolves", False) else "只能刀非狼人玩家"
+        ))
+        lines.append("具体票型：" + (
+            "下一夜开始时公开" if settings.get("show_vote_pattern", False) else "仅结束复盘时公开"
+        ))
+        threshold = float(settings.get("day_ready_threshold", self.day_ready_threshold))
+        lines.append(f"结束发言阈值：{threshold:.0%}")
+        virtuals = [f"{player['seat']}号 {player['name']}" for player in game.get("players", []) if player.get("virtual")]
+        lines.append(f"虚拟玩家：{'、'.join(virtuals) if virtuals else '无'}")
+        return "\n".join(lines)
+
+    def _verbose_debug_messages(self, game):
+        payload = json.dumps(game, ensure_ascii=False, indent=2, sort_keys=True)
+        return self._titled_text_chunks("狼人杀完整调试数据", payload)
+
+    @staticmethod
+    def _titled_text_chunks(title, body, limit=3500):
+        body = str(body)
+        single_title = f"【{title}】"
+        if len(single_title) + 1 + len(body) <= limit:
+            return [f"{single_title}\n{body}"]
+        payload_limit = max(1, limit - len(title) - 24)
+        chunks = [body[index:index + payload_limit] for index in range(0, len(body), payload_limit)]
+        total = len(chunks)
+        return [f"【{title} {index}/{total}】\n{chunk}" for index, chunk in enumerate(chunks, 1)]
+
+    @staticmethod
+    def _role_reveal_lines(game, include_status=False):
+        lines = []
+        for player in sorted(game.get("players", []), key=lambda item: item["seat"]):
+            final_role = ROLE_NAMES.get(player.get("role"), "未分配")
+            original = player.get("original_role")
+            original_name = ROLE_NAMES.get(original, original)
+            suffix = f"（原身份：{original_name}）" if original and original != player.get("role") else ""
+            status = f"（{'存活' if player.get('alive') else '已死亡'}）" if include_status else ""
+            lines.append(f"{player['seat']}号 {player['name']}：{final_role}{suffix}{status}")
+        return lines
+
+    def _lover_text(self, game):
+        pair = [self._player(game, uid) for uid in game.get("lovers", [])]
+        labels = [f"{player['seat']}号 {player['name']}" for player in pair if player]
+        return " 与 ".join(labels) or "无"
 
     def _record_action(self, game, text, context=None):
         history = game.setdefault("action_history", [])
@@ -2973,6 +3150,44 @@ class WerewolfPlugin:
                 last_error = self._safe_error_text(exc)
         return last_error
 
+    def _schedule_virtual_preflight(self, game):
+        chat_id = game["chat_id"]
+        current = self.preflight_tasks.get(chat_id)
+        if current and not current.done():
+            return False
+        game["ai_preflight_pending"] = True
+        self._save()
+        task = asyncio.create_task(self._run_virtual_preflight(chat_id, game))
+        self.preflight_tasks[chat_id] = task
+
+        def cleanup(completed):
+            if self.preflight_tasks.get(chat_id) is completed:
+                self.preflight_tasks.pop(chat_id, None)
+            if not completed.cancelled() and completed.exception():
+                self.ctx.log(f"AI preflight task failed for {chat_id}: {completed.exception()}")
+
+        task.add_done_callback(cleanup)
+        return True
+
+    async def _run_virtual_preflight(self, chat_id, expected_game):
+        error = await self._preflight_virtual_model()
+        should_drive = False
+        async with self.lock:
+            game = self.state["games"].get(chat_id)
+            if game is not expected_game or not game.get("ai_preflight_pending"):
+                return
+            game["ai_preflight_pending"] = False
+            self._save()
+            if game.get("phase") != "ready":
+                return
+            if error:
+                await self._safe_send(chat_id, f"AI 模型预检失败，暂未发牌：{error}")
+                return
+            await self._start_game_after_preflight(game)
+            should_drive = game.get("phase") != "ended"
+        if should_drive:
+            self._schedule_virtual_driver(chat_id)
+
     async def _call_virtual_llm(self, messages, max_tokens=None):
         base_url = str(self.virtual_config.get("base_url") or "").strip().rstrip("/") + "/"
         url = urljoin(base_url, "chat/completions")
@@ -3019,8 +3234,8 @@ class WerewolfPlugin:
         text = str(error or "unknown error").replace("\n", " ").strip()
         return text[:200] or "unknown error"
 
-    async def _request_ai_decision(self, game, player, kind):
-        messages = self._build_ai_messages(game, player, kind)
+    async def _request_ai_decision(self, game, player, kind, messages=None):
+        messages = list(messages) if messages is not None else self._build_ai_messages(game, player, kind)
         retries = self._virtual_int("max_retries", 1, 0, 5)
         last_error = "unknown error"
         for attempt in range(retries + 1):
@@ -3030,7 +3245,6 @@ class WerewolfPlugin:
                 if kind == "speech" and self._discussion_turn_is_final(player):
                     decision["ready"] = True
                 player["ai_last_decision"] = {"kind": kind, "decision": decision}
-                self._save()
                 return decision
             except Exception as exc:
                 last_error = self._safe_error_text(exc)
@@ -3045,7 +3259,6 @@ class WerewolfPlugin:
         self.ctx.log(f"AI seat {player['seat']} {kind} failed; using fallback: {last_error}")
         decision = self._fallback_ai_decision(game, player, kind)
         player["ai_last_decision"] = {"kind": kind, "decision": decision, "fallback": True}
-        self._save()
         return decision
 
     def _build_ai_messages(self, game, player, kind):
@@ -3468,74 +3681,187 @@ class WerewolfPlugin:
             "max_replies_per_day", 3, 1, 20
         )
 
-    async def _drive_virtual_game(self, game, schedule_on_limit=True):
-        if not any(player.get("virtual") for player in game.get("players", [])):
+    async def _drive_virtual_game(self, game, schedule_on_limit=True, stop_phase=None):
+        chat_id = game if isinstance(game, str) else game.get("chat_id")
+        if not chat_id:
             return False
         for _ in range(20):
-            pending = self._pending_virtual_decisions(game)
-            if pending:
-                phase_token = self._ai_phase_token(game)
-                decisions = await asyncio.gather(*[
-                    self._request_ai_decision(game, player, kind)
-                    for player, kind in pending
-                ])
-                applied = False
-                for (player, kind), decision in zip(pending, decisions):
-                    if not self._ai_decision_pending(game, player, kind, phase_token):
-                        continue
-                    await self._apply_ai_decision(game, player, kind, decision)
-                    applied = True
-                if not applied:
-                    return False
-                continue
-            if game.get("phase") == "discussion":
-                if self._all_living_players_virtual(game):
-                    progressed = await self._run_autonomous_discussion(game)
-                else:
-                    progressed = await self._open_virtual_discussion(game)
-                if game.get("phase") != "discussion":
+            if stop_phase is not None:
+                async with self.lock:
+                    current = self.state["games"].get(chat_id)
+                    if not current or current.get("phase") != stop_phase:
+                        return False
+            work, progressed = await self._snapshot_virtual_work(chat_id)
+            if not work:
+                if progressed:
                     continue
-                if not progressed:
-                    return False
                 return False
-            return False
-        self.ctx.log(f"AI decision loop limit reached for {game.get('chat_id')}")
-        if schedule_on_limit and self._all_living_players_virtual(game) and game.get("phase") != "ended":
-            self._schedule_autonomous_continuation(game)
+            snapshot_game = work["game"]
+            snapshot_player = self._player(snapshot_game, work["user_id"])
+            decision = await self._request_ai_decision(
+                snapshot_game,
+                snapshot_player,
+                work["kind"],
+                messages=work["messages"],
+            )
+            await asyncio.sleep(0)
+            async with self.lock:
+                live_game = self.state["games"].get(chat_id)
+                if not self._virtual_work_is_current(live_game, work):
+                    continue
+                live_player = self._player(live_game, work["user_id"])
+                live_player["ai_last_decision"] = copy.deepcopy(snapshot_player.get("ai_last_decision") or {})
+                if work["kind"] == "speech":
+                    if work.get("queued"):
+                        live_game["ai_pending_speeches"].remove(live_player["user_id"])
+                    await self._apply_virtual_discussion_decision(live_game, live_player, decision)
+                elif work["kind"] == "wolf_chat":
+                    live_game["ai_pending_wolf_replies"].remove(live_player["user_id"])
+                    live_player["ai_wolf_replies"] = int(live_player.get("ai_wolf_replies") or 0) + 1
+                    self._save()
+                    await self._wolf_relay(live_game, live_player, decision["wolf_message"])
+                else:
+                    await self._apply_ai_decision(live_game, live_player, work["kind"], decision)
+        self.ctx.log(f"AI decision loop limit reached for {chat_id}")
         return True
+
+    async def _snapshot_virtual_work(self, chat_id):
+        async with self.lock:
+            game = self.state["games"].get(chat_id)
+            if (
+                not game
+                or game.get("phase") == "ended"
+                or not any(player.get("virtual") for player in game.get("players", []))
+            ):
+                return None, False
+            if game.get("phase") == "discussion" and self._all_living_players_virtual(game):
+                eligible = [player for player in self._living(game) if not self._is_silenced(game, player)]
+                if not eligible or len(game.get("ready") or []) >= self._ready_needed(game):
+                    await self._begin_vote(game, round_number=1, candidates=None)
+                    return None, True
+            selected = self._next_virtual_work(game)
+            if not selected:
+                return None, False
+            player, kind, queued = selected
+            snapshot_game = copy.deepcopy(game)
+            snapshot_player = self._player(snapshot_game, player["user_id"])
+            work = {
+                "chat_id": chat_id,
+                "user_id": player["user_id"],
+                "kind": kind,
+                "queued": queued,
+                "phase_token": self._ai_phase_token(game),
+                "ai_revision": int(game.get("ai_revision") or 0),
+                "discussion_revision": int(game.get("discussion_revision") or 0),
+                "wolf_chat_revision": int(game.get("wolf_chat_revision") or 0),
+                "game": snapshot_game,
+                "messages": self._build_ai_messages(snapshot_game, snapshot_player, kind),
+            }
+            return work, False
+
+    def _next_virtual_work(self, game):
+        if game.get("phase") in ("night_actions", "witch"):
+            pending_wolves = game.setdefault("ai_pending_wolf_replies", [])
+            valid_ids = {
+                player["user_id"] for player in self._wolf_pack(game)
+                if player.get("virtual") and int(player.get("ai_wolf_replies") or 0) < 3
+            }
+            pending_wolves[:] = [user_id for user_id in pending_wolves if user_id in valid_ids]
+            if pending_wolves:
+                return self._player(game, pending_wolves[0]), "wolf_chat", True
+
+        pending = self._pending_virtual_decisions(game)
+        if pending:
+            player, kind = pending[0]
+            return player, kind, False
+
+        if game.get("phase") != "discussion":
+            return None
+        pending_speeches = game.setdefault("ai_pending_speeches", [])
+        candidates = {
+            player["user_id"]: player for player in self._living(game)
+            if player.get("virtual")
+            and not self._is_silenced(game, player)
+            and player["user_id"] not in game.get("ready", [])
+            and int(player.get("ai_daily_replies") or 0) < self._virtual_int("max_replies_per_day", 3, 1, 20)
+        }
+        pending_speeches[:] = [user_id for user_id in pending_speeches if user_id in candidates]
+        if pending_speeches:
+            return candidates[pending_speeches[0]], "speech", True
+
+        if self._all_living_players_virtual(game):
+            available = sorted(candidates.values(), key=lambda item: item["seat"])
+        else:
+            available = sorted(
+                (player for player in candidates.values() if int(player.get("ai_daily_replies") or 0) == 0),
+                key=lambda item: item["seat"],
+            )
+        if not available:
+            return None
+        cursor = int(game.get("ai_round_robin_seat") or 0)
+        after = [player for player in available if player["seat"] > cursor]
+        return (after or available)[0], "speech", False
+
+    def _virtual_work_is_current(self, game, work):
+        if not game or game.get("phase") == "ended":
+            return False
+        if int(game.get("ai_revision") or 0) != work["ai_revision"]:
+            return False
+        if self._ai_phase_token(game) != work["phase_token"]:
+            return False
+        player = self._player(game, work["user_id"])
+        if not player or not player.get("virtual"):
+            return False
+        kind = work["kind"]
+        if kind == "speech":
+            if int(game.get("discussion_revision") or 0) != work["discussion_revision"]:
+                return False
+            current = self._next_virtual_work(game)
+            return bool(current and current[0]["user_id"] == player["user_id"] and current[1] == kind)
+        if kind == "wolf_chat":
+            if int(game.get("wolf_chat_revision") or 0) != work["wolf_chat_revision"]:
+                return False
+            return player["user_id"] in game.get("ai_pending_wolf_replies", [])
+        return self._ai_decision_pending(game, player, kind, work["phase_token"])
 
     def _all_living_players_virtual(self, game):
         living = self._living(game)
         return bool(living) and all(player.get("virtual") for player in living)
 
-    def _schedule_autonomous_continuation(self, game):
-        chat_id = game.get("chat_id")
-        current = self.autonomous_tasks.get(chat_id)
+    def _schedule_virtual_driver(self, chat_id):
+        self.virtual_driver_wakes[chat_id] = int(self.virtual_driver_wakes.get(chat_id) or 0) + 1
+        current = self.virtual_driver_tasks.get(chat_id)
         if current and not current.done():
-            return
-        task = asyncio.create_task(self._continue_autonomous_game(chat_id))
-        self.autonomous_tasks[chat_id] = task
+            return False
+        seen = {"wake": 0}
+        task = asyncio.create_task(self._run_virtual_driver(chat_id, seen))
+        self.virtual_driver_tasks[chat_id] = task
 
         def cleanup(completed):
-            if self.autonomous_tasks.get(chat_id) is completed:
-                self.autonomous_tasks.pop(chat_id, None)
+            if self.virtual_driver_tasks.get(chat_id) is completed:
+                self.virtual_driver_tasks.pop(chat_id, None)
             if not completed.cancelled() and completed.exception():
-                self.ctx.log(f"autonomous game continuation failed for {chat_id}: {completed.exception()}")
+                self.ctx.log(f"virtual game driver failed for {chat_id}: {completed.exception()}")
+            game = self.state["games"].get(chat_id)
+            if (
+                game
+                and game.get("phase") != "ended"
+                and self.virtual_driver_wakes.get(chat_id, 0) != seen["wake"]
+            ):
+                self._schedule_virtual_driver(chat_id)
 
         task.add_done_callback(cleanup)
+        return True
 
-    async def _continue_autonomous_game(self, chat_id):
+    async def _run_virtual_driver(self, chat_id, seen):
         while True:
-            await asyncio.sleep(0.25)
-            async with self.lock:
-                game = self.state["games"].get(chat_id)
-                if (
-                    not game or game.get("phase") == "ended"
-                    or not self._all_living_players_virtual(game)
-                ):
-                    return
-                reached_limit = await self._drive_virtual_game(game, schedule_on_limit=False)
-            if not reached_limit:
+            seen["wake"] = self.virtual_driver_wakes.get(chat_id, 0)
+            reached_limit = await self._drive_virtual_game(chat_id, schedule_on_limit=False)
+            if reached_limit:
+                await asyncio.sleep(0.25)
+                continue
+            await asyncio.sleep(0)
+            if self.virtual_driver_wakes.get(chat_id, 0) == seen["wake"]:
                 return
 
     async def _resume_autonomous_games_when_connected(self):
@@ -3549,16 +3875,14 @@ class WerewolfPlugin:
             else:
                 self.ctx.log("autonomous game resume deferred because NapCat did not connect")
                 return
-        for chat_id in list(self.state["games"]):
-            async with self.lock:
-                game = self.state["games"].get(chat_id)
-                if (
-                    not game or game.get("phase") == "ended"
-                    or not self._all_living_players_virtual(game)
-                ):
-                    continue
-                self.ctx.log(f"resuming autonomous game for {chat_id}")
-                await self._drive_virtual_game(game)
+        for chat_id, game in list(self.state["games"].items()):
+            if (
+                game.get("phase") == "ended"
+                or not any(player.get("virtual") for player in game.get("players", []))
+            ):
+                continue
+            self.ctx.log(f"resuming virtual game for {chat_id}")
+            self._schedule_virtual_driver(chat_id)
 
     def _pending_virtual_decisions(self, game):
         phase = game.get("phase")
@@ -3679,6 +4003,7 @@ class WerewolfPlugin:
         content = str(message.get("content") or "").strip()
         if not content:
             return
+        game["discussion_revision"] = int(game.get("discussion_revision") or 0) + 1
         mentioned = [player for player in candidates if self._ai_is_addressed(player, content)]
         selected = sorted(mentioned, key=lambda item: item["seat"])[0] if mentioned else None
         if selected is None:
@@ -3692,76 +4017,25 @@ class WerewolfPlugin:
             after = [item for item in candidates if item["seat"] > int(game.get("ai_round_robin_seat") or 0)]
             selected = (after or candidates)[0]
             game["ai_round_robin_seat"] = selected["seat"]
+        pending = game.setdefault("ai_pending_speeches", [])
+        if selected["user_id"] not in pending:
+            pending.append(selected["user_id"])
         self._save()
-        decision = await self._request_ai_decision(game, selected, "speech")
-        await self._apply_virtual_discussion_decision(game, selected, decision)
 
     async def _open_virtual_discussion(self, game):
-        if game.get("phase") != "discussion":
-            return False
-        candidates = sorted(
-            (
-                player for player in self._living(game)
-                if player.get("virtual")
-                and not self._is_silenced(game, player)
-                and player["user_id"] not in game.get("ready", [])
-                and int(player.get("ai_daily_replies") or 0) == 0
-            ),
-            key=lambda item: item["seat"],
-        )
-        if not candidates:
-            return False
-        decisions = await asyncio.gather(*[
-            self._request_ai_decision(game, player, "speech")
-            for player in candidates
-        ])
-        progressed = False
-        for player, decision in zip(candidates, decisions):
-            if await self._apply_virtual_discussion_decision(game, player, decision):
-                progressed = True
-            if game.get("phase") != "discussion":
-                break
-        return progressed
+        before = sum(int(player.get("ai_daily_replies") or 0) for player in game.get("players", []))
+        await self._drive_virtual_game(game, stop_phase="discussion")
+        after = sum(int(player.get("ai_daily_replies") or 0) for player in game.get("players", []))
+        return after > before
 
     async def _run_autonomous_discussion(self, game):
         if game.get("phase") != "discussion" or not self._all_living_players_virtual(game):
             return False
-        eligible = [player for player in self._living(game) if not self._is_silenced(game, player)]
-        if not eligible:
-            await self._begin_vote(game, round_number=1, candidates=None)
-            return True
-        needed = self._ready_needed(game)
-        if len(game.get("ready") or []) >= needed:
-            await self._begin_vote(game, round_number=1, candidates=None)
-            return True
-        max_replies = self._virtual_int("max_replies_per_day", 3, 1, 20)
-        max_attempts = max(1, len(eligible) * max_replies)
-        attempts = 0
-        progressed = False
-        while game.get("phase") == "discussion" and attempts < max_attempts:
-            candidates = sorted(
-                (
-                    player for player in eligible
-                    if player.get("alive")
-                    and player["user_id"] not in game.get("ready", [])
-                    and int(player.get("ai_daily_replies") or 0) < max_replies
-                ),
-                key=lambda item: item["seat"],
-            )
-            if not candidates:
-                return progressed
-            round_progress = False
-            for player in candidates:
-                attempts += 1
-                decision = await self._request_ai_decision(game, player, "speech")
-                applied = await self._apply_virtual_discussion_decision(game, player, decision)
-                progressed = progressed or applied
-                round_progress = round_progress or applied
-                if game.get("phase") != "discussion" or attempts >= max_attempts:
-                    break
-            if not round_progress:
-                return progressed
-        return progressed
+        before_phase = game.get("phase")
+        before = sum(int(player.get("ai_daily_replies") or 0) for player in game.get("players", []))
+        await self._drive_virtual_game(game, stop_phase="discussion")
+        after = sum(int(player.get("ai_daily_replies") or 0) for player in game.get("players", []))
+        return game.get("phase") != before_phase or after > before
 
     async def _apply_virtual_discussion_decision(self, game, player, decision):
         if (
@@ -3778,9 +4052,11 @@ class WerewolfPlugin:
             )
             if not sent:
                 return False
+            game["discussion_revision"] = int(game.get("discussion_revision") or 0) + 1
         elif decision.get("action") != "silent":
             return False
         player["ai_daily_replies"] = int(player.get("ai_daily_replies") or 0) + 1
+        game["ai_round_robin_seat"] = player["seat"]
         if not decision.get("ready"):
             self._save()
             return True
@@ -3803,12 +4079,10 @@ class WerewolfPlugin:
         if not candidates or game.get("phase") not in ("night_actions", "witch"):
             return
         player = sorted(candidates, key=lambda item: item["seat"])[0]
-        decision = await self._request_ai_decision(game, player, "wolf_chat")
-        if game.get("phase") not in ("night_actions", "witch") or not player.get("alive"):
-            return
-        player["ai_wolf_replies"] = int(player.get("ai_wolf_replies") or 0) + 1
+        pending = game.setdefault("ai_pending_wolf_replies", [])
+        if player["user_id"] not in pending:
+            pending.append(player["user_id"])
         self._save()
-        await self._wolf_relay(game, player, decision["wolf_message"])
 
     async def _open_virtual_wolf_chat(self, game):
         if game.get("phase") not in ("night_actions", "witch"):
@@ -3822,21 +4096,11 @@ class WerewolfPlugin:
         )
         if not candidates:
             return
-        decisions = await asyncio.gather(*[
-            self._request_ai_decision(game, player, "wolf_chat")
-            for player in candidates
-        ])
-        for player, decision in zip(candidates, decisions):
-            if (
-                game.get("phase") not in ("night_actions", "witch")
-                or not player.get("alive")
-                or not self._is_active_pack_wolf(player)
-                or int(player.get("ai_wolf_replies") or 0) != 0
-            ):
-                continue
-            player["ai_wolf_replies"] = 1
-            self._save()
-            await self._wolf_relay(game, player, decision["wolf_message"])
+        pending = game.setdefault("ai_pending_wolf_replies", [])
+        for player in candidates:
+            if player["user_id"] not in pending:
+                pending.append(player["user_id"])
+        self._save()
 
     @staticmethod
     def _ai_is_addressed(player, content):
