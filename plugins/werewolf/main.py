@@ -15,6 +15,7 @@ import aiohttp
 STATE_VERSION = 6
 SUPPORTED_STATE_VERSIONS = (1, 2, 3, 4, 5, STATE_VERSION)
 NIGHT_ROLE_SECONDS = 45
+WOLF_ROLE_SECONDS = 30
 DEFAULT_AI_NAMES = [
     "Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace",
     "Helen", "Ivy", "Jack", "Kate", "Leo",
@@ -1854,7 +1855,7 @@ class WerewolfPlugin:
         role_rules = "\n".join(f"- {ROLE_NAMES[role]}：{ROLE_HELP[role]}" for role in configured)
         return (
             "【狼人杀规则】\n"
-            f"夜间角色通过临时会话行动。非讨论角色的阶段配额为 45 秒；狼队讨论配额为配置中狼人阵营牌数× 45 秒，同一阶段取最长配额。阶段即使提前完成也会等到截止时间，超时视为跳过；时间始终按开局公开配置保留，不随角色死亡变化。每天先进行死亡发言和随机起点的顺序发言，每人发送 {self.prefix} 过结束当前发言；随后进入自由讨论，达到结束自由发言阈值后进入私密投票。\n"
+            f"夜间角色通过临时会话行动。非讨论角色的阶段配额为 45 秒；狼队讨论配额为配置中狼人阵营牌数 × 30 秒，同一阶段取最长配额。阶段即使提前完成也会等到截止时间，超时视为跳过；时间始终按开局公开配置保留，不随角色死亡变化。每天先进行死亡发言和随机起点的顺序发言，每人发送 {self.prefix} 过结束当前发言；随后进入自由讨论，达到结束自由发言阈值后进入私密投票。\n"
             "守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
             "骑士在白天讨论时可公开决斗一次：目标是狼人则该狼人死亡且不能发动死亡技能，随后入夜；目标不是狼人则骑士死亡，讨论继续。\n"
             "白狼王属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家；两人死亡并结算死亡技能后直接入夜。\n"
@@ -1943,7 +1944,7 @@ class WerewolfPlugin:
         if stage == "witch":
             return NIGHT_ROLE_SECONDS if self._night_stage_role_types(game, stage) else 0
         wolf_count = self._configured_role_count(game, WOLF_ROLES)
-        wolf_seconds = NIGHT_ROLE_SECONDS * wolf_count
+        wolf_seconds = WOLF_ROLE_SECONDS * wolf_count
         has_other = any(role not in WOLF_ROLES for role in self._night_stage_role_types(game, stage))
         return max(wolf_seconds, NIGHT_ROLE_SECONDS if has_other else 0)
 

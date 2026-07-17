@@ -1060,16 +1060,19 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_night_stage_duration_uses_public_configured_roster(self):
         game = await self.configured_six_player_game(start=True)
 
-        self.assertEqual(game["night_timing"]["duration"], 90)
-        self.assertIn("首阶段固定 90 秒", next(
+        self.assertEqual(game["night_timing"]["duration"], 60)
+        self.assertIn("首阶段固定 60 秒", next(
             item["text"] for item in self.ctx.sent if item["text"].startswith("第 1 夜开始")
         ))
         nondiscussive = copy.deepcopy(game)
         nondiscussive["settings"]["roles"] = {"seer": 4}
         self.assertEqual(self.plugin._night_stage_duration(nondiscussive, "initial"), 45)
+        wolves_only = copy.deepcopy(game)
+        wolves_only["settings"]["roles"] = {"wolf": 1}
+        self.assertEqual(self.plugin._night_stage_duration(wolves_only, "initial"), 30)
         mixed = copy.deepcopy(game)
         mixed["settings"]["roles"] = {"wolf": 3, "seer": 5}
-        self.assertEqual(self.plugin._night_stage_duration(mixed, "initial"), 135)
+        self.assertEqual(self.plugin._night_stage_duration(mixed, "initial"), 90)
 
     async def test_completed_night_actions_wait_for_fixed_deadline(self):
         game = await self.configured_six_player_game(start=True)
