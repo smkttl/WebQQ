@@ -2,6 +2,7 @@ import asyncio
 import copy
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -51,6 +52,34 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.state_path = Path(self.tmp.name) / "state.json"
         self.plugin = WerewolfPlugin(self.ctx, state_path=self.state_path, rng=StableRandom())
         self.message_number = 0
+
+    async def asyncTearDown(self):
+        tasks = list(getattr(self.plugin, "night_deadline_tasks", {}).values())
+        resume = getattr(self.plugin, "resume_task", None)
+        if resume:
+            tasks.append(resume)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def expire_night_stage(self, game):
+        timing = game.get("night_timing")
+        self.assertIsNotNone(timing)
+        timing["deadline"] = time.time()
+        self.plugin._save()
+        await self.plugin._expire_night_if_due(game)
+        await asyncio.sleep(0)
+
+    async def finish_timed_night(self, game):
+        if game.get("phase") == "night_actions":
+            await self.expire_night_stage(game)
+        if game.get("phase") == "witch":
+            if any(player.get("virtual") for player in game.get("players", [])):
+                self.plugin._schedule_virtual_driver(game["chat_id"])
+                await self.wait_for_virtual_tasks()
+            await self.expire_night_stage(game)
 
     async def group(self, user_id, content, name=None, group_id=123):
         self.message_number += 1
@@ -223,8 +252,10 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 刀 1")
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.expire_night_stage(game)
         self.assertEqual(game["phase"], "witch")
         await self.private(6, "/wolf 过")
+        await self.expire_night_stage(game)
         self.assertEqual(game["phase"], "speech")
         await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
@@ -245,6 +276,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 空刀")
         await self.private(4, "/wolf 空刀")
         await self.private(5, "/wolf 查验 3")
+        await self.expire_night_stage(game)
         await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         return game
@@ -265,6 +297,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(4, "/wolf 空刀")
         await self.private(6, "/wolf 空刀")
         await self.private(5, "/wolf 查验 6")
+        await self.expire_night_stage(game)
         await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         self.assertEqual(game["players"][4]["last_seer_result"]["result"], "狼人阵营")
@@ -1007,9 +1040,11 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = await self.configured_six_player_game(start=True)
 
         await self.private(2, "/wolf 状态")
-        self.assertIn("等待行动角色：狼人×2、预言家", self.ctx.sent[-1]["text"])
+        self.assertIn("等待行动角色：狼人、预言家", self.ctx.sent[-1]["text"])
+        self.assertNotIn("×", self.ctx.sent[-1]["text"])
         await self.group(2, "/wolf 状态")
-        self.assertIn("等待行动角色：狼人×2、预言家", self.ctx.sent[-1]["text"])
+        self.assertIn("等待行动角色：狼人、预言家", self.ctx.sent[-1]["text"])
+        self.assertNotIn("×", self.ctx.sent[-1]["text"])
 
         await self.private(3, "/wolf 刀 1")
         await self.group(2, "/wolf 状态")
@@ -1017,18 +1052,154 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.expire_night_stage(game)
         self.assertEqual(game["phase"], "witch")
         await self.group(2, "/wolf 状态")
         self.assertIn("等待行动角色：女巫", self.ctx.sent[-1]["text"])
 
-    async def test_vote_status_names_roles_that_have_not_voted(self):
+    async def test_night_stage_duration_uses_public_configured_roster(self):
+        game = await self.configured_six_player_game(start=True)
+
+        self.assertEqual(game["night_timing"]["duration"], 90)
+        self.assertIn("首阶段固定 90 秒", next(
+            item["text"] for item in self.ctx.sent if item["text"].startswith("第 1 夜开始")
+        ))
+        nondiscussive = copy.deepcopy(game)
+        nondiscussive["settings"]["roles"] = {"seer": 4}
+        self.assertEqual(self.plugin._night_stage_duration(nondiscussive, "initial"), 45)
+        mixed = copy.deepcopy(game)
+        mixed["settings"]["roles"] = {"wolf": 3, "seer": 5}
+        self.assertEqual(self.plugin._night_stage_duration(mixed, "initial"), 135)
+
+    async def test_completed_night_actions_wait_for_fixed_deadline(self):
+        game = await self.configured_six_player_game(start=True)
+        deadline = game["night_timing"]["deadline"]
+
+        await self.private(3, "/wolf 刀 1")
+        await self.private(4, "/wolf 刀 1")
+        await self.private(5, "/wolf 查验 3")
+
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["night_timing"]["deadline"], deadline)
+        self.assertIsNone(game["players"][4].get("last_seer_result"))
+        await self.expire_night_stage(game)
+        self.assertEqual(game["phase"], "witch")
+        self.assertEqual(game["players"][4]["last_seer_result"]["result"], "狼人阵营")
+
+    async def test_dead_configured_role_keeps_reserved_witch_stage(self):
+        game = await self.configured_six_player_game(start=True)
+        game["players"][5]["alive"] = False
+
+        await self.expire_night_stage(game)
+
+        self.assertEqual(game["phase"], "witch")
+        self.assertEqual(game["night_timing"]["duration"], 45)
+        self.assertEqual(game["night_actions"]["witch_actor_keys"], [])
+        await self.group(2, "/wolf 状态")
+        self.assertIn("等待行动角色：女巫", self.ctx.sent[-1]["text"])
+
+    async def test_night_timeout_auto_passes_and_rejects_late_action(self):
+        game = await self.configured_six_player_game(start=True)
+        game["night_timing"]["deadline"] = time.time() - 1
+        self.plugin._save()
+
+        await self.private(3, "/wolf 刀 1")
+
+        self.assertEqual(game["phase"], "witch")
+        self.assertIsNone(game["night_actions"]["wolves"]["3"])
+        self.assertNotEqual(game["night_actions"].get("wolf_target"), "1")
+        self.assertIn("当前不能执行该夜间操作", self.ctx.sent[-1]["text"])
+        history = "\n".join(entry["text"] for entry in game["action_history"])
+        self.assertIn("夜间狼人行动超时", history)
+
+    async def test_force_advance_fills_actions_without_shortening_stage(self):
+        game = await self.configured_six_player_game(start=True)
+        deadline = game["night_timing"]["deadline"]
+
+        await self.group(1, "/wolf 推进", "Host")
+
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["night_timing"]["deadline"], deadline)
+        self.assertEqual(game["night_actions"]["wolves"], {"3": None, "4": None})
+        await self.expire_night_stage(game)
+        self.assertEqual(game["phase"], "witch")
+
+    async def test_witch_choice_locks_but_stage_waits_for_deadline(self):
+        game = await self.configured_six_player_game(start=True)
+        await self.private(3, "/wolf 空刀")
+        await self.private(4, "/wolf 空刀")
+        await self.private(5, "/wolf 查验 3")
+        await self.expire_night_stage(game)
+
+        deadline = game["night_timing"]["deadline"]
+        await self.private(6, "/wolf 过")
+        await self.private(6, "/wolf 毒 1")
+
+        self.assertEqual(game["phase"], "witch")
+        self.assertEqual(game["night_timing"]["deadline"], deadline)
+        self.assertEqual(game["night_actions"]["witch"], {"heal": False, "poison": None})
+        self.assertIn("已锁定，不能修改", self.ctx.sent[-1]["text"])
+        await self.expire_night_stage(game)
+        self.assertEqual(game["phase"], "speech")
+
+    async def test_night_deadline_cancels_inflight_ai_decision(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        roles = ["villager", "villager", "wolf", "wolf", "witch", "seer"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        ai = game["players"][5]
+        game["phase"] = "night_actions"
+        game["night"] = 1
+        game["night_actions"] = {"wolves": {}}
+        game["ai_pending_wolf_replies"] = []
+        self.plugin._start_night_timing(game, "initial")
+        request_started = asyncio.Event()
+        request_cancelled = asyncio.Event()
+
+        async def held_decision(*args, **kwargs):
+            request_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                request_cancelled.set()
+
+        self.plugin._request_ai_decision = AsyncMock(side_effect=held_decision)
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+        game["night_timing"]["deadline"] = time.time() - 1
+
+        await self.plugin._expire_night_if_due(game)
+        await asyncio.wait_for(request_cancelled.wait(), timeout=1)
+
+        self.assertEqual(game["phase"], "witch")
+        self.assertIsNone(game["night_actions"]["seer"])
+
+    async def test_restart_catches_up_all_expired_night_stages(self):
+        game = await self.configured_six_player_game(start=True)
+        game["night_timing"]["deadline"] = time.time() - 100
+        self.plugin._save()
+        self.plugin._cancel_night_deadline_task(game["chat_id"])
+
+        restarted = WerewolfPlugin(FakeContext(), state_path=self.state_path, rng=StableRandom())
+        self.plugin = restarted
+        await restarted.resume_task
+
+        restored = restarted.state["games"]["group_123"]
+        self.assertEqual(restored["phase"], "speech")
+        self.assertIsNone(restored["night_timing"])
+        history = "\n".join(entry["text"] for entry in restored["action_history"])
+        self.assertIn("夜间狼人行动超时", history)
+
+    async def test_vote_status_only_counts_players_that_have_not_voted(self):
         game = await self.reach_first_day()
         await self.group(1, "/wolf 推进", "Host")
 
         await self.group(2, "/wolf 状态")
 
         self.assertEqual(game["phase"], "vote")
-        self.assertIn("等待投票角色：村民、狼人×2、预言家、女巫", self.ctx.sent[-1]["text"])
+        self.assertIn("等待投票：还有 5 名玩家未投票。", self.ctx.sent[-1]["text"])
+        self.assertNotIn("等待投票角色", self.ctx.sent[-1]["text"])
 
     async def test_outsider_can_receive_private_spectator_identity_table(self):
         game = await self.configured_six_player_game(start=True)
@@ -1217,6 +1388,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 刀 1")
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.expire_night_stage(game)
         self.assertEqual(game["phase"], "witch")
 
         await self.group(1, "/wolf 结束", "Host")
@@ -1307,7 +1479,9 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 刀 1")
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.expire_night_stage(game)
         await self.private(6, "/wolf 过")
+        await self.expire_night_stage(game)
 
         self.assertEqual(game["phase"], "speech")
         self.assertEqual(game["speech_state"]["kind"], "day_one_dead")
@@ -1548,6 +1722,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 查验 2")
         await self.private(5, "/wolf 加票 2")
         await self.private(6, "/wolf 禁言 2")
+        await self.finish_timed_night(game)
 
         await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
@@ -1572,8 +1747,10 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 空刀")
         await self.private(4, "/wolf 空刀")
         await self.private(1, "/wolf 查验 3")
+        await self.expire_night_stage(game)
         self.assertEqual(game["phase"], "witch")
         await self.private(2, "/wolf 毒 3")
+        await self.expire_night_stage(game)
 
         self.assertTrue(game["players"][2]["alive"])
         self.assertFalse(game["players"][0]["alive"])
@@ -1596,6 +1773,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(gargoyle["user_id"], f"/wolf 窥视 {seer['seat']}")
         await self.private(wolf["user_id"], "/wolf 空刀")
         await self.private(seer["user_id"], f"/wolf 查验 {hidden['seat']}")
+        await self.expire_night_stage(game)
         self.assertEqual(seer["last_seer_result"]["result"], "非狼人阵营")
 
         self.plugin._apply_deaths(game, [(wolf["user_id"], "shot")])
@@ -1620,6 +1798,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(mechanical["user_id"], "/wolf 空刀")
         await self.private(seer["user_id"], f"/wolf 查验 {wolf['seat']}")
         await self.private(mechanical["user_id"], f"/wolf 查验 {wolf['seat']}")
+        await self.expire_night_stage(game)
 
         self.assertEqual(seer["last_seer_result"]["result"], "狼人阵营")
         self.assertEqual(mechanical["last_seer_result"]["result"], "狼人阵营")
@@ -1852,6 +2031,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 空刀")
         await self.private(5, "/wolf 空刀")
         await self.private(4, "/wolf 查验 3")
+        await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
 
         await self.group(6, "/wolf 决斗 5")
@@ -1913,6 +2093,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 空刀")
         await self.private(6, "/wolf 空刀")
         await self.private(4, "/wolf 查验 6")
+        await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
 
         await self.group(6, "/wolf自爆5")
@@ -1986,9 +2167,11 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(2, "/wolf 刀 5")
         await self.private(8, "/wolf 刀 5")
         await self.private(3, "/wolf 查验 2")
+        await self.expire_night_stage(game)
         self.assertEqual(game["phase"], "witch")
         self.assertTrue(game["lovers_cross"])
         await self.private(4, "/wolf 过")
+        await self.expire_night_stage(game)
         self.assertEqual(game["phase"], "death_shot")
         self.assertEqual(game["pending_shots"], ["5"])
 
@@ -2251,6 +2434,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(1, "/wolf 开始", "Host")
 
         game = self.plugin.state["games"]["group_123"]
+        await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
         self.assertEqual(len([player for player in game["players"] if not player["virtual"]]), 1)
         self.assertEqual(len([player for player in game["players"] if player["virtual"]]), 5)
@@ -2385,6 +2569,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
 
+        await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         self.assertFalse(game["players"][0]["alive"])
@@ -2406,6 +2591,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 刀 1")
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
 
@@ -2602,6 +2788,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 刀 1")
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
 
         await self.group(2, "Alice，你怎么看？")
@@ -2797,7 +2984,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         plugin = WerewolfPlugin(FakeContext(), state_path=migration_path, rng=StableRandom())
 
-        self.assertEqual(plugin.state["version"], 5)
+        self.assertEqual(plugin.state["version"], 6)
         player = plugin.state["games"]["group_9"]["players"][0]
         self.assertFalse(player["virtual"])
         self.assertEqual(player["ai_daily_replies"], 0)
@@ -2809,7 +2996,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plugin.state["games"]["group_9"]["settings"]["abstention_majority_no_exile"])
         self.assertEqual(plugin.state["games"]["group_9"]["vote_patterns"], [])
         persisted = json.loads(migration_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 5)
+        self.assertEqual(persisted["version"], 6)
 
     async def test_version_three_ended_game_backfills_last_configuration(self):
         game = await self.configured_six_player_game(start=False)
@@ -2824,7 +3011,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(restarted.state["last_configs"]["group_123"], expected)
         persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 5)
+        self.assertEqual(persisted["version"], 6)
 
     async def test_version_four_discussion_migrates_as_free_discussion(self):
         game = await self.configured_six_player_game(start=False)

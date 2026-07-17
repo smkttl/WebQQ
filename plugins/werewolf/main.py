@@ -5,14 +5,16 @@ import math
 import os
 import random
 import re
+import time
 from pathlib import Path
 from urllib.parse import urljoin
 
 import aiohttp
 
 
-STATE_VERSION = 5
-SUPPORTED_STATE_VERSIONS = (1, 2, 3, 4, STATE_VERSION)
+STATE_VERSION = 6
+SUPPORTED_STATE_VERSIONS = (1, 2, 3, 4, 5, STATE_VERSION)
+NIGHT_ROLE_SECONDS = 45
 DEFAULT_AI_NAMES = [
     "Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace",
     "Helen", "Ivy", "Jack", "Kate", "Leo",
@@ -106,6 +108,12 @@ COPYABLE_ROLES = {
     "magician", "crow", "silencer", "wolf_beauty", "blood_moon", "gargoyle", "wolf_witch",
     "piper",
 }
+INITIAL_NIGHT_ROLE_TYPES = {
+    "seer", "guard", "cupid", "dreamer", "magician", "crow", "silencer",
+    "wolf_beauty", "gargoyle", "wolf_witch", "mechanical_wolf", "piper",
+    "wild_child", "mixed_blood",
+} | WOLF_ROLES
+FIRST_NIGHT_ONLY_ROLE_TYPES = {"cupid", "mechanical_wolf", "wild_child", "mixed_blood"}
 
 ROLE_HELP = {
     "villager": "没有夜间技能，通过发言和投票找出狼人。",
@@ -223,14 +231,12 @@ class WerewolfPlugin:
         self.virtual_driver_wakes = {}
         self.preflight_tasks = {}
         self.configuration_tasks = {}
+        self.night_deadline_tasks = {}
         self.resume_task = None
         self.state, migrated = self._load_state()
         if migrated:
             self._save()
-        if any(
-            game.get("phase") != "ended" and any(player.get("virtual") for player in game.get("players", []))
-            for game in self.state["games"].values()
-        ):
+        if any(game.get("phase") != "ended" for game in self.state["games"].values()):
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -295,6 +301,8 @@ class WerewolfPlugin:
             game.setdefault("speech_state", None)
             game.setdefault("pending_last_words", [])
             game.setdefault("dawn_deaths", [])
+            game.setdefault("night_timing", None)
+            game.setdefault("night_timing_revision", 0)
             if game.pop("ai_preflight_pending", False):
                 migrated = True
             game.setdefault("host_action_proposal", None)
@@ -558,6 +566,7 @@ class WerewolfPlugin:
         if not game:
             await self._safe_send(chat_id, f"当前群没有游戏。发送 {self.prefix} 创建 开房。")
             return
+        await self._expire_night_if_due(game)
         if (
             game.get("phase") == "discussion"
             and self._is_silenced(game, self._player(game, user_id))
@@ -743,6 +752,7 @@ class WerewolfPlugin:
             await self._safe_send(chat_id, "你当前没有参加进行中的狼人杀游戏。")
             return
         player = self._player(game, user_id)
+        await self._expire_night_if_due(game)
         if command == "状态":
             delivered = await self._send_private(game, player, self._private_status(game, player))
             if delivered and game["phase"] == "dealing" and player.get("role"):
@@ -845,6 +855,8 @@ class WerewolfPlugin:
             "day": 0,
             "intro_index": 0,
             "night_actions": {},
+            "night_timing": None,
+            "night_timing_revision": 0,
             "votes": {},
             "ready": [],
             "pending_shots": [],
@@ -1842,7 +1854,7 @@ class WerewolfPlugin:
         role_rules = "\n".join(f"- {ROLE_NAMES[role]}：{ROLE_HELP[role]}" for role in configured)
         return (
             "【狼人杀规则】\n"
-            f"夜间角色通过临时会话行动；全部必要行动完成后自动结算。每天先进行死亡发言和随机起点的顺序发言，每人发送 {self.prefix} 过结束当前发言；随后进入自由讨论，达到结束自由发言阈值后进入私密投票。\n"
+            f"夜间角色通过临时会话行动。非讨论角色的阶段配额为 45 秒；狼队讨论配额为配置中狼人阵营牌数× 45 秒，同一阶段取最长配额。阶段即使提前完成也会等到截止时间，超时视为跳过；时间始终按开局公开配置保留，不随角色死亡变化。每天先进行死亡发言和随机起点的顺序发言，每人发送 {self.prefix} 过结束当前发言；随后进入自由讨论，达到结束自由发言阈值后进入私密投票。\n"
             "守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
             "骑士在白天讨论时可公开决斗一次：目标是狼人则该狼人死亡且不能发动死亡技能，随后入夜；目标不是狼人则骑士死亡，讨论继续。\n"
             "白狼王属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家；两人死亡并结算死亡技能后直接入夜。\n"
@@ -1905,10 +1917,126 @@ class WerewolfPlugin:
         lines.append("身份信息仅供本人查看，请勿在群内转发机器人私聊。")
         return "\n".join(lines)
 
+    @staticmethod
+    def _configured_role_count(game, roles):
+        return sum(
+            int(count or 0)
+            for role, count in game.get("settings", {}).get("roles", {}).items()
+            if role in roles
+        )
+
+    def _night_stage_role_types(self, game, stage):
+        configured = game.get("settings", {}).get("roles", {})
+        if stage == "witch":
+            return ["witch"] if int(configured.get("witch") or 0) > 0 else []
+        roles = []
+        for role, count in configured.items():
+            if int(count or 0) <= 0 or role not in INITIAL_NIGHT_ROLE_TYPES:
+                continue
+            if role in FIRST_NIGHT_ONLY_ROLE_TYPES and int(game.get("night") or 0) != 1:
+                if role not in WOLF_ROLES:
+                    continue
+            roles.append(role)
+        return roles
+
+    def _night_stage_duration(self, game, stage):
+        if stage == "witch":
+            return NIGHT_ROLE_SECONDS if self._night_stage_role_types(game, stage) else 0
+        wolf_count = self._configured_role_count(game, WOLF_ROLES)
+        wolf_seconds = NIGHT_ROLE_SECONDS * wolf_count
+        has_other = any(role not in WOLF_ROLES for role in self._night_stage_role_types(game, stage))
+        return max(wolf_seconds, NIGHT_ROLE_SECONDS if has_other else 0)
+
+    def _start_night_timing(self, game, stage, started_at=None):
+        started_at = float(time.time() if started_at is None else started_at)
+        duration = self._night_stage_duration(game, stage)
+        game["night_timing_revision"] = int(game.get("night_timing_revision") or 0) + 1
+        game["night_timing"] = {
+            "night": int(game.get("night") or 0),
+            "stage": stage,
+            "started_at": started_at,
+            "deadline": started_at + duration,
+            "duration": duration,
+            "revision": game["night_timing_revision"],
+        }
+        self._save()
+        self._schedule_night_deadline(game["chat_id"])
+
+    def _schedule_night_deadline(self, chat_id):
+        game = self.state["games"].get(chat_id)
+        timing = game.get("night_timing") if game else None
+        if not timing or game.get("phase") not in ("night_actions", "witch"):
+            return False
+        existing = self.night_deadline_tasks.get(chat_id)
+        current = asyncio.current_task()
+        if existing and existing is not current and not existing.done():
+            existing.cancel()
+        token = (timing["night"], timing["stage"], timing["revision"])
+        task = asyncio.create_task(self._run_night_deadline(chat_id, token))
+        self.night_deadline_tasks[chat_id] = task
+
+        def cleanup(completed):
+            if self.night_deadline_tasks.get(chat_id) is completed:
+                self.night_deadline_tasks.pop(chat_id, None)
+            if not completed.cancelled() and completed.exception():
+                self.ctx.log(f"night deadline task failed for {chat_id}: {completed.exception()}")
+
+        task.add_done_callback(cleanup)
+        return True
+
+    async def _run_night_deadline(self, chat_id, token):
+        should_drive = False
+        while True:
+            game = self.state["games"].get(chat_id)
+            timing = game.get("night_timing") if game else None
+            if not timing or (timing.get("night"), timing.get("stage"), timing.get("revision")) != token:
+                return
+            delay = float(timing.get("deadline") or 0) - time.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+                continue
+            async with self.lock:
+                game = self.state["games"].get(chat_id)
+                timing = game.get("night_timing") if game else None
+                if not timing or (timing.get("night"), timing.get("stage"), timing.get("revision")) != token:
+                    return
+                if time.time() < float(timing.get("deadline") or 0):
+                    continue
+                await self._expire_night_stage(game)
+                should_drive = game.get("phase") != "ended" and any(
+                    player.get("virtual") for player in game.get("players", [])
+                )
+            if should_drive:
+                self._schedule_virtual_driver(chat_id)
+            return
+
+    def _night_stage_open(self, game, stage):
+        timing = game.get("night_timing") or {}
+        return (
+            timing.get("stage") == stage
+            and int(timing.get("night") or 0) == int(game.get("night") or 0)
+            and time.time() < float(timing.get("deadline") or 0)
+        )
+
+    def _night_stage_accepting_actions(self, game, stage):
+        if not game.get("night_timing"):
+            return True
+        return self._night_stage_open(game, stage)
+
+    async def _expire_night_if_due(self, game):
+        timing = game.get("night_timing")
+        if not timing or game.get("phase") not in ("night_actions", "witch"):
+            return False
+        if time.time() < float(timing.get("deadline") or 0):
+            return False
+        await self._expire_night_stage(game)
+        return True
+
     async def _begin_night(self, game):
         game["night"] = int(game.get("night") or 0) + 1
         game["phase"] = "night_actions"
         game["night_actions"] = {"wolves": {}}
+        game["night_timing"] = None
         game["ready"] = []
         game["votes"] = {}
         game["silenced_id"] = None
@@ -1930,12 +2058,17 @@ class WerewolfPlugin:
         ]
         self._record_action(game, "夜晚开始。")
         self._save()
-        night_text = f"第 {game['night']} 夜开始。\n{self._seat_list(game, include_status=True)}"
+        duration = self._night_stage_duration(game, "initial")
+        night_text = (
+            f"第 {game['night']} 夜开始。首阶段固定 {duration} 秒。\n"
+            f"{self._seat_list(game, include_status=True)}"
+        )
         vote_patterns = self._vote_patterns_text(game)
         if vote_patterns:
             night_text = f"{vote_patterns}\n\n{night_text}"
         await self._safe_send(game["chat_id"], night_text)
         await self._send_night_prompts(game)
+        self._start_night_timing(game, "initial")
         await self._maybe_finish_initial_night(game)
 
     async def _send_night_prompts(self, game):
@@ -1950,10 +2083,12 @@ class WerewolfPlugin:
         for spec in self._night_decision_specs(game):
             if self._night_spec_complete(game, spec):
                 continue
+            duration = self._night_stage_duration(game, "initial")
             await self._send_private(
                 game,
                 spec["player"],
-                f"第 {game['night']} 夜。{self._night_spec_prompt(game, spec)}",
+                f"第 {game['night']} 夜。{self._night_spec_prompt(game, spec)}\n"
+                f"本阶段固定 {duration} 秒，截止前可修改选择。",
             )
 
     def _night_decision_specs(self, game):
@@ -2050,6 +2185,7 @@ class WerewolfPlugin:
         return {"good": "好人阵营", "wolf": "狼人阵营", "neutral": "第三方阵营"}[camp]
 
     async def _night_action(self, game, player, command, args):
+        await self._expire_night_if_due(game)
         if game["phase"] != "night_actions" or not player.get("alive"):
             await self._private_error(game, player, "当前不能执行该夜间操作。")
             return
@@ -2141,6 +2277,7 @@ class WerewolfPlugin:
         return specs[0] if specs else None
 
     async def _special_night_action(self, game, player, command, args):
+        await self._expire_night_if_due(game)
         if game.get("phase") != "night_actions" or not player.get("alive"):
             await self._private_error(game, player, "当前不能执行该夜间操作。")
             return
@@ -2266,18 +2403,93 @@ class WerewolfPlugin:
         specs = self._night_decision_specs(game)
         if not all(self._night_spec_complete(game, spec) for spec in specs):
             return
+        if game.get("night_timing"):
+            return
+        await self._enter_witch_stage(game, specs, timed=False)
+
+    def _fill_missing_initial_actions(self, game, record_timeouts=False):
+        actions = game["night_actions"]
+        for spec in self._night_decision_specs(game):
+            if self._night_spec_complete(game, spec):
+                continue
+            if spec["kind"] == "wolf":
+                actions.setdefault("wolves", {})[spec["key"]] = None
+            else:
+                actions[spec["key"]] = None
+            if record_timeouts:
+                self._record_action(
+                    game,
+                    f"{self._history_player_label(spec['player'])}夜间{ROLE_NAMES[spec['source_role']]}行动超时，视为跳过。",
+                )
+
+    async def _enter_witch_stage(self, game, specs, timed, started_at=None):
         await self._resolve_initial_night_actions(game, specs)
         game["phase"] = "witch"
         self._save()
         witch_specs = self._witch_specs(game)
-        if not witch_specs:
+        game["night_actions"]["witch_actor_keys"] = [spec["key"] for spec in witch_specs]
+        self._save()
+        if not timed and not witch_specs:
             self._record_action(game, "女巫类技能无可执行操作，系统自动跳过。")
             await self._resolve_night(game)
             return
-        game["night_actions"]["witch_actor_keys"] = [spec["key"] for spec in witch_specs]
-        self._save()
+        if timed:
+            self._start_night_timing(game, "witch", started_at=started_at)
+            timing = game.get("night_timing") or {}
+            if time.time() >= float(timing.get("deadline") or 0):
+                await self._expire_night_stage(game)
+                return
         for spec in witch_specs:
-            await self._send_private(game, spec["player"], self._witch_prompt_for_spec(game, spec))
+            duration = self._night_stage_duration(game, "witch")
+            await self._send_private(
+                game,
+                spec["player"],
+                f"{self._witch_prompt_for_spec(game, spec)}\n本阶段固定 {duration} 秒，首次有效提交后锁定。",
+            )
+
+    async def _expire_night_stage(self, game):
+        timing = game.get("night_timing") or {}
+        stage = timing.get("stage")
+        if stage == "initial" and game.get("phase") == "night_actions":
+            self._cancel_virtual_driver_task(game["chat_id"])
+            self._fill_missing_initial_actions(game, record_timeouts=True)
+            self._save()
+            specs = self._night_decision_specs(game)
+            await self._enter_witch_stage(
+                game,
+                specs,
+                timed=True,
+                started_at=float(timing.get("deadline") or time.time()),
+            )
+            return
+        if stage == "witch" and game.get("phase") == "witch":
+            self._cancel_virtual_driver_task(game["chat_id"])
+            actions = game["night_actions"]
+            for key in actions.get("witch_actor_keys") or []:
+                if key in actions:
+                    continue
+                actions[key] = {"heal": False, "poison": None}
+                actor = self._witch_actor_for_key(game, key)
+                if actor:
+                    self._record_action(
+                        game,
+                        f"{self._history_player_label(actor)}夜间女巫行动超时，视为不使用药物。",
+                    )
+            game["night_timing"] = None
+            self._save()
+            await self._resolve_night(game)
+
+    def _witch_actor_for_key(self, game, key):
+        if key == "witch":
+            return self._living_role(game, "witch") or next(
+                (player for player in game["players"] if player.get("role") == "witch"), None
+            )
+        if key.startswith("copy:"):
+            try:
+                return self._by_seat(game, int(key.split(":", 2)[1]))
+            except (TypeError, ValueError):
+                return None
+        return None
 
     async def _resolve_initial_night_actions(self, game, specs):
         actions = game["night_actions"]
@@ -2402,12 +2614,16 @@ class WerewolfPlugin:
         return self._witch_prompt(game, spec["player"])
 
     async def _witch_action(self, game, player, command, args):
+        await self._expire_night_if_due(game)
         if game["phase"] != "witch" or not player.get("alive") or not self._has_ability(player, "witch"):
             await self._private_error(game, player, "当前不能使用女巫技能。")
             return
         key = self._night_action_key(player, "witch", "witch")
         if key not in game.get("night_actions", {}).get("witch_actor_keys", []):
             await self._private_error(game, player, "你本夜没有可用的女巫操作。")
+            return
+        if key in game.get("night_actions", {}):
+            await self._private_error(game, player, "你本夜的女巫操作已锁定，不能修改。")
             return
         wolf_target = game["night_actions"].get("wolf_target")
         resources = self._witch_resources(game, player)
@@ -2457,10 +2673,12 @@ class WerewolfPlugin:
         self._save()
         await self._private_ack(game, player, "女巫操作已确认。")
         keys = game["night_actions"].get("witch_actor_keys") or []
-        if all(key in game["night_actions"] for key in keys):
+        if not game.get("night_timing") and all(key in game["night_actions"] for key in keys):
             await self._resolve_night(game)
 
     async def _resolve_night(self, game):
+        game["night_timing"] = None
+        self._cancel_night_deadline_task(game["chat_id"])
         actions = game["night_actions"]
         wolf_target = actions.get("wolf_target")
         guards = set(actions.get("resolved_guards") or [])
@@ -3302,7 +3520,12 @@ class WerewolfPlugin:
         await self._send_private(game, angel, "你未在第一天被公投，天使胜利条件失效；你现在是普通村民。")
 
     async def _wolf_relay(self, game, player, text):
-        if game["phase"] not in ("night_actions", "witch") or not self._is_active_pack_wolf(player):
+        await self._expire_night_if_due(game)
+        if (
+            game["phase"] != "night_actions"
+            or not self._night_stage_accepting_actions(game, "initial")
+            or not self._is_active_pack_wolf(player)
+        ):
             await self._private_error(game, player, "当前不能使用狼聊。")
             return
         text = text.strip()
@@ -3351,12 +3574,7 @@ class WerewolfPlugin:
             await self._begin_vote(game, 1, None)
         elif phase == "night_actions":
             self._record_action(game, "房主强制补全未提交的夜间行动。")
-            actions = game["night_actions"]
-            for spec in self._night_decision_specs(game):
-                if spec["kind"] == "wolf":
-                    actions.setdefault("wolves", {}).setdefault(spec["key"], None)
-                else:
-                    actions.setdefault(spec["key"], None)
+            self._fill_missing_initial_actions(game)
             self._save()
             await self._maybe_finish_initial_night(game)
         elif phase == "witch":
@@ -3364,7 +3582,8 @@ class WerewolfPlugin:
             for key in game["night_actions"].get("witch_actor_keys") or []:
                 game["night_actions"].setdefault(key, {"heal": False, "poison": None})
             self._save()
-            await self._resolve_night(game)
+            if not game.get("night_timing"):
+                await self._resolve_night(game)
         elif phase == "vote":
             self._record_action(game, "房主强制未投票玩家弃票并结算投票。")
             for voter in self._eligible_voters(game):
@@ -3469,11 +3688,23 @@ class WerewolfPlugin:
 
     def _cancel_virtual_tasks(self, chat_id):
         current = asyncio.current_task()
-        for tasks in (self.virtual_driver_tasks, self.preflight_tasks, self.configuration_tasks):
+        self._cancel_virtual_driver_task(chat_id)
+        for tasks in (self.preflight_tasks, self.configuration_tasks):
             task = tasks.get(chat_id)
             if task and task is not current and not task.done():
                 task.cancel()
+        self._cancel_night_deadline_task(chat_id)
+
+    def _cancel_virtual_driver_task(self, chat_id):
+        task = self.virtual_driver_tasks.pop(chat_id, None)
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
         self.virtual_driver_wakes.pop(chat_id, None)
+
+    def _cancel_night_deadline_task(self, chat_id):
+        task = self.night_deadline_tasks.pop(chat_id, None)
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
 
     def _result_winner_ids(self, game, winner):
         if winner == "terminated":
@@ -3895,6 +4126,14 @@ class WerewolfPlugin:
             f"  - {ROLE_NAMES[role]}: {ROLE_HELP[role]}"
             for role, count in counts.items() if int(count)
         )
+        timing = game.get("night_timing") or {}
+        timing_rule = ""
+        if timing:
+            remaining = max(0, math.ceil(float(timing.get("deadline") or 0) - time.time()))
+            timing_rule = (
+                f"- The current night stage has {remaining} seconds remaining. Submit the required action now; "
+                "results arriving after the fixed deadline are discarded and unresolved actions pass.\n"
+            )
         return (
             "Authoritative game rules and public state:\n"
             f"- Current phase: {game.get('phase')}; night {game.get('night', 0)}; day {game.get('day', 0)}; "
@@ -3905,6 +4144,7 @@ class WerewolfPlugin:
             f"Votes are submitted privately. {ballot_visibility}\n"
             f"- Tie rule: {tie}.\n"
             f"- Abstention rule: {abstention_rule}\n"
+            f"{timing_rule}"
             "- Phase flow: setup and initial night abilities resolve first, then all ordinary night targets are redirected "
             "and fixed; witch-type abilities act after the wolf target is fixed. Living active-pack wolves submit individual kill choices; plurality selects the victim and a "
             "top tie means no wolf kill. Night deaths resolve together before triggered shots and victory checks. "
@@ -4380,7 +4620,7 @@ class WerewolfPlugin:
             return work, False
 
     def _next_virtual_work(self, game):
-        if game.get("phase") in ("night_actions", "witch"):
+        if game.get("phase") == "night_actions" and self._night_stage_accepting_actions(game, "initial"):
             pending_wolves = game.setdefault("ai_pending_wolf_replies", [])
             valid_ids = {
                 player["user_id"] for player in self._wolf_pack(game)
@@ -4446,6 +4686,8 @@ class WerewolfPlugin:
         if kind == "wolf_chat":
             if int(game.get("wolf_chat_revision") or 0) != work["wolf_chat_revision"]:
                 return False
+            if not self._night_stage_accepting_actions(game, "initial"):
+                return False
             return player["user_id"] in game.get("ai_pending_wolf_replies", [])
         return self._ai_decision_pending(game, player, kind, work["phase_token"])
 
@@ -4498,16 +4740,27 @@ class WerewolfPlugin:
                     break
                 await asyncio.sleep(1)
             else:
-                self.ctx.log("autonomous game resume deferred because NapCat did not connect")
+                self.ctx.log("game resume deferred because NapCat did not connect")
                 return
-        for chat_id, game in list(self.state["games"].items()):
-            if (
-                game.get("phase") == "ended"
-                or not any(player.get("virtual") for player in game.get("players", []))
-            ):
-                continue
-            self.ctx.log(f"resuming virtual game for {chat_id}")
-            self._schedule_virtual_driver(chat_id)
+        for chat_id in list(self.state["games"]):
+            async with self.lock:
+                game = self.state["games"].get(chat_id)
+                if not game or game.get("phase") == "ended":
+                    continue
+                if game.get("phase") in ("night_actions", "witch"):
+                    stage = "initial" if game["phase"] == "night_actions" else "witch"
+                    if not game.get("night_timing"):
+                        self.ctx.log(f"starting migrated night deadline for {chat_id}")
+                        self._start_night_timing(game, stage)
+                    elif time.time() >= float(game["night_timing"].get("deadline") or 0):
+                        self.ctx.log(f"catching up expired night deadline for {chat_id}")
+                        await self._expire_night_stage(game)
+                    else:
+                        self._schedule_night_deadline(chat_id)
+                has_virtual = any(player.get("virtual") for player in game.get("players", []))
+            if has_virtual:
+                self.ctx.log(f"resuming virtual game for {chat_id}")
+                self._schedule_virtual_driver(chat_id)
 
     def _pending_virtual_decisions(self, game):
         phase = game.get("phase")
@@ -4522,6 +4775,8 @@ class WerewolfPlugin:
             if thief and thief.get("virtual"):
                 pending.append((thief, "thief"))
         elif phase == "night_actions":
+            if not self._night_stage_accepting_actions(game, "initial"):
+                return pending
             actions = game["night_actions"]
             human_wolves = [item for item in self._wolf_pack(game) if not item.get("virtual")]
             humans_ready = all(item["user_id"] in actions.get("wolves", {}) for item in human_wolves)
@@ -4538,6 +4793,8 @@ class WerewolfPlugin:
             }
             pending.sort(key=lambda item: (priority.get(item[1], 99), item[0]["seat"]))
         elif phase == "witch":
+            if not self._night_stage_accepting_actions(game, "witch"):
+                return pending
             actions = game["night_actions"]
             for key in actions.get("witch_actor_keys") or []:
                 if key in actions:
@@ -4578,6 +4835,7 @@ class WerewolfPlugin:
             (game.get("pending_shots") or [None])[0],
             speech_queue[0] if speech_queue else None,
             int(game.get("speech_revision") or 0),
+            int((game.get("night_timing") or {}).get("revision") or 0),
         )
 
     def _ai_decision_pending(self, game, player, kind, token):
@@ -4723,7 +4981,7 @@ class WerewolfPlugin:
             player for player in self._wolf_pack(game)
             if player.get("virtual") and int(player.get("ai_wolf_replies") or 0) < 3
         ]
-        if not candidates or game.get("phase") not in ("night_actions", "witch"):
+        if not candidates or game.get("phase") != "night_actions":
             return
         player = sorted(candidates, key=lambda item: item["seat"])[0]
         pending = game.setdefault("ai_pending_wolf_replies", [])
@@ -4732,7 +4990,7 @@ class WerewolfPlugin:
         self._save()
 
     async def _open_virtual_wolf_chat(self, game):
-        if game.get("phase") not in ("night_actions", "witch"):
+        if game.get("phase") != "night_actions":
             return
         candidates = sorted(
             (
@@ -4787,8 +5045,28 @@ class WerewolfPlugin:
             pending = [player.get("role") for player in game["players"] if not player.get("identity_delivered")]
             return "等待身份送达角色：" + self._format_role_blockers(pending)
         if game["phase"] == "night_actions":
-            return "等待行动角色：" + self._format_role_blockers(self._pending_night_roles(game))
+            timing = game.get("night_timing") or {}
+            if timing.get("stage") == "initial":
+                roles = self._night_stage_role_types(game, "initial")
+                remaining = max(0, math.ceil(float(timing.get("deadline") or 0) - time.time()))
+                return (
+                    "等待行动角色："
+                    + self._format_role_blockers(roles, include_counts=False)
+                    + f"；本阶段剩余 {remaining} 秒"
+                )
+            return "等待行动角色：" + self._format_role_blockers(
+                self._pending_night_roles(game), include_counts=False
+            )
         if game["phase"] == "witch":
+            timing = game.get("night_timing") or {}
+            if timing.get("stage") == "witch":
+                roles = self._night_stage_role_types(game, "witch")
+                remaining = max(0, math.ceil(float(timing.get("deadline") or 0) - time.time()))
+                return (
+                    "等待行动角色："
+                    + self._format_role_blockers(roles, include_counts=False)
+                    + f"；本阶段剩余 {remaining} 秒"
+                )
             pending = []
             keys = game.get("night_actions", {}).get("witch_actor_keys") or []
             for key in keys:
@@ -4798,10 +5076,12 @@ class WerewolfPlugin:
                     pending.append("witch")
                 elif key.startswith("copy:"):
                     pending.append("mechanical_wolf")
-            return "等待行动角色：" + self._format_role_blockers(pending)
+            return "等待行动角色：" + self._format_role_blockers(pending, include_counts=False)
         if game["phase"] == "death_shot":
             shooter = self._player(game, (game.get("pending_shots") or [None])[0])
-            return "等待行动角色：" + self._format_role_blockers([shooter.get("role") if shooter else None])
+            return "等待行动角色：" + self._format_role_blockers(
+                [shooter.get("role") if shooter else None], include_counts=False
+            )
         if game["phase"] == "speech":
             state = game.get("speech_state") or {}
             current = self._player(game, (state.get("queue") or [None])[0])
@@ -4814,11 +5094,11 @@ class WerewolfPlugin:
             }.get(state.get("kind"), "发言")
             return f"等待{reason}：{current['seat']}号 {current['name']}"
         if game["phase"] == "vote":
-            pending = [
-                voter.get("role") for voter in self._eligible_voters(game)
-                if voter["user_id"] not in game.get("votes", {})
-            ]
-            return "等待投票角色：" + self._format_role_blockers(pending)
+            pending_count = sum(
+                voter["user_id"] not in game.get("votes", {})
+                for voter in self._eligible_voters(game)
+            )
+            return f"等待投票：还有 {pending_count} 名玩家未投票。"
         if game["phase"] == "discussion":
             remaining = max(0, self._ready_needed(game) - len(game.get("ready", [])))
             return f"等待结束自由发言：还需 {remaining} 名存活玩家（任意角色）"
@@ -4838,13 +5118,15 @@ class WerewolfPlugin:
         return [spec["player"]["role"] for spec in pending]
 
     @staticmethod
-    def _format_role_blockers(roles):
+    def _format_role_blockers(roles, include_counts=True):
         counts = {}
         for role in roles:
             name = ROLE_NAMES.get(role, "系统结算")
             counts[name] = counts.get(name, 0) + 1
         if not counts:
             return "无（正在结算）"
+        if not include_counts:
+            return "、".join(counts)
         return "、".join(f"{name}×{count}" if count > 1 else name for name, count in counts.items())
 
     def _private_status(self, game, player):
@@ -4909,6 +5191,9 @@ class WerewolfPlugin:
                 return "\n".join("当前操作：" + self._night_spec_prompt(game, spec) for spec in pending)
             return "本夜所需操作已经全部提交。"
         if phase == "witch" and self._has_ability(player, "witch"):
+            key = self._night_action_key(player, "witch", "witch")
+            if key in game.get("night_actions", {}):
+                return "本夜女巫操作已经提交并锁定。"
             return self._witch_prompt(game, player)
         if phase == "discussion" and self._has_ability(player, "knight") and not self._skill_used(player, "knight"):
             return f"公开技能：在群聊发送 {self.prefix} 决斗 <座位>；每局限一次。"
