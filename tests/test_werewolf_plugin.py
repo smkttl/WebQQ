@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import tempfile
 import unittest
@@ -124,6 +125,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
                 task for task in (
                     list(getattr(self.plugin, "preflight_tasks", {}).values())
                     + list(getattr(self.plugin, "virtual_driver_tasks", {}).values())
+                    + list(getattr(self.plugin, "configuration_tasks", {}).values())
                 )
                 if not task.done()
             ]
@@ -136,6 +138,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
                 for task in (
                     list(getattr(self.plugin, "preflight_tasks", {}).values())
                     + list(getattr(self.plugin, "virtual_driver_tasks", {}).values())
+                    + list(getattr(self.plugin, "configuration_tasks", {}).values())
                 )
             ):
                 return
@@ -379,6 +382,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             "女巫自救1": ("女巫自救", ["1"]),
             "添加AI4": ("添加AI", ["4"]),
             "狼聊今晚考虑4号": ("狼聊", ["今晚考虑4号"]),
+            "自动配置沿用上一局，但把女巫换成守卫": ("自动配置", ["沿用上一局，但把女巫换成守卫"]),
         }
         for command_text, expected in cases.items():
             with self.subTest(command_text=command_text):
@@ -658,6 +662,168 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("丘比特、骑士", text)
         self.assertIn("骑士、白狼王", text)
         self.assertIn("数量为 1 时可省略“=1”", text)
+
+    async def test_automatic_configuration_uses_previous_game_and_applies_valid_result(self):
+        self.use_virtual_plugin(enabled=False)
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        previous = {
+            "player_count": 6,
+            "configuration": (
+                "村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 "
+                "胜利=屠边 狼刀狼人=是 显示票型=1 弃票过半=1"
+            ),
+        }
+        self.plugin.state["last_configs"]["group_123"] = previous
+        self.plugin._save()
+        self.plugin._call_configuration_llm = AsyncMock(return_value=json.dumps({
+            "status": "ok",
+            "configuration": (
+                "村民=3 狼人=1 预言家=1 守卫=1 平票=2 自救=1 双药=否 "
+                "胜利=屠城 狼刀狼人=是 显示票型=1 弃票过半=1"
+            ),
+        }, ensure_ascii=False))
+
+        await self.group(1, "/wolf 自动配置 沿用上一局，但把女巫换成守卫并改成屠城", "Host")
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["roles"]["guard"], 1)
+        self.assertEqual(game["settings"]["roles"]["witch"], 0)
+        self.assertEqual(game["settings"]["victory"], "slaughter_city")
+        messages = self.plugin._call_configuration_llm.await_args.args[0]
+        self.assertIn("You are not a player", messages[0]["content"])
+        model_input = json.loads(messages[1]["content"])
+        self.assertEqual(model_input["previous_game_configuration"], previous)
+        self.assertEqual(model_input["request"], "沿用上一局，但把女巫换成守卫并改成屠城")
+        self.assertEqual(model_input["current_player_count"], 6)
+        self.assertTrue(any("配置完成" in item["text"] for item in self.ctx.sent))
+
+    async def test_automatic_configuration_call_uses_virtual_player_connection(self):
+        self.use_virtual_plugin(
+            enabled=False,
+            api_key="shared-key",
+            base_url="http://shared.test/v1",
+            model="shared-model",
+            temperature=0.25,
+            max_tokens=777,
+            timeout_seconds=42,
+        )
+        self.plugin._call_chat_completion = AsyncMock(return_value='{"status":"ambiguous","message":"x"}')
+        messages = [{"role": "user", "content": "test"}]
+
+        await self.plugin._call_configuration_llm(messages)
+
+        call = self.plugin._call_chat_completion.await_args
+        self.assertEqual(call.args[0], messages)
+        self.assertIs(call.args[1], self.plugin.virtual_config)
+        self.assertEqual(call.args[1]["api_key"], "shared-key")
+        self.assertEqual(call.args[1]["base_url"], "http://shared.test/v1")
+        self.assertEqual(call.args[1]["model"], "shared-model")
+        self.assertEqual(call.args[2:], (0.25, 777, 42.0))
+
+    async def test_automatic_configuration_reports_ambiguity_without_mutation(self):
+        self.use_virtual_plugin(enabled=False)
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        game = self.plugin.state["games"]["group_123"]
+        original_settings = copy.deepcopy(game["settings"])
+        self.plugin._call_configuration_llm = AsyncMock(return_value=json.dumps({
+            "status": "ambiguous",
+            "message": "请说明要使用屠边还是屠城。",
+        }, ensure_ascii=False))
+
+        await self.group(1, "/wolf 自动配置 来一局常规板子", "Host")
+
+        self.assertEqual(game["phase"], "lobby")
+        self.assertEqual(game["settings"], original_settings)
+        self.assertIn("自动配置需要你确认：请说明要使用屠边还是屠城", self.ctx.sent[-1]["text"])
+        model_input = json.loads(self.plugin._call_configuration_llm.await_args.args[0][1]["content"])
+        self.assertIsNone(model_input["previous_game_configuration"])
+
+    async def test_automatic_configuration_retries_invalid_output_without_mutation(self):
+        self.use_virtual_plugin(enabled=False, max_retries=1)
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        game = self.plugin.state["games"]["group_123"]
+        original_settings = copy.deepcopy(game["settings"])
+        self.plugin._call_configuration_llm = AsyncMock(side_effect=[
+            "not json",
+            json.dumps({
+                "status": "ok",
+                "configuration": (
+                    "村民=6 平票=2 自救=1 双药=否 胜利=屠边 "
+                    "狼刀狼人=是 显示票型=1 弃票过半=1"
+                ),
+            }, ensure_ascii=False),
+        ])
+
+        await self.group(1, "/wolf 自动配置 使用全村民板子", "Host")
+
+        self.assertEqual(self.plugin._call_configuration_llm.await_count, 2)
+        self.assertEqual(game["phase"], "lobby")
+        self.assertEqual(game["settings"], original_settings)
+        self.assertIn("自动配置失败，原配置未改变", self.ctx.sent[-1]["text"])
+
+    async def test_automatic_configuration_is_nonblocking_deduplicated_and_discards_stale_result(self):
+        self.use_virtual_plugin(enabled=False)
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        game = self.plugin.state["games"]["group_123"]
+        request_started = asyncio.Event()
+        release_request = asyncio.Event()
+
+        async def held_configuration(messages):
+            request_started.set()
+            await release_request.wait()
+            return json.dumps({
+                "status": "ok",
+                "configuration": (
+                    "村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 "
+                    "胜利=屠边 狼刀狼人=是 显示票型=1 弃票过半=1"
+                ),
+            }, ensure_ascii=False)
+
+        self.plugin._call_configuration_llm = AsyncMock(side_effect=held_configuration)
+        await asyncio.wait_for(
+            self.group_without_wait(1, "/wolf 自动配置 沿用上一局", "Host"),
+            timeout=1,
+        )
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+        task = self.plugin.configuration_tasks["group_123"]
+
+        await asyncio.wait_for(self.group_without_wait(1, "/wolf 状态", "Host"), timeout=1)
+        await asyncio.wait_for(
+            self.group_without_wait(1, "/wolf 自动配置 改成屠城", "Host"),
+            timeout=1,
+        )
+        self.assertIs(self.plugin.configuration_tasks["group_123"], task)
+        self.assertEqual(self.plugin._call_configuration_llm.await_count, 1)
+        self.assertTrue(any("自动配置正在处理中" in item["text"] for item in self.ctx.sent))
+
+        await asyncio.wait_for(self.group_without_wait(7, "/wolf 加入"), timeout=1)
+        release_request.set()
+        await self.wait_for_virtual_tasks()
+
+        self.assertEqual(game["phase"], "lobby")
+        self.assertEqual(len(game["players"]), 7)
+        self.assertTrue(any("本次自动配置结果已丢弃" in item["text"] for item in self.ctx.sent))
+
+    async def test_last_configuration_survives_end_clear_and_restart(self):
+        game = await self.configured_six_player_game(start=False)
+        expected = self.plugin._configuration_snapshot(game)
+
+        await self.group(1, "/wolf 结束", "Host")
+        self.assertEqual(self.plugin.state["last_configs"]["group_123"], expected)
+        await self.group(1, "/wolf 清理", "Host")
+        self.assertNotIn("group_123", self.plugin.state["games"])
+
+        restarted = WerewolfPlugin(FakeContext(), state_path=self.state_path, rng=StableRandom())
+        self.assertEqual(restarted.state["last_configs"]["group_123"], expected)
 
     async def test_legacy_staged_setup_uses_new_optional_defaults(self):
         await self.group(1, "/wolf 创建", "Host")
@@ -2410,7 +2576,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         plugin = WerewolfPlugin(FakeContext(), state_path=migration_path, rng=StableRandom())
 
-        self.assertEqual(plugin.state["version"], 3)
+        self.assertEqual(plugin.state["version"], 4)
         player = plugin.state["games"]["group_9"]["players"][0]
         self.assertFalse(player["virtual"])
         self.assertEqual(player["ai_daily_replies"], 0)
@@ -2422,7 +2588,22 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plugin.state["games"]["group_9"]["settings"]["abstention_majority_no_exile"])
         self.assertEqual(plugin.state["games"]["group_9"]["vote_patterns"], [])
         persisted = json.loads(migration_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 3)
+        self.assertEqual(persisted["version"], 4)
+
+    async def test_version_three_ended_game_backfills_last_configuration(self):
+        game = await self.configured_six_player_game(start=False)
+        expected = self.plugin._configuration_snapshot(game)
+        await self.group(1, "/wolf 结束", "Host")
+        legacy = json.loads(self.state_path.read_text(encoding="utf-8"))
+        legacy["version"] = 3
+        legacy.pop("last_configs", None)
+        self.state_path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+        restarted = WerewolfPlugin(FakeContext(), state_path=self.state_path, rng=StableRandom())
+
+        self.assertEqual(restarted.state["last_configs"]["group_123"], expected)
+        persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["version"], 4)
 
 
 if __name__ == "__main__":

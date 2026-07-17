@@ -11,7 +11,8 @@ from urllib.parse import urljoin
 import aiohttp
 
 
-STATE_VERSION = 3
+STATE_VERSION = 4
+SUPPORTED_STATE_VERSIONS = (1, 2, 3, STATE_VERSION)
 DEFAULT_AI_NAMES = [
     "Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace",
     "Helen", "Ivy", "Jack", "Kate", "Leo",
@@ -171,18 +172,18 @@ CONFIG_OPTION_DEFAULTS = {
 }
 
 COMMAND_NAMES = {
-    "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "角色", "平票",
+    "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "自动配置", "角色", "平票",
     "女巫自救", "女巫双药", "胜利", "开始", "结束", "结束发言", "状态", "推进", "重发", "取消",
     "清理", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "救", "毒", "救毒",
     "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "血爆",
 }
 HOST_ONLY_COMMANDS = {
-    "添加AI", "删除AI", "配置", "角色", "平票", "女巫自救", "女巫双药", "胜利",
+    "添加AI", "删除AI", "配置", "自动配置", "角色", "平票", "女巫自救", "女巫双药", "胜利",
     "开始", "结束", "推进", "重发", "取消", "清理",
 }
 COMPACT_ARGUMENT_COMMANDS = {
-    "添加AI", "删除AI", "配置", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
+    "添加AI", "删除AI", "配置", "自动配置", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
     "连结", "守护", "刀", "查验", "毒", "救毒", "开枪", "投票", "决斗", "自爆",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持",
 }
@@ -221,6 +222,7 @@ class WerewolfPlugin:
         self.virtual_driver_tasks = {}
         self.virtual_driver_wakes = {}
         self.preflight_tasks = {}
+        self.configuration_tasks = {}
         self.resume_task = None
         self.state, migrated = self._load_state()
         if migrated:
@@ -265,14 +267,19 @@ class WerewolfPlugin:
 
     def _load_state(self):
         if not self.state_path.exists():
-            return {"version": STATE_VERSION, "games": {}, "processed_ids": []}, False
+            return {"version": STATE_VERSION, "games": {}, "last_configs": {}, "processed_ids": []}, False
         with open(self.state_path, encoding="utf-8") as f:
             state = json.load(f)
-        if not isinstance(state, dict) or state.get("version") not in (1, 2, STATE_VERSION):
+        if not isinstance(state, dict) or state.get("version") not in SUPPORTED_STATE_VERSIONS:
             raise ValueError("unsupported werewolf state version")
-        if not isinstance(state.get("games"), dict) or not isinstance(state.get("processed_ids", []), list):
+        if (
+            not isinstance(state.get("games"), dict)
+            or not isinstance(state.get("processed_ids", []), list)
+            or not isinstance(state.get("last_configs", {}), dict)
+        ):
             raise ValueError("malformed werewolf state")
         state.setdefault("processed_ids", [])
+        state.setdefault("last_configs", {})
         migrated = state.get("version") != STATE_VERSION
         state["version"] = STATE_VERSION
         for game in state["games"].values():
@@ -322,6 +329,12 @@ class WerewolfPlugin:
                     roles.setdefault(role, 0)
             for player in game.get("players", []):
                 self._ensure_player_schema(player)
+        for chat_id, game in state["games"].items():
+            if game.get("phase") == "ended" and chat_id not in state["last_configs"]:
+                snapshot = self._configuration_snapshot(game)
+                if snapshot:
+                    state["last_configs"][chat_id] = snapshot
+                    migrated = True
         return state, migrated
 
     def _save(self):
@@ -498,7 +511,7 @@ class WerewolfPlugin:
         text = str(remainder or "").strip()
         if not text:
             return []
-        if command == "狼聊":
+        if command in ("狼聊", "自动配置"):
             return [text]
 
         text = re.sub(r"^[：:]+\s*", "", text)
@@ -576,6 +589,8 @@ class WerewolfPlugin:
             await self._debug(game, str(message.get("trusted_ui_user_id") or user_id), args)
         elif command == "配置":
             await self._start_setup(game, user_id, args)
+        elif command == "自动配置":
+            await self._start_automatic_configuration(game, user_id, args)
         elif command == "角色":
             await self._setup_roles(game, user_id, args)
         elif command == "平票":
@@ -1039,23 +1054,35 @@ class WerewolfPlugin:
         if not self._is_host(game, user_id):
             await self._safe_send(game["chat_id"], "只有房主可以配置游戏。")
             return
-        if game["phase"] not in ("lobby", "setup", "ready"):
-            await self._safe_send(game["chat_id"], "当前阶段不能重新配置。")
+        error = self._configuration_room_error(game)
+        if error:
+            await self._safe_send(game["chat_id"], error)
             return
-        player_count = len(game["players"])
-        if not self.min_players <= player_count <= self.max_players:
-            await self._safe_send(game["chat_id"], f"需要 {self.min_players}–{self.max_players} 名玩家，当前 {player_count} 人。")
-            return
-        if any(player.get("virtual") for player in game["players"]):
-            real_count = sum(1 for player in game["players"] if not player.get("virtual"))
-            if real_count < 1:
-                await self._safe_send(game["chat_id"], "包含 AI 的游戏至少需要 1 名真实玩家。")
-                return
 
         if not args:
             await self._safe_send(game["chat_id"], self._configuration_help(game))
             return
 
+        settings, error = self._parse_configuration(game, args)
+        if error:
+            await self._safe_send(game["chat_id"], f"{error}\n\n{self._configuration_help(game)}")
+            return
+        await self._apply_configuration(game, settings)
+
+    def _configuration_room_error(self, game):
+        if game["phase"] not in ("lobby", "setup", "ready"):
+            return "当前阶段不能重新配置。"
+        player_count = len(game["players"])
+        if not self.min_players <= player_count <= self.max_players:
+            return f"需要 {self.min_players}–{self.max_players} 名玩家，当前 {player_count} 人。"
+        if any(player.get("virtual") for player in game["players"]):
+            real_count = sum(1 for player in game["players"] if not player.get("virtual"))
+            if real_count < 1:
+                return "包含 AI 的游戏至少需要 1 名真实玩家。"
+        return ""
+
+    def _parse_configuration(self, game, args):
+        player_count = len(game["players"])
         role_counts = {key: 0 for key in ROLE_NAMES}
         provided_options = {}
         allowed_options = {"平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型", "弃票过半"}
@@ -1088,48 +1115,32 @@ class WerewolfPlugin:
                 else:
                     raise ValueError(f"未知配置项：{name}。")
         except ValueError as exc:
-            message = str(exc) or "配置格式无效。"
-            await self._safe_send(game["chat_id"], f"{message}\n\n{self._configuration_help(game)}")
-            return
+            return None, str(exc) or "配置格式无效。"
 
         if "胜利" not in provided_options:
-            await self._safe_send(
-                game["chat_id"],
-                f"缺少必填配置项：胜利。\n\n{self._configuration_help(game)}",
-            )
-            return
+            return None, "缺少必填配置项：胜利。"
         was_ready = game["phase"] == "ready"
         options = self._current_config_options(game) if was_ready else dict(CONFIG_OPTION_DEFAULTS)
         options.update(provided_options)
         if options["平票"] not in TIE_POLICIES:
-            await self._safe_send(game["chat_id"], "平票必须填写 1、2 或 3。\n\n" + self._configuration_help(game))
-            return
+            return None, "平票必须填写 1、2 或 3。"
         if options["自救"] not in WITCH_SELF_POLICIES:
-            await self._safe_send(game["chat_id"], "自救必须填写 1、2 或 3。\n\n" + self._configuration_help(game))
-            return
+            return None, "自救必须填写 1、2 或 3。"
         if options["双药"] not in ("是", "否"):
-            await self._safe_send(game["chat_id"], "双药必须填写 是 或 否。\n\n" + self._configuration_help(game))
-            return
+            return None, "双药必须填写 是 或 否。"
         if options["胜利"] not in ("屠边", "屠城"):
-            await self._safe_send(game["chat_id"], "胜利必须填写 屠边 或 屠城。\n\n" + self._configuration_help(game))
-            return
+            return None, "胜利必须填写 屠边 或 屠城。"
         if options["狼刀狼人"] not in ("是", "否"):
-            await self._safe_send(game["chat_id"], "狼刀狼人必须填写 是 或 否。\n\n" + self._configuration_help(game))
-            return
+            return None, "狼刀狼人必须填写 是 或 否。"
         if options["显示票型"] not in ("0", "1"):
-            await self._safe_send(game["chat_id"], "显示票型必须填写 0 或 1。\n\n" + self._configuration_help(game))
-            return
+            return None, "显示票型必须填写 0 或 1。"
         if options["弃票过半"] not in ("0", "1"):
-            await self._safe_send(game["chat_id"], "弃票过半必须填写 0 或 1。\n\n" + self._configuration_help(game))
-            return
+            return None, "弃票过半必须填写 0 或 1。"
         error = self._validate_role_counts(role_counts, player_count)
         if error:
-            await self._safe_send(game["chat_id"], f"{error}\n\n{self._configuration_help(game)}")
-            return
+            return None, error
 
-        if was_ready:
-            self._cancel_virtual_preflight(game)
-        game["settings"] = {
+        settings = {
             "day_ready_threshold": self.day_ready_threshold,
             "roles": role_counts,
             "tie_policy": TIE_POLICIES[options["平票"]],
@@ -1140,6 +1151,13 @@ class WerewolfPlugin:
             "show_vote_pattern": options["显示票型"] == "1",
             "abstention_majority_no_exile": options["弃票过半"] == "1",
         }
+        return settings, ""
+
+    async def _apply_configuration(self, game, settings):
+        was_ready = game["phase"] == "ready"
+        if was_ready:
+            self._cancel_virtual_preflight(game)
+        game["settings"] = settings
         game["phase"] = "ready"
         game["setup_step"] = None
         self._save()
@@ -1169,11 +1187,232 @@ class WerewolfPlugin:
             "弃票过半": "1" if settings.get("abstention_majority_no_exile", True) else "0",
         }
 
+    @classmethod
+    def _configuration_snapshot(cls, game):
+        settings = game.get("settings") or {}
+        roles = settings.get("roles")
+        victory = settings.get("victory")
+        if not isinstance(roles, dict) or victory not in ("slaughter_side", "slaughter_city"):
+            return None
+        role_tokens = [
+            f"{ROLE_NAMES[key]}={int(roles.get(key) or 0)}"
+            for key in ROLE_NAMES
+            if int(roles.get(key) or 0) > 0
+        ]
+        options = cls._current_config_options(game)
+        option_tokens = [
+            f"平票={options['平票']}",
+            f"自救={options['自救']}",
+            f"双药={options['双药']}",
+            f"胜利={'屠边' if victory == 'slaughter_side' else '屠城'}",
+            f"狼刀狼人={options['狼刀狼人']}",
+            f"显示票型={options['显示票型']}",
+            f"弃票过半={options['弃票过半']}",
+        ]
+        return {
+            "player_count": len(game.get("players") or []),
+            "configuration": " ".join(role_tokens + option_tokens),
+        }
+
+    def _remember_last_configuration(self, game):
+        snapshot = self._configuration_snapshot(game)
+        if snapshot:
+            self.state["last_configs"][game["chat_id"]] = snapshot
+
+    async def _start_automatic_configuration(self, game, user_id, args):
+        if not self._is_host(game, user_id):
+            await self._safe_send(game["chat_id"], "只有房主可以自动配置游戏。")
+            return
+        error = self._configuration_room_error(game)
+        if error:
+            await self._safe_send(game["chat_id"], error)
+            return
+        request = " ".join(str(value) for value in args).strip()
+        if not request:
+            await self._safe_send(
+                game["chat_id"],
+                f"请说明要如何配置，例如：{self.prefix} 自动配置 沿用上一局，但把女巫换成守卫。",
+            )
+            return
+        config_error = self._configuration_ai_config_error()
+        if config_error:
+            await self._safe_send(game["chat_id"], config_error)
+            return
+        current = self.configuration_tasks.get(game["chat_id"])
+        if current and not current.done():
+            await self._safe_send(game["chat_id"], "自动配置正在处理中，请等待本次结果。")
+            return
+
+        chat_id = game["chat_id"]
+        expected_fingerprint = self._automatic_configuration_fingerprint(game)
+        game_snapshot = copy.deepcopy(game)
+        previous = copy.deepcopy(self.state["last_configs"].get(chat_id))
+        task = asyncio.create_task(self._run_automatic_configuration(
+            chat_id,
+            game,
+            game_snapshot,
+            expected_fingerprint,
+            previous,
+            request,
+        ))
+        self.configuration_tasks[chat_id] = task
+
+        def cleanup(completed):
+            if self.configuration_tasks.get(chat_id) is completed:
+                self.configuration_tasks.pop(chat_id, None)
+            if not completed.cancelled() and completed.exception():
+                self.ctx.log(f"Automatic configuration task failed for {chat_id}: {completed.exception()}")
+
+        task.add_done_callback(cleanup)
+        await self._safe_send(chat_id, "正在根据你的要求生成配置，期间仍可正常使用其他命令。")
+
+    def _configuration_ai_config_error(self):
+        if not str(self.virtual_config.get("base_url") or "").strip():
+            return "自动配置 AI 缺少 virtual_players.base_url 配置。"
+        if not str(self.virtual_config.get("model") or "").strip():
+            return "自动配置 AI 缺少 virtual_players.model 配置。"
+        return ""
+
+    def _automatic_configuration_fingerprint(self, game):
+        payload = {
+            "phase": game.get("phase"),
+            "setup_step": game.get("setup_step"),
+            "players": [
+                {"user_id": player.get("user_id"), "virtual": bool(player.get("virtual"))}
+                for player in game.get("players", [])
+            ],
+            "settings": game.get("settings"),
+            "last_config": self.state["last_configs"].get(game.get("chat_id")),
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    async def _run_automatic_configuration(
+        self,
+        chat_id,
+        expected_game,
+        game_snapshot,
+        expected_fingerprint,
+        previous,
+        request,
+    ):
+        result = await self._request_automatic_configuration(game_snapshot, previous, request)
+        async with self.lock:
+            game = self.state["games"].get(chat_id)
+            if game is not expected_game:
+                return
+            if self._automatic_configuration_fingerprint(game) != expected_fingerprint:
+                await self._safe_send(chat_id, "房间人数或配置已变化，本次自动配置结果已丢弃；请重新发送自动配置命令。")
+                return
+            if result["status"] == "ambiguous":
+                await self._safe_send(chat_id, f"自动配置需要你确认：{result['message']}")
+                return
+            if result["status"] == "error":
+                await self._safe_send(chat_id, f"自动配置失败，原配置未改变：{result['message']}")
+                return
+
+            game["ai_revision"] = int(game.get("ai_revision") or 0) + 1
+            await self._apply_configuration(game, result["settings"])
+
+    async def _request_automatic_configuration(self, game, previous, request):
+        messages = self._automatic_configuration_messages(game, previous, request)
+        retries = self._virtual_int("max_retries", 1, 0, 5)
+        last_error = "unknown error"
+        for attempt in range(retries + 1):
+            try:
+                raw = await self._call_configuration_llm(messages)
+                payload = json.loads(raw.strip())
+                if not isinstance(payload, dict):
+                    raise ValueError("response must be a JSON object")
+                status = payload.get("status")
+                if status == "ambiguous":
+                    message = str(payload.get("message") or "").strip()
+                    if not message:
+                        raise ValueError("ambiguous response is missing message")
+                    return {"status": "ambiguous", "message": message[:500]}
+                if status != "ok":
+                    raise ValueError("status must be ok or ambiguous")
+                configuration = str(payload.get("configuration") or "").strip()
+                if not configuration:
+                    raise ValueError("ok response is missing configuration")
+                args = self._automatic_configuration_args(configuration)
+                settings, error = self._parse_configuration(game, args)
+                if error:
+                    raise ValueError(f"configuration is invalid: {error}")
+                return {"status": "ok", "settings": settings}
+            except Exception as exc:
+                last_error = self._safe_error_text(exc)
+                if attempt < retries:
+                    messages = list(messages) + [{
+                        "role": "system",
+                        "content": (
+                            f"Your previous response was invalid: {last_error}. "
+                            "Re-read the schema and return exactly one valid JSON object."
+                        ),
+                    }]
+        return {"status": "error", "message": last_error}
+
+    def _automatic_configuration_args(self, configuration):
+        text = str(configuration).strip()
+        if text.startswith(self.prefix):
+            command, args = self._parse_command_text(text[len(self.prefix):].strip())
+            if command != "配置":
+                raise ValueError("configuration must be a 配置 command")
+            return args
+        if text.startswith("配置"):
+            command, args = self._parse_command_text(text)
+            if command == "配置":
+                return args
+        return self._tokenize_command_args("配置", text)
+
+    def _automatic_configuration_messages(self, game, previous, request):
+        role_names = "、".join(ROLE_NAMES.values())
+        ordinary_names = "、".join(ROLE_NAMES[key] for key in ROLE_NAMES if key in VILLAGER_ROLES or key == "wild_child")
+        divine_names = "、".join(ROLE_NAMES[key] for key in ROLE_NAMES if key in DIVINE_ROLES)
+        wolf_names = "、".join(ROLE_NAMES[key] for key in ROLE_NAMES if key in WOLF_ROLES)
+        input_payload = {
+            "current_player_count": len(game.get("players") or []),
+            "previous_game_configuration": previous,
+            "request": request,
+        }
+        system_prompt = (
+            "You are a configuration parser for a Chinese Werewolf group-chat game. "
+            "You are not a player and must not discuss gameplay. Convert the user's request into one complete, legal configuration.\n\n"
+            "INPUT: The user message is JSON with current_player_count, previous_game_configuration, and request. "
+            "The previous configuration is null when this group has no completed-game history. Preserve every previous role and rule "
+            "that the request does not change. If there is no previous configuration, the request itself must determine every role count "
+            "and the victory mode; optional rules may use the documented defaults.\n\n"
+            "OUTPUT: Return exactly one JSON object and no Markdown. Success schema: "
+            "{\"status\":\"ok\",\"configuration\":\"村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=是 显示票型=1 弃票过半=1\"}. "
+            "Ambiguous schema: {\"status\":\"ambiguous\",\"message\":\"用简短中文说明只需要用户确认的具体问题\"}. "
+            "Use ambiguous when two or more interpretations are reasonable, required information is absent, a changed player count makes "
+            "the preserved role list invalid, or the request conflicts with the rules. Never guess an unspecified role replacement or count.\n\n"
+            f"ROLE SCHEMA: Supported canonical role names are: {role_names}. Counts are non-negative integers; omit zero-count roles. "
+            "Only 村民 and 狼人 may have counts greater than one; every other role is limited to one. "
+            "Normally the sum of role cards must equal current_player_count. When 盗贼 is present, it must instead equal "
+            "current_player_count + 2 because two undealt cards are offered to the thief. There must be at least one wolf-camp card "
+            f"({wolf_names}), at least one ordinary-good card ({ordinary_names}), and at least one divine card ({divine_names}). "
+            "The initial wolf-camp count must be strictly less than the number of all other players. A thief deck must permit two "
+            "undealt choices while preserving those faction constraints after the thief chooses. "
+            "Use canonical names even if the request contains aliases. Common aliases: "
+            f"{ROLE_ALIAS_HELP}. There is no sheriff/police role.\n\n"
+            "RULE SCHEMA: Always emit all seven rule fields. 平票 is 1 (runoff, then no exile), 2 (immediate no exile), or 3 "
+            "(random tied player); default 2. 自救 is 1 (first night only), 2 (never), or 3 (every night); default 1. "
+            "双药 is 是/否 and defaults to 否. 胜利 is required: 屠边 means wolves win when all ordinary villagers or all divine roles "
+            "are dead; 屠城 means wolves win only when every non-wolf is dead. 狼刀狼人 is 是/否 and defaults to 是. "
+            "显示票型 is 1/0 and defaults to 1. 弃票过半 is 1/0 and defaults to 1. "
+            "The configuration string must contain only space-separated name=value tokens and must be directly usable after /wolf 配置."
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(input_payload, ensure_ascii=False, sort_keys=True)},
+        ]
+
     def _configuration_help(self, game):
         role_names = "、".join(ROLE_NAMES.values())
         return (
             "【狼人杀一键配置】\n"
             f"请填写角色和胜利条件：\n{self.prefix} 配置 村民=2 狼人=2 预言家 女巫 胜利=屠边\n"
+            f"也可发送自然语言要求：\n{self.prefix} 自动配置 沿用上一局，但把女巫换成守卫\n"
             "可选规则默认值：平票=2 自救=1 双药=否 狼刀狼人=是 显示票型=1 弃票过半=1；"
             "需要修改时追加对应 name=value。\n"
             f"当前玩家数：{len(game['players'])}；通常角色牌总数必须与玩家数一致，数量为 1 时可省略“=1”，未填写按 0 计算。\n"
@@ -1627,7 +1866,7 @@ class WerewolfPlugin:
     def _command_text(self):
         return (
             "【命令列表】\n"
-            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、决斗 <座位>、自爆 <座位>、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
+            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、决斗 <座位>、自爆 <座位>、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
             f"白天公开技能：{self.prefix} 决斗 <座位>、自爆 <座位>、血爆\n"
             f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
@@ -3023,13 +3262,14 @@ class WerewolfPlugin:
         game["ai_pending_speeches"] = []
         game["ai_pending_wolf_replies"] = []
         game["ai_preflight_pending"] = False
+        self._remember_last_configuration(game)
         self._cancel_virtual_tasks(game["chat_id"])
         self._save()
         await self._announce_result(game)
 
     def _cancel_virtual_tasks(self, chat_id):
         current = asyncio.current_task()
-        for tasks in (self.virtual_driver_tasks, self.preflight_tasks):
+        for tasks in (self.virtual_driver_tasks, self.preflight_tasks, self.configuration_tasks):
             task = tasks.get(chat_id)
             if task and task is not current and not task.done():
                 task.cancel()
@@ -3308,19 +3548,37 @@ class WerewolfPlugin:
             self._schedule_virtual_driver(chat_id)
 
     async def _call_virtual_llm(self, messages, max_tokens=None):
-        base_url = str(self.virtual_config.get("base_url") or "").strip().rstrip("/") + "/"
+        return await self._call_chat_completion(
+            messages,
+            self.virtual_config,
+            self._virtual_float("temperature", 0.7, 0, 2),
+            max_tokens or self._virtual_int("max_tokens", 300, 1, 4000),
+            self._virtual_float("timeout_seconds", 30, 1, 300),
+        )
+
+    async def _call_configuration_llm(self, messages):
+        return await self._call_chat_completion(
+            messages,
+            self.virtual_config,
+            self._virtual_float("temperature", 0.7, 0, 2),
+            self._virtual_int("max_tokens", 300, 1, 4000),
+            self._virtual_float("timeout_seconds", 30, 1, 300),
+        )
+
+    async def _call_chat_completion(self, messages, config, temperature, max_tokens, timeout_seconds):
+        base_url = str(config.get("base_url") or "").strip().rstrip("/") + "/"
         url = urljoin(base_url, "chat/completions")
         payload = {
-            "model": str(self.virtual_config.get("model") or "").strip(),
+            "model": str(config.get("model") or "").strip(),
             "messages": messages,
-            "temperature": self._virtual_float("temperature", 0.7, 0, 2),
-            "max_tokens": max_tokens or self._virtual_int("max_tokens", 300, 1, 4000),
+            "temperature": temperature,
+            "max_tokens": max_tokens,
         }
         headers = {"Content-Type": "application/json"}
-        api_key = str(self.virtual_config.get("api_key") or "").strip()
+        api_key = str(config.get("api_key") or "").strip()
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        timeout = aiohttp.ClientTimeout(total=self._virtual_float("timeout_seconds", 30, 1, 300))
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         async with self.ai_semaphore:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload, headers=headers) as response:
