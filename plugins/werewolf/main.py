@@ -11,8 +11,8 @@ from urllib.parse import urljoin
 import aiohttp
 
 
-STATE_VERSION = 4
-SUPPORTED_STATE_VERSIONS = (1, 2, 3, STATE_VERSION)
+STATE_VERSION = 5
+SUPPORTED_STATE_VERSIONS = (1, 2, 3, 4, STATE_VERSION)
 DEFAULT_AI_NAMES = [
     "Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace",
     "Helen", "Ivy", "Jack", "Kate", "Leo",
@@ -124,7 +124,7 @@ ROLE_HELP = {
     "magician": "每晚交换两名存活玩家承受夜间目标技能的座位，连续两晚不能重复使用同一座位。",
     "bear_tamer": "每天清晨，若相邻的最近存活玩家中有狼人阵营，熊会公开咆哮。",
     "crow": "每晚诅咒另一名玩家，使其次日每轮投票额外获得一票。",
-    "silencer": "每晚禁言另一名玩家；目标次日不能发起白天技能或确认结束发言，但仍可投票。",
+    "silencer": "每晚禁言另一名玩家；目标次日跳过顺序发言，且不能发起白天技能或确认结束自由发言，但仍可投票。",
     "nine_tailed_fox": "拥有九条尾巴；普通好人死亡失去一条，神职死亡失去两条，尾巴耗尽时死亡。",
     "rogue": "属于普通村民，不受毒药和狼美人殉情影响。",
     "wolf_beauty": "属于狼人阵营，每晚魅惑一名非狼队玩家；狼美人死亡时当前魅惑目标随之死亡。",
@@ -173,7 +173,7 @@ CONFIG_OPTION_DEFAULTS = {
 
 COMMAND_NAMES = {
     "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "自动配置", "角色", "平票",
-    "女巫自救", "女巫双药", "胜利", "开始", "结束", "结束发言", "状态", "推进", "重发", "取消",
+    "女巫自救", "女巫双药", "胜利", "开始", "结束", "结束自由发言", "状态", "推进", "重发", "取消",
     "清理", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "救", "毒", "救毒",
     "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "血爆",
@@ -291,6 +291,10 @@ class WerewolfPlugin:
             game.setdefault("ai_revision", 0)
             game.setdefault("discussion_revision", 0)
             game.setdefault("wolf_chat_revision", 0)
+            game.setdefault("speech_revision", 0)
+            game.setdefault("speech_state", None)
+            game.setdefault("pending_last_words", [])
+            game.setdefault("dawn_deaths", [])
             if game.pop("ai_preflight_pending", False):
                 migrated = True
             game.setdefault("host_action_proposal", None)
@@ -390,14 +394,17 @@ class WerewolfPlugin:
             )
             if not is_command:
                 game = self.state["games"].get(chat_id) if chat_type == "group" else None
-                if game and game.get("phase") == "discussion":
+                if game and game.get("phase") in ("speech", "discussion"):
                     message_id = str(message.get("message_id") or "")
                     if message_id and message_id in self.state["processed_ids"]:
                         return
                     if message_id:
                         self._remember_message_id(message_id)
                     before = self._game_mutation_fingerprint(game)
-                    await self._handle_virtual_discussion(game, message)
+                    if game.get("phase") == "speech":
+                        await self._handle_controlled_speech_message(game, message)
+                    else:
+                        await self._handle_virtual_discussion(game, message)
                     self._mark_human_game_mutation(game, before)
                     drive_chat_id = game["chat_id"]
             else:
@@ -554,7 +561,7 @@ class WerewolfPlugin:
         if (
             game.get("phase") == "discussion"
             and self._is_silenced(game, self._player(game, user_id))
-            and command in {"结束发言", "决斗", "自爆", "血爆"}
+            and command in {"结束自由发言", "决斗", "自爆", "血爆"}
         ):
             await self._safe_send(chat_id, "你本日被禁言，不能使用白天发言或公开技能命令，但仍可私下投票。")
             return
@@ -605,8 +612,10 @@ class WerewolfPlugin:
             await self._start_game(game, user_id)
         elif command == "结束":
             await self._terminate_game(game, user_id)
-        elif command == "结束发言":
+        elif command == "结束自由发言":
             await self._day_ready(game, user_id)
+        elif command == "过":
+            await self._speech_pass(game, user_id)
         elif command == "决斗":
             await self._knight_duel(game, user_id, args)
         elif command == "自爆":
@@ -719,6 +728,7 @@ class WerewolfPlugin:
             "night": game.get("night"),
             "day": game.get("day"),
             "vote_round": game.get("vote_round"),
+            "speech_revision": game.get("speech_revision"),
         }
 
     def _format_host_action(self, command, args):
@@ -765,7 +775,7 @@ class WerewolfPlugin:
         if self._player(game, user_id):
             await self._safe_send(game["chat_id"], "本局玩家不能使用观战身份表。")
             return
-        allowed_phases = {"night_actions", "witch", "death_shot", "discussion", "vote", "ended"}
+        allowed_phases = {"night_actions", "witch", "death_shot", "speech", "discussion", "vote", "ended"}
         if game.get("phase") not in allowed_phases:
             await self._safe_send(game["chat_id"], "发牌完成并正式开局后才能观战。")
             return
@@ -778,7 +788,8 @@ class WerewolfPlugin:
             "night_actions": "夜间行动",
             "witch": "夜间行动",
             "death_shot": "死亡结算",
-            "discussion": "白天讨论",
+            "speech": "顺序/死亡发言",
+            "discussion": "自由讨论",
             "vote": "投票",
             "ended": "已结束",
         }
@@ -850,6 +861,10 @@ class WerewolfPlugin:
             "ai_revision": 0,
             "discussion_revision": 0,
             "wolf_chat_revision": 0,
+            "speech_revision": 0,
+            "speech_state": None,
+            "pending_last_words": [],
+            "dawn_deaths": [],
             "host_action_proposal": None,
             "action_history": [],
             "result_delivery_index": 0,
@@ -1626,6 +1641,10 @@ class WerewolfPlugin:
         game["result_winners"] = []
         game["ai_pending_speeches"] = []
         game["ai_pending_wolf_replies"] = []
+        game["speech_state"] = None
+        game["pending_last_words"] = []
+        game["dawn_deaths"] = []
+        game["speech_revision"] = int(game.get("speech_revision") or 0) + 1
         self._record_action(game, "游戏开始，身份分配完成。", context="开局")
         game["intro_index"] = 0
         thief = next((player for player in game["players"] if player["role"] == "thief"), None)
@@ -1823,7 +1842,7 @@ class WerewolfPlugin:
         role_rules = "\n".join(f"- {ROLE_NAMES[role]}：{ROLE_HELP[role]}" for role in configured)
         return (
             "【狼人杀规则】\n"
-            "夜间角色通过临时会话行动；全部必要行动完成后自动结算。白天自由发言，达到结束发言阈值后进入私密投票。\n"
+            f"夜间角色通过临时会话行动；全部必要行动完成后自动结算。每天先进行死亡发言和随机起点的顺序发言，每人发送 {self.prefix} 过结束当前发言；随后进入自由讨论，达到结束自由发言阈值后进入私密投票。\n"
             "守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
             "骑士在白天讨论时可公开决斗一次：目标是狼人则该狼人死亡且不能发动死亡技能，随后入夜；目标不是狼人则骑士死亡，讨论继续。\n"
             "白狼王属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家；两人死亡并结算死亡技能后直接入夜。\n"
@@ -1859,14 +1878,14 @@ class WerewolfPlugin:
             f"狼人刀人：{wolf_targets}\n"
             f"具体票型：{vote_pattern}\n"
             f"弃票过半：{abstention_rule}\n"
-            f"首日结束发言阈值：{game['settings']['day_ready_threshold']:.0%}（当前需 {needed} 人）\n"
+            f"结束自由发言阈值：{game['settings']['day_ready_threshold']:.0%}（当前需 {needed} 人）\n"
             f"虚拟玩家：{'、'.join(virtuals) if virtuals else '无'}"
         )
 
     def _command_text(self):
         return (
             "【命令列表】\n"
-            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、决斗 <座位>、自爆 <座位>、结束发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
+            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、过（结束当前顺序/死亡发言）、决斗 <座位>、自爆 <座位>、结束自由发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
             f"白天公开技能：{self.prefix} 决斗 <座位>、自爆 <座位>、血爆\n"
             f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
@@ -1896,6 +1915,10 @@ class WerewolfPlugin:
         game["crow_target"] = None
         game["ai_pending_speeches"] = []
         game["ai_pending_wolf_replies"] = []
+        game["speech_state"] = None
+        game["pending_last_words"] = []
+        game["dawn_deaths"] = []
+        game["speech_revision"] = int(game.get("speech_revision") or 0) + 1
         game["wolf_chat_revision"] = int(game.get("wolf_chat_revision") or 0) + 1
         for player in game["players"]:
             if player.get("virtual"):
@@ -2552,6 +2575,13 @@ class WerewolfPlugin:
             night_death_resolution = game.get("phase") in {"night_actions", "witch"} or (
                 game.get("phase") == "death_shot" and game.get("transition_after_shots") == "day"
             )
+            if night_death_resolution and uid not in game.setdefault("dawn_deaths", []):
+                game["dawn_deaths"].append(uid)
+            if (
+                {"exile", "heartbreak", "shot", "beauty_follow"} & causes.get(uid, set())
+                and uid not in game.setdefault("pending_last_words", [])
+            ):
+                game["pending_last_words"].append(uid)
             dream_target = (
                 (game.get("night_actions", {}).get("dream_links") or {}).get(uid)
                 if night_death_resolution else None
@@ -2671,16 +2701,20 @@ class WerewolfPlugin:
             return
         transition = game.pop("transition_after_shots", "day")
         self._save()
-        if transition == "night":
-            await self._begin_night(game)
-        elif transition == "discussion":
-            living_ids = {player["user_id"] for player in self._living(game)}
-            game["phase"] = "discussion"
-            game["ready"] = [user_id for user_id in game.get("ready", []) if user_id in living_ids]
-            self._save()
-            await self._safe_send(game["chat_id"], "骑士决斗结算完毕，继续白天讨论。")
-        else:
+        if transition == "day":
             await self._begin_day(game)
+            return
+
+        living_ids = {player["user_id"] for player in self._living(game)}
+        game["ready"] = [user_id for user_id in game.get("ready", []) if user_id in living_ids]
+        last_words = list(dict.fromkeys(game.get("pending_last_words") or []))
+        game["pending_last_words"] = []
+        if last_words:
+            await self._start_speech_sequence(game, last_words, "last_words", transition)
+        elif transition == "discussion":
+            await self._resume_free_discussion(game)
+        else:
+            await self._begin_night(game)
 
     async def _deliver_role_notifications(self, game):
         notifications = list(game.get("role_notifications") or [])
@@ -2701,7 +2735,7 @@ class WerewolfPlugin:
 
     async def _begin_day(self, game):
         game["day"] = int(game.get("day") or 0) + 1
-        game["phase"] = "discussion"
+        game["phase"] = "speech"
         game["ready"] = []
         game["votes"] = {}
         game["vote_patterns"] = []
@@ -2714,9 +2748,8 @@ class WerewolfPlugin:
             if player.get("virtual"):
                 player["ai_daily_replies"] = 0
                 player["ai_ready_day"] = 0
-        self._record_action(game, "天亮，进入自由讨论。")
+        self._record_action(game, "天亮，准备死亡发言和顺序发言。")
         self._save()
-        needed = self._ready_needed(game)
         announcements = []
         bear = self._living_role(game, "bear_tamer")
         if bear and not self._good_skills_sealed(game):
@@ -2734,8 +2767,170 @@ class WerewolfPlugin:
         suffix = ("\n" + "\n".join(announcements)) if announcements else ""
         await self._safe_send(
             game["chat_id"],
-            f"第 {game['day']} 天天亮，请开始讨论。存活且未被禁言的玩家发送 {self.prefix} 结束发言；达到 {needed} 人后进入投票。{suffix}",
+            f"第 {game['day']} 天天亮，开始发言流程。{suffix}",
         )
+
+        dawn_deaths = list(dict.fromkeys(game.get("dawn_deaths") or []))
+        mandatory = set(game.get("pending_last_words") or [])
+        dead_speakers = dawn_deaths if int(game["day"]) == 1 else [uid for uid in dawn_deaths if uid in mandatory]
+        game["dawn_deaths"] = []
+        game["pending_last_words"] = []
+        if dead_speakers:
+            kind = "day_one_dead" if int(game["day"]) == 1 else "last_words"
+            await self._start_speech_sequence(game, dead_speakers, kind, "morning_order")
+        else:
+            await self._begin_morning_order(game)
+
+    async def _begin_morning_order(self, game):
+        living = sorted(self._living(game), key=lambda item: item["seat"])
+        if not living:
+            await self._begin_free_discussion(game)
+            return
+        start = self.rng.choice(living)
+        start_index = living.index(start)
+        circular = living[start_index:] + living[:start_index]
+        speakers = [player for player in circular if not self._is_silenced(game, player)]
+        skipped = [player for player in circular if self._is_silenced(game, player)]
+        order = "、".join(f"{player['seat']}号 {player['name']}" for player in speakers) or "无"
+        skipped_text = ""
+        if skipped:
+            skipped_text = "\n禁言自动跳过：" + "、".join(
+                f"{player['seat']}号 {player['name']}" for player in skipped
+            ) + "。"
+        await self._safe_send(
+            game["chat_id"],
+            f"随机起始座位：{start['seat']}号。顺序发言：{order}。{skipped_text}",
+        )
+        await self._start_speech_sequence(
+            game,
+            [player["user_id"] for player in speakers],
+            "ordered",
+            "free_discussion",
+            announce=False,
+        )
+
+    async def _start_speech_sequence(self, game, user_ids, kind, continuation, announce=True):
+        queue = []
+        for user_id in user_ids:
+            player = self._player(game, user_id)
+            if player and player["user_id"] not in queue:
+                queue.append(player["user_id"])
+        if not queue:
+            await self._continue_after_speech(game, continuation)
+            return
+        game["phase"] = "speech"
+        game["speech_state"] = {
+            "kind": kind,
+            "queue": queue,
+            "continuation": continuation,
+        }
+        game["speech_revision"] = int(game.get("speech_revision") or 0) + 1
+        self._save()
+        if announce:
+            title = "首日死亡发言" if kind == "day_one_dead" else "死亡发言"
+            labels = "、".join(
+                f"{self._player(game, user_id)['seat']}号 {self._player(game, user_id)['name']}"
+                for user_id in queue
+            )
+            await self._safe_send(game["chat_id"], f"{title}顺序：{labels}。")
+        await self._prompt_speech_turn(game)
+
+    async def _prompt_speech_turn(self, game):
+        state = game.get("speech_state") or {}
+        queue = state.get("queue") or []
+        player = self._player(game, queue[0]) if queue else None
+        if not player:
+            if queue:
+                queue.pop(0)
+                self._save()
+                await self._prompt_speech_turn(game)
+            else:
+                continuation = state.get("continuation")
+                game["speech_state"] = None
+                self._save()
+                await self._continue_after_speech(game, continuation)
+            return
+        reason = {
+            "day_one_dead": "首日死亡发言",
+            "last_words": "死亡发言",
+            "ordered": "顺序发言",
+        }.get(state.get("kind"), "发言")
+        await self._safe_send(
+            game["chat_id"],
+            f"【{reason}】轮到 {player['seat']}号 {player['name']}。可以连续发送多条发言，结束时发送 {self.prefix} 过。",
+        )
+
+    async def _speech_pass(self, game, user_id, forced=False):
+        if game.get("phase") != "speech":
+            await self._safe_send(game["chat_id"], f"当前不是顺序或死亡发言阶段；自由讨论请使用 {self.prefix} 结束自由发言。")
+            return False
+        state = game.get("speech_state") or {}
+        queue = state.get("queue") or []
+        current = self._player(game, queue[0]) if queue else None
+        if not current:
+            await self._continue_after_speech(game, state.get("continuation"))
+            return False
+        if not forced and current["user_id"] != str(user_id):
+            await self._safe_send(
+                game["chat_id"],
+                f"当前轮到 {current['seat']}号 {current['name']}，只有当前发言者可以发送 {self.prefix} 过。",
+            )
+            return False
+        queue.pop(0)
+        self._record_action(game, f"{self._history_player_label(current)}完成当前发言。")
+        game["speech_revision"] = int(game.get("speech_revision") or 0) + 1
+        self._save()
+        prefix = "房主推进：" if forced else ""
+        await self._safe_send(game["chat_id"], f"{prefix}【{current['seat']}号 {current['name']}】过。")
+        if queue:
+            await self._prompt_speech_turn(game)
+        else:
+            continuation = state.get("continuation")
+            game["speech_state"] = None
+            self._save()
+            await self._continue_after_speech(game, continuation)
+        return True
+
+    async def _continue_after_speech(self, game, continuation):
+        game["speech_state"] = None
+        if continuation == "morning_order":
+            await self._begin_morning_order(game)
+        elif continuation == "free_discussion":
+            await self._begin_free_discussion(game)
+        elif continuation == "discussion":
+            await self._resume_free_discussion(game)
+        else:
+            await self._begin_night(game)
+
+    async def _begin_free_discussion(self, game):
+        game["phase"] = "discussion"
+        game["speech_state"] = None
+        game["discussion_revision"] = int(game.get("discussion_revision") or 0) + 1
+        self._record_action(game, "顺序发言结束，进入自由讨论。")
+        self._save()
+        needed = self._ready_needed(game)
+        await self._safe_send(
+            game["chat_id"],
+            f"顺序发言结束，进入自由讨论。存活且未被禁言的玩家发送 {self.prefix} 结束自由发言；达到 {needed} 人后进入投票。",
+        )
+
+    async def _resume_free_discussion(self, game):
+        game["phase"] = "discussion"
+        game["speech_state"] = None
+        game["discussion_revision"] = int(game.get("discussion_revision") or 0) + 1
+        self._save()
+        await self._safe_send(game["chat_id"], "死亡结算完毕，继续自由讨论。")
+
+    async def _handle_controlled_speech_message(self, game, message):
+        state = game.get("speech_state") or {}
+        queue = state.get("queue") or []
+        current = self._player(game, queue[0]) if queue else None
+        sender_id = str(message.get("sender_id") or message.get("user_id") or "")
+        if current and sender_id != current["user_id"]:
+            await self._safe_send(
+                game["chat_id"],
+                f"当前是 {current['seat']}号 {current['name']} 的发言时间，请其他玩家等待。",
+            )
 
     @staticmethod
     def _bear_roars(game, bear):
@@ -2751,21 +2946,21 @@ class WerewolfPlugin:
 
     async def _day_ready(self, game, user_id):
         if game["phase"] != "discussion":
-            await self._safe_send(game["chat_id"], "当前不在白天讨论阶段。")
+            await self._safe_send(game["chat_id"], "当前不在自由讨论阶段。")
             return
         player = self._player(game, user_id)
         if not player or not player.get("alive"):
-            await self._safe_send(game["chat_id"], "只有存活玩家可以确认结束发言。")
+            await self._safe_send(game["chat_id"], "只有存活玩家可以确认结束自由发言。")
             return
         if self._is_silenced(game, player):
-            await self._safe_send(game["chat_id"], "你本日被禁言，不能确认结束发言，但仍可参与私密投票。")
+            await self._safe_send(game["chat_id"], "你本日被禁言，不能确认结束自由发言，但仍可参与私密投票。")
             return
         if user_id not in game["ready"]:
             game["ready"].append(user_id)
-            self._record_action(game, f"{self._history_player_label(player)}确认结束发言。")
+            self._record_action(game, f"{self._history_player_label(player)}确认结束自由发言。")
             self._save()
         needed = self._ready_needed(game)
-        await self._safe_send(game["chat_id"], f"结束发言确认：{len(game['ready'])}/{needed}。")
+        await self._safe_send(game["chat_id"], f"结束自由发言确认：{len(game['ready'])}/{needed}。")
         if len(game["ready"]) >= needed:
             await self._begin_vote(game, round_number=1, candidates=None)
 
@@ -3149,8 +3344,10 @@ class WerewolfPlugin:
         elif phase == "dealing":
             self._record_action(game, "房主强制推进身份送达阶段。")
             await self._deliver_start(game)
+        elif phase == "speech":
+            await self._speech_pass(game, game.get("host_id"), forced=True)
         elif phase == "discussion":
-            self._record_action(game, "房主强制结束讨论并进入投票。")
+            self._record_action(game, "房主强制结束自由讨论并进入投票。")
             await self._begin_vote(game, 1, None)
         elif phase == "night_actions":
             self._record_action(game, "房主强制补全未提交的夜间行动。")
@@ -3262,6 +3459,9 @@ class WerewolfPlugin:
         game["ai_pending_speeches"] = []
         game["ai_pending_wolf_replies"] = []
         game["ai_preflight_pending"] = False
+        game["speech_state"] = None
+        game["pending_last_words"] = []
+        game["dawn_deaths"] = []
         self._remember_last_configuration(game)
         self._cancel_virtual_tasks(game["chat_id"])
         self._save()
@@ -3326,7 +3526,7 @@ class WerewolfPlugin:
         phase_names = {
             "lobby": "报名", "setup": "配置", "ready": "等待开始", "thief_choice": "盗贼选牌",
             "dealing": "身份送达", "night_actions": "夜间行动", "witch": "女巫行动",
-            "death_shot": "死亡技能", "discussion": "白天讨论", "vote": "投票", "ended": "已结束",
+            "death_shot": "死亡技能", "speech": "顺序/死亡发言", "discussion": "自由讨论", "vote": "投票", "ended": "已结束",
         }
         lines = [
             f"当前阶段：{phase_names.get(game.get('phase'), game.get('phase'))}",
@@ -3388,7 +3588,7 @@ class WerewolfPlugin:
             else "不计入有效票"
         ))
         threshold = float(settings.get("day_ready_threshold", self.day_ready_threshold))
-        lines.append(f"结束发言阈值：{threshold:.0%}")
+        lines.append(f"结束自由发言阈值：{threshold:.0%}")
         virtuals = [f"{player['seat']}号 {player['name']}" for player in game.get("players", []) if player.get("virtual")]
         lines.append(f"虚拟玩家：{'、'.join(virtuals) if virtuals else '无'}")
         return "\n".join(lines)
@@ -3441,7 +3641,7 @@ class WerewolfPlugin:
             if game.get("transition_after_shots") == "night":
                 return f"第 {game.get('day', 0)} 天"
             return f"第 {game.get('night', 0)} 夜"
-        if phase in ("discussion", "vote"):
+        if phase in ("speech", "discussion", "vote"):
             return f"第 {game.get('day', 0)} 天"
         if phase == "ended":
             return "结束"
@@ -3708,7 +3908,9 @@ class WerewolfPlugin:
             "- Phase flow: setup and initial night abilities resolve first, then all ordinary night targets are redirected "
             "and fixed; witch-type abilities act after the wolf target is fixed. Living active-pack wolves submit individual kill choices; plurality selects the victim and a "
             "top tie means no wolf kill. Night deaths resolve together before triggered shots and victory checks. "
-            "During the day, living players discuss, confirm readiness, then vote privately.\n"
+            "Each day uses mandatory death speeches when applicable, then a random-start circular living-player speaking order; "
+            "each controlled speaker must pass before the next turn. This is followed by free discussion, readiness confirmation, "
+            "and private voting. Public daytime abilities are legal only during free discussion.\n"
             f"- Witch: {witch_self}; {double} same-night antidote and poison use.\n"
             f"- Wolf friendly fire: {wolf_targets}.\n"
             "- Guard may protect self, may not protect the same player on consecutive nights, and guard plus antidote "
@@ -3790,7 +3992,7 @@ class WerewolfPlugin:
         if player["user_id"] in game.get("charmed_players", []):
             lines.append("- You are charmed by the Piper.")
         if self._is_silenced(game, player):
-            lines.append("- You are silenced today: do not speak, confirm readiness, or use public daytime skills; you may vote.")
+            lines.append("- You are silenced today: your ordered turn is skipped; do not speak, confirm free-discussion readiness, or use public daytime skills; you may vote.")
         if player.get("ai_last_decision"):
             lines.append("- Your previous recorded decision: " + json.dumps(player["ai_last_decision"], ensure_ascii=False))
         return "\n".join(lines)
@@ -3829,7 +4031,24 @@ class WerewolfPlugin:
             if reply_number >= max_replies else
             "Set ready=true only when you believe it is strategically time to proceed to voting."
         )
+        speech_state = game.get("speech_state") or {}
+        controlled_reason = {
+            "day_one_dead": "day-one death speech",
+            "last_words": "mandatory last words after death",
+            "ordered": "the daily circular speaking order",
+        }.get(speech_state.get("kind"), "controlled speech")
+        controlled_order = ", ".join(
+            f"{self._player(game, uid)['seat']}={self._player(game, uid)['name']}"
+            for uid in speech_state.get("queue") or [] if self._player(game, uid)
+        ) or "none"
         instructions = {
+            "controlled_speech": (
+                f"This is your one controlled speaking turn for {controlled_reason}. Remaining order: [{controlled_order}]. "
+                "Public abilities are forbidden in this phase. "
+                "You may give one strategically useful Chinese statement of at most 120 characters, or remain silent. "
+                "After this response the game will automatically mark your turn complete. Use exactly one schema: "
+                "{\"action\":\"speak\",\"speech\":\"...\"} or {\"action\":\"silent\"}."
+            ),
             "speech": (
                 f"This is your discussion turn {reply_number}/{max_replies}; currently {ready_count}/{ready_needed} "
                 "eligible players are ready. Choose whether to contribute or remain strategically silent. Speak only "
@@ -3927,8 +4146,21 @@ class WerewolfPlugin:
             raise ValueError(f"response is not valid JSON: {exc.msg}")
         if not isinstance(payload, dict):
             raise ValueError("response must be one JSON object")
-        if kind == "speech":
+        if kind in ("speech", "controlled_speech"):
             action = payload.get("action")
+            if kind == "controlled_speech":
+                if action == "silent" and set(payload) == {"action"}:
+                    return {"action": "silent"}
+                speech = payload.get("speech")
+                if (
+                    action != "speak" or set(payload) != {"action", "speech"}
+                    or not isinstance(speech, str) or not speech.strip()
+                ):
+                    raise ValueError("controlled speech must use exactly one speak or silent schema")
+                speech = speech.strip()
+                if len(speech) > 120:
+                    raise ValueError("speech exceeds 120 characters")
+                return {"action": "speak", "speech": speech}
             ready = payload.get("ready")
             if not isinstance(ready, bool):
                 raise ValueError("discussion ready must be a boolean")
@@ -4029,6 +4261,8 @@ class WerewolfPlugin:
 
     def _fallback_ai_decision(self, game, player, kind):
         legal = list(self._legal_ai_targets(game, player, kind))
+        if kind == "controlled_speech":
+            return {"action": "silent"}
         if kind == "speech":
             return {
                 "action": "speak",
@@ -4094,7 +4328,9 @@ class WerewolfPlugin:
                     continue
                 live_player = self._player(live_game, work["user_id"])
                 live_player["ai_last_decision"] = copy.deepcopy(snapshot_player.get("ai_last_decision") or {})
-                if work["kind"] == "speech":
+                if work["kind"] == "controlled_speech":
+                    await self._apply_controlled_ai_speech(live_game, live_player, decision)
+                elif work["kind"] == "speech":
                     if work.get("queued"):
                         live_game["ai_pending_speeches"].remove(live_player["user_id"])
                     await self._apply_virtual_discussion_decision(live_game, live_player, decision)
@@ -4137,6 +4373,7 @@ class WerewolfPlugin:
                 "ai_revision": int(game.get("ai_revision") or 0),
                 "discussion_revision": int(game.get("discussion_revision") or 0),
                 "wolf_chat_revision": int(game.get("wolf_chat_revision") or 0),
+                "speech_revision": int(game.get("speech_revision") or 0),
                 "game": snapshot_game,
                 "messages": self._build_ai_messages(snapshot_game, snapshot_player, kind),
             }
@@ -4196,6 +4433,11 @@ class WerewolfPlugin:
         if not player or not player.get("virtual"):
             return False
         kind = work["kind"]
+        if kind == "controlled_speech":
+            if int(game.get("speech_revision") or 0) != work["speech_revision"]:
+                return False
+            state = game.get("speech_state") or {}
+            return bool(state.get("queue") and state["queue"][0] == player["user_id"])
         if kind == "speech":
             if int(game.get("discussion_revision") or 0) != work["discussion_revision"]:
                 return False
@@ -4270,7 +4512,12 @@ class WerewolfPlugin:
     def _pending_virtual_decisions(self, game):
         phase = game.get("phase")
         pending = []
-        if phase == "thief_choice":
+        if phase == "speech":
+            state = game.get("speech_state") or {}
+            current = self._player(game, (state.get("queue") or [None])[0])
+            if current and current.get("virtual"):
+                pending.append((current, "controlled_speech"))
+        elif phase == "thief_choice":
             thief = self._living_role(game, "thief")
             if thief and thief.get("virtual"):
                 pending.append((thief, "thief"))
@@ -4325,9 +4572,12 @@ class WerewolfPlugin:
 
     @staticmethod
     def _ai_phase_token(game):
+        speech_queue = (game.get("speech_state") or {}).get("queue") or []
         return (
             game.get("phase"), game.get("night"), game.get("day"), game.get("vote_round"),
             (game.get("pending_shots") or [None])[0],
+            speech_queue[0] if speech_queue else None,
+            int(game.get("speech_revision") or 0),
         )
 
     def _ai_decision_pending(self, game, player, kind, token):
@@ -4420,6 +4670,20 @@ class WerewolfPlugin:
         after = sum(int(player.get("ai_daily_replies") or 0) for player in game.get("players", []))
         return game.get("phase") != before_phase or after > before
 
+    async def _apply_controlled_ai_speech(self, game, player, decision):
+        state = game.get("speech_state") or {}
+        queue = state.get("queue") or []
+        if game.get("phase") != "speech" or not queue or queue[0] != player["user_id"]:
+            return False
+        if decision.get("action") == "speak":
+            await self._safe_send(
+                game["chat_id"],
+                f"【{player['seat']}号 {player['name']}】{decision['speech']}",
+            )
+        elif decision.get("action") != "silent":
+            return False
+        return await self._speech_pass(game, player["user_id"])
+
     async def _apply_virtual_discussion_decision(self, game, player, decision):
         if (
             game.get("phase") != "discussion"
@@ -4445,11 +4709,11 @@ class WerewolfPlugin:
             return True
         game.setdefault("ready", []).append(player["user_id"])
         player["ai_ready_day"] = game.get("day") or 0
-        self._record_action(game, f"{self._history_player_label(player)}确认结束发言。")
+        self._record_action(game, f"{self._history_player_label(player)}确认结束自由发言。")
         self._save()
-        await self._safe_send(game["chat_id"], f"【{player['seat']}号 {player['name']}】结束发言。")
+        await self._safe_send(game["chat_id"], f"【{player['seat']}号 {player['name']}】结束自由发言。")
         needed = self._ready_needed(game)
-        await self._safe_send(game["chat_id"], f"结束发言确认：{len(game['ready'])}/{needed}。")
+        await self._safe_send(game["chat_id"], f"结束自由发言确认：{len(game['ready'])}/{needed}。")
         if len(game["ready"]) >= needed:
             await self._begin_vote(game, round_number=1, candidates=None)
         return True
@@ -4505,7 +4769,8 @@ class WerewolfPlugin:
             "night_actions": "夜间行动",
             "witch": "女巫行动",
             "death_shot": "死亡技能",
-            "discussion": "白天讨论",
+            "speech": "顺序/死亡发言",
+            "discussion": "自由讨论",
             "vote": "投票",
             "ended": "已结束",
         }
@@ -4537,6 +4802,17 @@ class WerewolfPlugin:
         if game["phase"] == "death_shot":
             shooter = self._player(game, (game.get("pending_shots") or [None])[0])
             return "等待行动角色：" + self._format_role_blockers([shooter.get("role") if shooter else None])
+        if game["phase"] == "speech":
+            state = game.get("speech_state") or {}
+            current = self._player(game, (state.get("queue") or [None])[0])
+            if not current:
+                return "等待发言：系统正在切换发言阶段"
+            reason = {
+                "day_one_dead": "首日死亡发言",
+                "last_words": "死亡发言",
+                "ordered": "顺序发言",
+            }.get(state.get("kind"), "发言")
+            return f"等待{reason}：{current['seat']}号 {current['name']}"
         if game["phase"] == "vote":
             pending = [
                 voter.get("role") for voter in self._eligible_voters(game)
@@ -4545,7 +4821,7 @@ class WerewolfPlugin:
             return "等待投票角色：" + self._format_role_blockers(pending)
         if game["phase"] == "discussion":
             remaining = max(0, self._ready_needed(game) - len(game.get("ready", [])))
-            return f"等待结束发言：还需 {remaining} 名存活玩家（任意角色）"
+            return f"等待结束自由发言：还需 {remaining} 名存活玩家（任意角色）"
         return ""
 
     def _pending_night_roles(self, game):
@@ -4607,9 +4883,12 @@ class WerewolfPlugin:
             charmed = [self._player(game, uid) for uid in game.get("charmed_players", [])]
             lines.append("被吹笛者迷惑的玩家：" + "、".join(f"{item['seat']}号 {item['name']}" for item in charmed if item))
         if self._is_silenced(game, player):
-            lines.append("你今日被禁言：不能确认结束发言或使用公开白天技能，但仍可投票。")
+            lines.append("你今日被禁言：顺序发言会自动跳过，不能确认结束自由发言或使用公开白天技能，但仍可投票。")
+        speech_queue = (game.get("speech_state") or {}).get("queue") or []
+        if game.get("phase") == "speech" and speech_queue and speech_queue[0] == player["user_id"]:
+            lines.append(f"当前轮到你发言；结束时在群聊发送 {self.prefix} 过。")
         if not player.get("alive"):
-            lines.append("你已死亡，不能再提交普通游戏操作。")
+            lines.append("你已死亡，除当前死亡发言的群聊操作外，不能再提交普通游戏操作。")
         else:
             prompt = self._current_private_prompt(game, player)
             if prompt:

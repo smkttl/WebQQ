@@ -202,6 +202,20 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._save()
         return game
 
+    async def finish_controlled_speech(self, game):
+        for _ in range(100):
+            if game.get("phase") != "speech":
+                return
+            queue = (game.get("speech_state") or {}).get("queue") or []
+            self.assertTrue(queue)
+            current = self.plugin._player(game, queue[0])
+            if current.get("virtual"):
+                self.plugin._schedule_virtual_driver(game["chat_id"])
+                await self.wait_for_virtual_tasks()
+            else:
+                await self.group(current["user_id"], "/wolf 过", current["name"])
+        self.fail("controlled speech did not finish")
+
     async def reach_first_day(self):
         game = await self.configured_six_player_game(start=True)
         # StableRandom leaves the role order unchanged: wolves are seats 3 and 4,
@@ -211,6 +225,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(5, "/wolf 查验 3")
         self.assertEqual(game["phase"], "witch")
         await self.private(6, "/wolf 过")
+        self.assertEqual(game["phase"], "speech")
+        await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         return game
 
@@ -229,6 +245,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 空刀")
         await self.private(4, "/wolf 空刀")
         await self.private(5, "/wolf 查验 3")
+        await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         return game
 
@@ -248,6 +265,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(4, "/wolf 空刀")
         await self.private(6, "/wolf 空刀")
         await self.private(5, "/wolf 查验 6")
+        await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         self.assertEqual(game["players"][4]["last_seer_result"]["result"], "狼人阵营")
         return game
@@ -1061,7 +1079,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前阶段：夜间行动", text)
         self.assertIn("等待行动角色", text)
         self.assertIn("【本局设置】", text)
-        self.assertIn("结束发言阈值：100%", text)
+        self.assertIn("结束自由发言阈值：100%", text)
         self.assertIn("3号 P3：狼人（存活）", text)
         self.assertIn("【全局行动记录】", text)
         self.assertIn("3号 P3（狼人）", text)
@@ -1265,9 +1283,9 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_day_threshold_starts_hidden_vote(self):
         game = await self.reach_first_day()
         for user_id in range(2, 6):
-            await self.group(user_id, "/wolf 结束发言")
+            await self.group(user_id, "/wolf 结束自由发言")
         self.assertEqual(game["phase"], "discussion")
-        await self.group(6, "/wolf 结束发言")
+        await self.group(6, "/wolf 结束自由发言")
         self.assertEqual(game["phase"], "vote")
 
         for user_id in range(2, 7):
@@ -1283,6 +1301,180 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2号 P2（村民）投票给2号 P2（村民）", account)
         self.assertIn("2号 P2（村民）死亡，原因：公投", account)
         self.assertIn("胜负判定：狼人阵营获胜", account)
+
+    async def test_day_one_dead_speaks_before_circular_living_order(self):
+        game = await self.configured_six_player_game(start=True)
+        await self.private(3, "/wolf 刀 1")
+        await self.private(4, "/wolf 刀 1")
+        await self.private(5, "/wolf 查验 3")
+        await self.private(6, "/wolf 过")
+
+        self.assertEqual(game["phase"], "speech")
+        self.assertEqual(game["speech_state"]["kind"], "day_one_dead")
+        self.assertEqual(game["speech_state"]["queue"], ["1"])
+        await self.group(2, "/wolf 过")
+        self.assertEqual(game["speech_state"]["queue"], ["1"])
+        self.assertIn("只有当前发言者", self.ctx.sent[-1]["text"])
+
+        await self.group(2, "我抢先说一句")
+        self.assertIn("请其他玩家等待", self.ctx.sent[-1]["text"])
+        await self.group(1, "我的第一段遗言", "Host")
+        await self.group(1, "我的第二段遗言", "Host")
+        self.assertEqual(game["speech_state"]["queue"], ["1"])
+        await self.group(1, "/wolf 过", "Host")
+
+        self.assertEqual(game["speech_state"]["kind"], "ordered")
+        self.assertEqual(game["speech_state"]["queue"], ["2", "3", "4", "5", "6"])
+        self.assertTrue(any("随机起始座位：2号" in item["text"] for item in self.ctx.sent))
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 过")
+        self.assertEqual(game["phase"], "discussion")
+        self.assertTrue(any("进入自由讨论" in item["text"] for item in self.ctx.sent))
+
+    async def test_later_dawn_only_mandatory_dead_speakers_go_first(self):
+        game = await self.configured_six_player_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        game["day"] = 1
+        for user_id in ("1", "2", "3"):
+            self.plugin._player(game, user_id)["alive"] = False
+        game["dawn_deaths"] = ["1", "2", "3"]
+        game["pending_last_words"] = ["2", "3"]
+
+        await self.plugin._begin_day(game)
+
+        self.assertEqual(game["day"], 2)
+        self.assertEqual(game["speech_state"]["kind"], "last_words")
+        self.assertEqual(game["speech_state"]["queue"], ["2", "3"])
+        await self.group(2, "/wolf 过")
+        await self.group(3, "/wolf 过")
+        self.assertEqual(game["speech_state"]["queue"], ["4", "5", "6"])
+
+    async def test_silenced_player_is_skipped_from_order_after_living_roll(self):
+        game = await self.configured_six_player_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        game["silenced_ids"] = ["2"]
+        self.plugin.rng.choice = Mock(return_value=game["players"][3])
+
+        await self.plugin._begin_day(game)
+
+        self.assertEqual(game["speech_state"]["queue"], ["4", "5", "6", "1", "3"])
+        self.assertTrue(any("随机起始座位：4号" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("禁言自动跳过：2号 P2" in item["text"] for item in self.ctx.sent))
+
+    async def test_exile_follow_death_and_shot_last_words_preserve_death_order(self):
+        game = await self.configured_six_player_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        game["settings"]["victory"] = "slaughter_city"
+        game["phase"] = "discussion"
+        game["day"] = 1
+        game["transition_after_shots"] = "night"
+        self.plugin._apply_deaths(game, [("1", "exile"), ("2", "heartbreak"), ("5", "shot")])
+
+        await self.plugin._after_deaths(game)
+
+        self.assertEqual(game["phase"], "speech")
+        self.assertEqual(game["speech_state"]["kind"], "last_words")
+        self.assertEqual(game["speech_state"]["queue"], ["1", "2", "5"])
+        for user_id in (1, 2, 5):
+            await self.group(user_id, "/wolf 过")
+        self.assertEqual(game["phase"], "night_actions")
+
+    async def test_game_ending_deaths_skip_pending_last_words(self):
+        game = await self.configured_six_player_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        game["settings"]["victory"] = "slaughter_city"
+        game["phase"] = "discussion"
+        game["day"] = 1
+        game["transition_after_shots"] = "night"
+        self.plugin._apply_deaths(game, [
+            ("1", "exile"), ("2", "heartbreak"), ("5", "shot"), ("6", "beauty_follow"),
+        ])
+        self.assertEqual(game["pending_last_words"], ["1", "2", "5", "6"])
+
+        await self.plugin._after_deaths(game)
+
+        self.assertEqual(game["phase"], "ended")
+        self.assertIsNone(game["speech_state"])
+        self.assertEqual(game["pending_last_words"], [])
+
+    async def test_controlled_ai_speech_is_separate_from_free_discussion_limit(self):
+        self.use_virtual_plugin(max_replies_per_day=1)
+        game = await self.configured_five_plus_ai_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        ai = game["players"][5]
+        game["phase"] = "speech"
+        game["speech_state"] = {"kind": "last_words", "queue": [ai["user_id"]], "continuation": "discussion"}
+        game["speech_revision"] = 1
+        game["ready"] = [ai["user_id"]]
+        self.plugin._call_virtual_llm = AsyncMock(return_value='{"action":"speak","speech":"这是我的死亡发言。"}')
+
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await self.wait_for_virtual_tasks()
+
+        self.assertEqual(game["phase"], "discussion")
+        self.assertEqual(ai["ai_daily_replies"], 0)
+        self.assertTrue(any("这是我的死亡发言" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any(f"【{ai['seat']}号 {ai['name']}】过" in item["text"] for item in self.ctx.sent))
+
+    async def test_controlled_ai_delivery_failure_still_advances(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        ai = game["players"][5]
+        game["phase"] = "speech"
+        game["speech_state"] = {"kind": "ordered", "queue": [ai["user_id"]], "continuation": "discussion"}
+        game["speech_revision"] = 1
+        game["ready"] = [ai["user_id"]]
+        self.ctx.failures[game["chat_id"]] = 1
+        self.plugin._call_virtual_llm = AsyncMock(return_value='{"action":"speak","speech":"这条消息会发送失败。"}')
+
+        self.plugin._schedule_virtual_driver(game["chat_id"])
+        await self.wait_for_virtual_tasks()
+
+        self.assertEqual(game["phase"], "discussion")
+        self.assertTrue(any(f"【{ai['seat']}号 {ai['name']}】过" in item["text"] for item in self.ctx.sent))
+
+    async def test_speech_status_force_advance_and_old_command_removal(self):
+        game = await self.configured_six_player_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        game["phase"] = "speech"
+        game["speech_state"] = {"kind": "ordered", "queue": ["2", "3"], "continuation": "free_discussion"}
+
+        await self.group(1, "/wolf 状态", "Host")
+        self.assertIn("等待顺序发言：2号 P2", self.ctx.sent[-1]["text"])
+        await self.group(1, "/wolf 推进", "Host")
+        self.assertEqual(game["speech_state"]["queue"], ["3"])
+        self.assertIn("房主推进", self.ctx.sent[-2]["text"])
+        await self.group(3, "/wolf 过")
+        self.assertEqual(game["phase"], "discussion")
+
+        await self.group(1, "/wolf 结束发言", "Host")
+        self.assertIn("未知群聊命令", self.ctx.sent[-1]["text"])
+        await self.group(1, "/wolf 结束自由发言", "Host")
+        self.assertIn("结束自由发言确认", self.ctx.sent[-1]["text"])
+
+    async def test_controlled_speech_state_survives_restart(self):
+        game = await self.configured_six_player_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        game["phase"] = "speech"
+        game["speech_state"] = {"kind": "ordered", "queue": ["4", "5"], "continuation": "free_discussion"}
+        game["speech_revision"] = 7
+        self.plugin._save()
+
+        restarted = WerewolfPlugin(FakeContext(), state_path=self.state_path, rng=StableRandom())
+        restored = restarted.state["games"]["group_123"]
+
+        self.assertEqual(restored["phase"], "speech")
+        self.assertEqual(restored["speech_state"]["queue"], ["4", "5"])
+        self.assertEqual(restored["speech_revision"], 7)
 
     async def test_abstention_majority_option_prevents_exile(self):
         game = await self.configured_six_player_game(start=True)
@@ -1329,7 +1521,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_second_night_roster_includes_public_death_status(self):
         game = await self.reach_first_day()
         for user_id in range(2, 7):
-            await self.group(user_id, "/wolf 结束发言")
+            await self.group(user_id, "/wolf 结束自由发言")
         for user_id in range(2, 7):
             await self.private(user_id, "/wolf 弃票")
 
@@ -1357,6 +1549,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(5, "/wolf 加票 2")
         await self.private(6, "/wolf 禁言 2")
 
+        await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         self.assertTrue(game["players"][0]["alive"])
         self.assertEqual(game["players"][2]["last_seer_result"]["seat"], 3)
@@ -1464,7 +1657,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game["day"] = 1
         game["ready"] = []
         game["silenced_ids"] = ["2"]
-        await self.group(2, "/wolf 结束发言")
+        await self.group(2, "/wolf 结束自由发言")
         self.assertNotIn("2", game["ready"])
 
         await self.plugin._begin_vote(game, 1, None)
@@ -1568,7 +1761,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = await self.reach_first_day()
         game["settings"]["show_vote_pattern"] = True
         for user_id in range(2, 7):
-            await self.group(user_id, "/wolf 结束发言")
+            await self.group(user_id, "/wolf 结束自由发言")
 
         await self.private(2, "/wolf 投票 3")
         await self.private(3, "/wolf 投票 2")
@@ -1623,7 +1816,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(knight["death_causes"], ["duel_failed"])
         self.assertEqual(game["phase"], "discussion")
         self.assertIn("目标不属于狼人阵营", self.ctx.sent[-2]["text"])
-        self.assertIn("继续白天讨论", self.ctx.sent[-1]["text"])
+        self.assertIn("继续自由讨论", self.ctx.sent[-1]["text"])
 
     async def test_knight_correct_duel_kills_wolf_and_moves_to_night(self):
         game = await self.reach_first_day_with_knight()
@@ -1659,6 +1852,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 空刀")
         await self.private(5, "/wolf 空刀")
         await self.private(4, "/wolf 查验 3")
+        await self.finish_controlled_speech(game)
 
         await self.group(6, "/wolf 决斗 5")
 
@@ -1719,6 +1913,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 空刀")
         await self.private(6, "/wolf 空刀")
         await self.private(4, "/wolf 查验 6")
+        await self.finish_controlled_speech(game)
 
         await self.group(6, "/wolf自爆5")
 
@@ -1800,6 +1995,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(5, "/wolf 开枪 2")
         self.assertFalse(self.plugin._player(game, "2")["alive"])
         self.assertFalse(self.plugin._player(game, "3")["alive"])
+        await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
         self.assertTrue(any("情侣殉情：3号 P3" in text for text in group_texts))
@@ -1863,7 +2059,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.plugin.virtual_driver_tasks[game["chat_id"]], driver)
 
         await asyncio.wait_for(self.group_without_wait(2, "/wolf 状态"), timeout=1)
-        await asyncio.wait_for(self.group_without_wait(2, "/wolf 结束发言"), timeout=1)
+        await asyncio.wait_for(self.group_without_wait(2, "/wolf 结束自由发言"), timeout=1)
         await asyncio.wait_for(self.group_without_wait(20, "/wolf 创建", "Other Host", group_id=456), timeout=1)
 
         self.assertIn("2", game["ready"])
@@ -2033,6 +2229,11 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             '{"action":"inspect","seat":2}',
             '{"action":"pass"}',
             '{"action":"pass"}',
+            '{"action":"silent"}',
+            '{"action":"silent"}',
+            '{"action":"silent"}',
+            '{"action":"silent"}',
+            '{"action":"silent"}',
             '{"action":"speak","speech":"我先听大家盘一盘昨夜的信息。","ready":false}',
             '{"action":"speak","speech":"目前线索不多，建议从发言矛盾入手。","ready":false}',
             '{"action":"speak","speech":"我会重点留意对身份定义过早的人。","ready":false}',
@@ -2050,6 +2251,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(1, "/wolf 开始", "Host")
 
         game = self.plugin.state["games"]["group_123"]
+        await self.finish_controlled_speech(game)
         self.assertEqual(len([player for player in game["players"] if not player["virtual"]]), 1)
         self.assertEqual(len([player for player in game["players"] if player["virtual"]]), 5)
         self.assertEqual(game["phase"], "discussion")
@@ -2064,6 +2266,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
                 item["text"].startswith(f"【{player['seat']}号 {player['name']}】")
                 for player in virtual_players
             )
+            and not item["text"].endswith("过。")
         ]
         self.assertEqual(len(automatic_speeches), 5)
 
@@ -2172,6 +2375,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
             '{"ok":true}',
             '{"action":"pass"}',
+            '{"action":"silent"}',
+            '{"action":"speak","speech":"我先听大家盘一盘昨夜的信息。","ready":false}',
         ])
         game = await self.configured_five_plus_ai_game(start=True)
         self.assertEqual(game["players"][5]["role"], "witch")
@@ -2180,6 +2385,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
 
+        await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         self.assertFalse(game["players"][0]["alive"])
         self.assertEqual(game["night_actions"]["witch"], {"heal": False, "poison": None})
@@ -2192,6 +2398,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
             '{"ok":true}',
             '{"action":"pass"}',
+            '{"action":"silent"}',
             '{"action":"speak","speech":"天亮了，我先听每个人的身份定义。","ready":false}',
             '{"action":"speak","speech":"我觉得 3 号需要进一步解释昨晚的判断。","ready":true}',
         ])
@@ -2199,6 +2406,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.private(3, "/wolf 刀 1")
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
 
         ai = game["players"][5]
@@ -2213,7 +2421,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("【6号 AI Alice】我觉得" in item["text"] for item in self.ctx.sent))
         self.assertIn(ai["user_id"], game["ready"])
         self.assertEqual(ai["ai_daily_replies"], 2)
-        self.assertTrue(any("【6号 AI Alice】结束发言" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("【6号 AI Alice】结束自由发言" in item["text"] for item in self.ctx.sent))
 
     async def test_all_ai_players_discuss_sequentially_and_force_final_readiness(self):
         self.use_virtual_plugin(max_replies_per_day=2)
@@ -2266,8 +2474,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         fourth_player_messages = [
             item["text"] for item in self.ctx.sent if item["text"].startswith("【4号 P4】")
         ]
-        self.assertEqual(fourth_player_messages, ["【4号 P4】结束发言。"])
-        self.assertTrue(any("【1号 Host】结束发言" in item["text"] for item in self.ctx.sent))
+        self.assertEqual(fourth_player_messages, ["【4号 P4】结束自由发言。"])
+        self.assertTrue(any("【1号 Host】结束自由发言" in item["text"] for item in self.ctx.sent))
         self.assertTrue(any("【2号 P2】二轮补充后可以投票" in item["text"] for item in self.ctx.sent))
 
     async def test_silent_discussion_schema_is_strict(self):
@@ -2288,6 +2496,17 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             )
         with self.assertRaisesRegex(ValueError, "ready must be a boolean"):
             self.plugin._validate_ai_decision(game, ai, "speech", '{"action":"silent"}')
+        self.assertEqual(
+            self.plugin._validate_ai_decision(game, ai, "controlled_speech", '{"action":"silent"}'),
+            {"action": "silent"},
+        )
+        self.assertEqual(
+            self.plugin._validate_ai_decision(
+                game, ai, "controlled_speech", '{"action":"speak","speech":"轮到我发言。"}'
+            ),
+            {"action": "speak", "speech": "轮到我发言。"},
+        )
+        self.assertEqual(self.plugin._fallback_ai_decision(game, ai, "controlled_speech"), {"action": "silent"})
 
     async def test_all_ai_game_continues_from_discussion_through_victory(self):
         self.use_virtual_plugin()
@@ -2314,7 +2533,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["phase"], "ended")
         self.assertFalse(game["players"][1]["alive"])
         self.assertTrue(any("好人阵营获胜" in item["text"] for item in self.ctx.sent))
-        self.assertTrue(any("【1号 Host】结束发言" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("【1号 Host】结束自由发言" in item["text"] for item in self.ctx.sent))
 
     async def test_virtual_driver_reports_safety_limit_to_background_runner(self):
         self.use_virtual_plugin()
@@ -2376,12 +2595,14 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
             '{"ok":true}',
             '{"action":"pass"}',
+            '{"action":"silent"}',
             '{"action":"speak","speech":"我在，先说说你怀疑我的理由。","ready":false}',
         ])
         game = await self.configured_five_plus_ai_game(start=True)
         await self.private(3, "/wolf 刀 1")
         await self.private(4, "/wolf 刀 1")
         await self.private(5, "/wolf 查验 3")
+        await self.finish_controlled_speech(game)
 
         await self.group(2, "Alice，你怎么看？")
         first_count = sum("【6号 AI Alice】我在" in item["text"] for item in self.ctx.sent)
@@ -2390,7 +2611,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["players"][5]["ai_daily_replies"], 1)
         self.assertEqual(first_count, 1)
         self.assertEqual(sum("【6号 AI Alice】我在" in item["text"] for item in self.ctx.sent), 1)
-        self.assertTrue(any("【6号 AI Alice】结束发言" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("【6号 AI Alice】结束自由发言" in item["text"] for item in self.ctx.sent))
 
     async def test_ai_wolf_waits_for_living_human_wolves(self):
         self.use_virtual_plugin()
@@ -2576,7 +2797,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         plugin = WerewolfPlugin(FakeContext(), state_path=migration_path, rng=StableRandom())
 
-        self.assertEqual(plugin.state["version"], 4)
+        self.assertEqual(plugin.state["version"], 5)
         player = plugin.state["games"]["group_9"]["players"][0]
         self.assertFalse(player["virtual"])
         self.assertEqual(player["ai_daily_replies"], 0)
@@ -2588,7 +2809,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plugin.state["games"]["group_9"]["settings"]["abstention_majority_no_exile"])
         self.assertEqual(plugin.state["games"]["group_9"]["vote_patterns"], [])
         persisted = json.loads(migration_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 4)
+        self.assertEqual(persisted["version"], 5)
 
     async def test_version_three_ended_game_backfills_last_configuration(self):
         game = await self.configured_six_player_game(start=False)
@@ -2603,7 +2824,30 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(restarted.state["last_configs"]["group_123"], expected)
         persisted = json.loads(self.state_path.read_text(encoding="utf-8"))
-        self.assertEqual(persisted["version"], 4)
+        self.assertEqual(persisted["version"], 5)
+
+    async def test_version_four_discussion_migrates_as_free_discussion(self):
+        game = await self.configured_six_player_game(start=False)
+        for player, role in zip(game["players"], ["villager", "villager", "wolf", "wolf", "seer", "witch"]):
+            self.plugin._reset_player_for_role(player, role)
+        game["phase"] = "discussion"
+        self.plugin._save()
+        legacy = json.loads(self.state_path.read_text(encoding="utf-8"))
+        legacy["version"] = 4
+        for stored_game in legacy["games"].values():
+            stored_game.pop("speech_state", None)
+            stored_game.pop("speech_revision", None)
+            stored_game.pop("pending_last_words", None)
+            stored_game.pop("dawn_deaths", None)
+        self.state_path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+        restarted = WerewolfPlugin(FakeContext(), state_path=self.state_path, rng=StableRandom())
+        restored = restarted.state["games"]["group_123"]
+
+        self.assertEqual(restored["phase"], "discussion")
+        self.assertIsNone(restored["speech_state"])
+        self.assertEqual(restored["pending_last_words"], [])
+        self.assertEqual(restored["dawn_deaths"], [])
 
 
 if __name__ == "__main__":
