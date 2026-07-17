@@ -147,7 +147,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             await self.group(user_id, "/wolf 加入")
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         if start:
@@ -179,7 +179,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(1, "/wolf 添加AI")
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         if start:
@@ -218,7 +218,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=2 狼人=2 预言家=1 骑士=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         await self.group(1, "/wolf 开始", "Host")
@@ -236,7 +236,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=3 狼人=1 预言家=1 白狼王=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         await self.group(1, "/wolf 开始", "Host")
@@ -255,7 +255,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             await self.group(user_id, "/wolf 加入")
         await self.group(
             1,
-            f"/wolf 配置 {role_text} 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            f"/wolf 配置 {role_text} 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         if start:
@@ -400,7 +400,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=1 预言家=1 女巫=1 狼王=1 平票=3 自救=3 双药=是 胜利=屠城 狼刀狼人=是 显示票型=1",
+            "/wolf 配置 村民=2 狼人=1 预言家=1 女巫=1 狼王=1 平票=3 自救=3 双药=是 胜利=屠城 狼刀狼人=是 显示票型=1 弃票过半=1",
             "Host",
         )
 
@@ -413,10 +413,91 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["settings"]["victory"], "slaughter_city")
         self.assertTrue(game["settings"]["wolf_can_kill_wolves"])
         self.assertTrue(game["settings"]["show_vote_pattern"])
+        self.assertTrue(game["settings"]["abstention_majority_no_exile"])
         self.assertEqual(sum(game["settings"]["roles"].values()), 6)
         self.assertIn("胜利条件：屠城（全部非狼人阵营玩家死亡时", self.ctx.sent[-1]["text"])
         self.assertIn("狼人刀人：允许刀狼队友和自己", self.ctx.sent[-1]["text"])
         self.assertIn("具体票型：下一夜开始时公开", self.ctx.sent[-1]["text"])
+        self.assertIn("弃票过半：严格过半则无人出局", self.ctx.sent[-1]["text"])
+
+    async def test_ready_room_can_be_reconfigured_before_start(self):
+        game = await self.configured_six_player_game(start=False)
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=3 狼人 预言家 守卫 平票=1 自救=2 双药=是 "
+            "胜利=屠城 狼刀狼人=是 显示票型=1 弃票过半=1",
+            "Host",
+        )
+
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["roles"]["villager"], 3)
+        self.assertEqual(game["settings"]["roles"]["guard"], 1)
+        self.assertEqual(game["settings"]["victory"], "slaughter_city")
+        self.assertTrue(game["settings"]["abstention_majority_no_exile"])
+        self.assertIn("配置已更新", self.ctx.sent[-1]["text"])
+
+        await self.group(1, "/wolf 开始", "Host")
+        self.assertEqual(game["phase"], "night_actions")
+
+    async def test_invalid_ready_room_reconfiguration_is_atomic(self):
+        game = await self.configured_six_player_game(start=False)
+        original_settings = json.loads(json.dumps(game["settings"]))
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=3 狼人 预言家 守卫 平票=1 自救=2 双药=是 "
+            "胜利=屠城 狼刀狼人=是 显示票型=1",
+            "Host",
+        )
+
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"], original_settings)
+        self.assertIn("缺少必填配置项：弃票过半", self.ctx.sent[-1]["text"])
+
+        await self.group(1, "/wolf 配置", "Host")
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"], original_settings)
+        self.assertIn("【狼人杀一键配置】", self.ctx.sent[-1]["text"])
+
+    async def test_reconfiguration_cancels_inflight_ai_preflight(self):
+        self.use_virtual_plugin()
+        game = await self.configured_five_plus_ai_game(start=False)
+        request_started = asyncio.Event()
+        request_cancelled = asyncio.Event()
+        never_release = asyncio.Event()
+
+        async def held_preflight(messages):
+            request_started.set()
+            try:
+                await never_release.wait()
+            finally:
+                request_cancelled.set()
+
+        self.plugin._call_virtual_llm = AsyncMock(side_effect=held_preflight)
+        await self.group_without_wait(1, "/wolf 开始", "Host")
+        await asyncio.wait_for(request_started.wait(), timeout=1)
+
+        await asyncio.wait_for(
+            self.group_without_wait(
+                1,
+                "/wolf 配置 村民=3 狼人 预言家 女巫 平票=2 自救=1 双药=否 "
+                "胜利=屠城 狼刀狼人=否 显示票型=0 弃票过半=1",
+                "Host",
+            ),
+            timeout=1,
+        )
+        await asyncio.wait_for(request_cancelled.wait(), timeout=1)
+
+        self.assertEqual(game["phase"], "ready")
+        self.assertNotIn(game["chat_id"], self.plugin.preflight_tasks)
+        self.assertFalse(game.get("ai_preflight_pending"))
+        self.assertTrue(all(player["role"] is None for player in game["players"]))
+        self.assertEqual(game["settings"]["victory"], "slaughter_city")
+
+        self.plugin._call_virtual_llm = AsyncMock(return_value='{"ok":true}')
+        await self.group(1, "/wolf 开始", "Host")
+        self.assertEqual(game["phase"], "night_actions")
 
     async def test_role_count_one_can_omit_equals_one(self):
         await self.group(1, "/wolf 创建", "Host")
@@ -425,7 +506,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.group(
             1,
-            "/wolf 配置 村民=3 白狼王 预言家 骑士 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "/wolf 配置 村民=3 白狼王 预言家 骑士 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
 
@@ -443,7 +524,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.group(
             1,
-            "/wolf 配置 村民=3 白狼王 预言家 骑士 平票 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "/wolf 配置 村民=3 白狼王 预言家 骑士 平票 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
 
@@ -461,11 +542,12 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = self.plugin.state["games"]["group_123"]
         text = self.ctx.sent[-1]["text"]
         self.assertEqual(game["phase"], "lobby")
-        self.assertIn("平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0", text)
+        self.assertIn("平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0", text)
         self.assertIn("屠边：普通村民全部死亡或神职全部死亡时", text)
         self.assertIn("屠城：全部非狼人阵营玩家死亡时", text)
         self.assertIn("狼刀狼人=是时，狼人可刀狼队友或自己", text)
         self.assertIn("显示票型：1=每次投票结束后在下一夜开始时公开谁投给谁", text)
+        self.assertIn("弃票过半：1=严格超过半数玩家弃票时本轮无人出局", text)
         self.assertIn("丘比特、骑士", text)
         self.assertIn("骑士、白狼王", text)
         self.assertIn("数量为 1 时可省略“=1”", text)
@@ -512,11 +594,11 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(game["phase"], "lobby")
         self.assertEqual(game["settings"], original_settings)
-        self.assertIn("缺少必填配置项：自救、双药、胜利、狼刀狼人、显示票型", self.ctx.sent[-1]["text"])
+        self.assertIn("缺少必填配置项：自救、双药、胜利、狼刀狼人、显示票型、弃票过半", self.ctx.sent[-1]["text"])
 
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=也许 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=也许 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         self.assertEqual(game["phase"], "lobby")
@@ -525,18 +607,27 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.group(
             1,
-            "/wolf 配置 村民=2 狼人=2 预言家 女巫 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=2",
+            "/wolf 配置 村民=2 狼人=2 预言家 女巫 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=2 弃票过半=0",
             "Host",
         )
         self.assertEqual(game["phase"], "lobby")
         self.assertEqual(game["settings"], original_settings)
         self.assertIn("显示票型必须填写 0 或 1", self.ctx.sent[-1]["text"])
 
+        await self.group(
+            1,
+            "/wolf 配置 村民=2 狼人=2 预言家 女巫 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=2",
+            "Host",
+        )
+        self.assertEqual(game["phase"], "lobby")
+        self.assertEqual(game["settings"], original_settings)
+        self.assertIn("弃票过半必须填写 0 或 1", self.ctx.sent[-1]["text"])
+
     async def test_three_player_quorum_can_apply_complete_configuration(self):
         await self.group(1, "/wolf 创建", "Host")
         for user_id in range(2, 7):
             await self.group(user_id, "/wolf 加入")
-        command = "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0"
+        command = "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0"
 
         await self.group(2, command)
         await self.group(3, command)
@@ -546,6 +637,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["phase"], "ready")
         self.assertFalse(game["settings"]["wolf_can_kill_wolves"])
         self.assertFalse(game["settings"]["show_vote_pattern"])
+        self.assertFalse(game["settings"]["abstention_majority_no_exile"])
         self.assertIsNone(game["host_action_proposal"])
 
     async def test_wolf_friendly_fire_setting_controls_human_and_ai_targets(self):
@@ -589,6 +681,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("骑士在白天讨论时可公开决斗一次", group_texts[rules_index])
         self.assertIn("白狼王属于狼人阵营", group_texts[rules_index])
         self.assertIn("狼聊 <内容>", group_texts[commands_index])
+        self.assertIn("弃票过半：不计入有效票", group_texts[settings_index])
         self.assertIn("1号 Host（存活）", group_texts[night_index])
         self.assertIn("6号 P6（存活）", group_texts[night_index])
         self.assertEqual(game["phase"], "night_actions")
@@ -897,6 +990,48 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2号 P2（村民）投票给2号 P2（村民）", account)
         self.assertIn("2号 P2（村民）死亡，原因：公投", account)
         self.assertIn("胜负判定：狼人阵营获胜", account)
+
+    async def test_abstention_majority_option_prevents_exile(self):
+        game = await self.configured_six_player_game(start=True)
+        game["settings"]["abstention_majority_no_exile"] = True
+        await self.plugin._begin_vote(game, round_number=1, candidates=None)
+
+        for user_id in range(1, 5):
+            await self.private(user_id, "/wolf 弃票")
+        for user_id in (5, 6):
+            await self.private(user_id, "/wolf 投票 2")
+
+        self.assertTrue(game["players"][1]["alive"])
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertTrue(any("本轮弃票过半（4/6），无人出局" in item["text"] for item in self.ctx.sent))
+        history = "\n".join(entry["text"] for entry in game["action_history"])
+        self.assertIn("4/6 名玩家弃票，弃票严格过半，无人出局", history)
+
+    async def test_abstention_majority_option_off_preserves_effective_vote_result(self):
+        game = await self.configured_six_player_game(start=True)
+        self.assertFalse(game["settings"]["abstention_majority_no_exile"])
+        await self.plugin._begin_vote(game, round_number=1, candidates=None)
+
+        for user_id in range(1, 5):
+            await self.private(user_id, "/wolf 弃票")
+        for user_id in (5, 6):
+            await self.private(user_id, "/wolf 投票 2")
+
+        self.assertFalse(game["players"][1]["alive"])
+        self.assertTrue(any("2号 P2 被公投出局" in item["text"] for item in self.ctx.sent))
+
+    async def test_exactly_half_abstentions_do_not_trigger_majority_option(self):
+        game = await self.configured_six_player_game(start=True)
+        game["settings"]["abstention_majority_no_exile"] = True
+        await self.plugin._begin_vote(game, round_number=1, candidates=None)
+
+        for user_id in range(1, 4):
+            await self.private(user_id, "/wolf 弃票")
+        for user_id in range(4, 7):
+            await self.private(user_id, "/wolf 投票 2")
+
+        self.assertFalse(game["players"][1]["alive"])
+        self.assertFalse(any("本轮弃票过半" in item["text"] for item in self.ctx.sent))
 
     async def test_second_night_roster_includes_public_death_status(self):
         game = await self.reach_first_day()
@@ -1222,7 +1357,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=2 狼人=1 预言家=1 狼王=1 骑士=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         await self.group(1, "/wolf 开始", "Host")
@@ -1282,7 +1417,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=2 狼人=1 预言家=1 猎人=1 白狼王=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         await self.group(1, "/wolf 开始", "Host")
@@ -1350,7 +1485,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=1 狼人=1 预言家=1 女巫=1 猎人=1 守卫=1 白痴=1 狼王=1 丘比特=1 "
-            "平票=1 自救=3 双药=是 胜利=屠城 狼刀狼人=否 显示票型=0",
+            "平票=1 自救=3 双药=是 胜利=屠城 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         await self.group(1, "/wolf 开始", "Host")
@@ -1616,7 +1751,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=1 狼人=1 预言家=1 女巫=1 守卫=1 丘比特=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
         await self.group(1, "/wolf 开始", "Host")
@@ -1653,7 +1788,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(
             1,
             "/wolf 配置 村民=1 狼人=1 预言家=1 女巫=1 守卫=1 丘比特=1 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0",
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0",
             "Host",
         )
 
@@ -1711,6 +1846,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("屠边：狼人消灭全部普通村民或全部神职", system_text)
         self.assertIn("Knight may publicly duel", system_text)
         self.assertIn("White Wolf King may publicly explode", system_text)
+        self.assertIn("Abstentions are excluded from the tally", system_text)
         self.assertIn("role: 女巫", system_text)
         self.assertIn('{"action":"speak","speech":', system_text)
         self.assertIn('{"action":"silent","ready":false}', system_text)
@@ -2156,6 +2292,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(player["ai_white_wolf_decision_day"], 0)
         self.assertFalse(plugin.state["games"]["group_9"]["settings"]["wolf_can_kill_wolves"])
         self.assertFalse(plugin.state["games"]["group_9"]["settings"]["show_vote_pattern"])
+        self.assertFalse(plugin.state["games"]["group_9"]["settings"]["abstention_majority_no_exile"])
         self.assertEqual(plugin.state["games"]["group_9"]["vote_patterns"], [])
         persisted = json.loads(migration_path.read_text(encoding="utf-8"))
         self.assertEqual(persisted["version"], 3)

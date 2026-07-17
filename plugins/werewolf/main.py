@@ -273,6 +273,9 @@ class WerewolfPlugin:
             if "show_vote_pattern" not in settings:
                 settings["show_vote_pattern"] = False
                 migrated = True
+            if "abstention_majority_no_exile" not in settings:
+                settings["abstention_majority_no_exile"] = False
+                migrated = True
             roles = settings.get("roles")
             if isinstance(roles, dict):
                 for role in ROLE_NAMES:
@@ -768,6 +771,7 @@ class WerewolfPlugin:
             "settings": {
                 "day_ready_threshold": self.day_ready_threshold,
                 "show_vote_pattern": False,
+                "abstention_majority_no_exile": False,
             },
             "setup_step": None,
             "night": 0,
@@ -994,7 +998,7 @@ class WerewolfPlugin:
         if not self._is_host(game, user_id):
             await self._safe_send(game["chat_id"], "只有房主可以配置游戏。")
             return
-        if game["phase"] not in ("lobby", "setup"):
+        if game["phase"] not in ("lobby", "setup", "ready"):
             await self._safe_send(game["chat_id"], "当前阶段不能重新配置。")
             return
         player_count = len(game["players"])
@@ -1013,7 +1017,7 @@ class WerewolfPlugin:
 
         role_counts = {key: 0 for key in ROLE_NAMES}
         options = {}
-        allowed_options = {"平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型"}
+        allowed_options = {"平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型", "弃票过半"}
         seen = set()
         try:
             for token in args:
@@ -1043,7 +1047,7 @@ class WerewolfPlugin:
             return
 
         missing = [
-            name for name in ("平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型")
+            name for name in ("平票", "自救", "双药", "胜利", "狼刀狼人", "显示票型", "弃票过半")
             if name not in options
         ]
         if missing:
@@ -1070,11 +1074,17 @@ class WerewolfPlugin:
         if options["显示票型"] not in ("0", "1"):
             await self._safe_send(game["chat_id"], "显示票型必须填写 0 或 1。\n\n" + self._configuration_help(game))
             return
+        if options["弃票过半"] not in ("0", "1"):
+            await self._safe_send(game["chat_id"], "弃票过半必须填写 0 或 1。\n\n" + self._configuration_help(game))
+            return
         error = self._validate_role_counts(role_counts, player_count)
         if error:
             await self._safe_send(game["chat_id"], f"{error}\n\n{self._configuration_help(game)}")
             return
 
+        was_ready = game["phase"] == "ready"
+        if was_ready:
+            self._cancel_virtual_preflight(game)
         game["settings"] = {
             "day_ready_threshold": self.day_ready_threshold,
             "roles": role_counts,
@@ -1084,13 +1094,15 @@ class WerewolfPlugin:
             "victory": "slaughter_side" if options["胜利"] == "屠边" else "slaughter_city",
             "wolf_can_kill_wolves": options["狼刀狼人"] == "是",
             "show_vote_pattern": options["显示票型"] == "1",
+            "abstention_majority_no_exile": options["弃票过半"] == "1",
         }
         game["phase"] = "ready"
         game["setup_step"] = None
         self._save()
         await self._safe_send(
             game["chat_id"],
-            f"配置完成。房主确认后发送 {self.prefix} 开始。\n\n{self._settings_text(game)}",
+            f"{'配置已更新' if was_ready else '配置完成'}。房主确认后发送 {self.prefix} 开始。\n\n"
+            f"{self._settings_text(game)}",
         )
 
     def _configuration_help(self, game):
@@ -1098,7 +1110,7 @@ class WerewolfPlugin:
         return (
             "【狼人杀一键配置】\n"
             f"请在一条命令中填写全部设置：\n{self.prefix} 配置 村民=2 狼人=2 预言家 女巫 "
-            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0\n"
+            "平票=2 自救=1 双药=否 胜利=屠边 狼刀狼人=否 显示票型=0 弃票过半=0\n"
             f"当前玩家数：{len(game['players'])}；通常角色牌总数必须与玩家数一致，数量为 1 时可省略“=1”，未填写按 0 计算。\n"
             "配置盗贼时，角色牌总数必须比玩家数多 2，两张未发身份牌供盗贼选择。\n"
             f"可用角色：{role_names}。\n"
@@ -1106,6 +1118,7 @@ class WerewolfPlugin:
             "自救：1=女巫仅首夜可自救；2=不能自救；3=任意夜晚可自救。双药、狼刀狼人填写 是/否。\n"
             "狼刀狼人=是时，狼人可刀狼队友或自己；填写否时只能刀存活的非狼人玩家。\n"
             "显示票型：1=每次投票结束后在下一夜开始时公开谁投给谁；0=仅在游戏结束复盘时公开。\n"
+            "弃票过半：1=严格超过半数玩家弃票时本轮无人出局；0=弃票不参与计票，其余有效票照常决定出局者。\n"
             "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利。\n"
             "屠城：全部非狼人阵营玩家死亡时，狼人胜利。"
         )
@@ -1248,6 +1261,7 @@ class WerewolfPlugin:
         game["settings"]["victory"] = "slaughter_side" if choice == "屠边" else "slaughter_city"
         game["settings"].setdefault("wolf_can_kill_wolves", False)
         game["settings"].setdefault("show_vote_pattern", False)
+        game["settings"].setdefault("abstention_majority_no_exile", False)
         game["setup_step"] = None
         game["phase"] = "ready"
         self._save()
@@ -1505,6 +1519,7 @@ class WerewolfPlugin:
             "白狼王属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家；两人死亡并结算死亡技能后直接入夜。\n"
             "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利；屠城：全部非狼人阵营玩家死亡时，狼人胜利。具体采用哪种条件以本局设置为准。\n"
             "跨阵营情侣成为第三方，必须成为最终两名存活者才能获胜。带有“AI”前缀的座位是公开标识的虚拟玩家。\n"
+            "弃票是否在严格过半时直接判定无人出局，以本局设置为准。\n"
             "夜间行动在游戏进行中始终隐藏；具体票型是否在下一夜开始时公开以本局设置为准。"
             "游戏结束或被房主终止后，统一公开身份和完整行动记录。\n"
             "【本局身份规则】\n"
@@ -1522,6 +1537,7 @@ class WerewolfPlugin:
         double = "允许" if game["settings"]["witch_double"] else "不允许"
         wolf_targets = "允许刀狼队友和自己" if game["settings"].get("wolf_can_kill_wolves", False) else "只能刀非狼人玩家"
         vote_pattern = "下一夜开始时公开" if game["settings"].get("show_vote_pattern", False) else "仅结束复盘时公开"
+        abstention_rule = "严格过半则无人出局" if game["settings"].get("abstention_majority_no_exile", False) else "不计入有效票"
         needed = math.ceil(float(game["settings"]["day_ready_threshold"]) * len(game["players"]))
         virtuals = [f"{player['seat']}号 {player['name']}" for player in game["players"] if player.get("virtual")]
         return (
@@ -1532,6 +1548,7 @@ class WerewolfPlugin:
             f"胜利条件：{victory}\n"
             f"狼人刀人：{wolf_targets}\n"
             f"具体票型：{vote_pattern}\n"
+            f"弃票过半：{abstention_rule}\n"
             f"首日结束发言阈值：{game['settings']['day_ready_threshold']:.0%}（当前需 {needed} 人）\n"
             f"虚拟玩家：{'、'.join(virtuals) if virtuals else '无'}"
         )
@@ -2623,6 +2640,25 @@ class WerewolfPlugin:
 
     async def _resolve_vote(self, game):
         self._capture_vote_pattern(game)
+        eligible_voters = self._eligible_voters(game)
+        abstentions = sum(
+            1 for voter in eligible_voters
+            if voter["user_id"] in game["votes"] and game["votes"][voter["user_id"]] is None
+        )
+        if (
+            game.get("settings", {}).get("abstention_majority_no_exile", False)
+            and abstentions * 2 > len(eligible_voters)
+        ):
+            self._record_action(
+                game,
+                f"本轮 {abstentions}/{len(eligible_voters)} 名玩家弃票，弃票严格过半，无人出局。",
+            )
+            await self._safe_send(
+                game["chat_id"],
+                f"本轮弃票过半（{abstentions}/{len(eligible_voters)}），无人出局。",
+            )
+            await self._finish_vote_without_exile(game)
+            return
         choices = [uid for uid in game["votes"].values() if uid]
         counts = {uid: choices.count(uid) for uid in set(choices)}
         candidates = set(game.get("vote_candidates") or [])
@@ -3035,6 +3071,11 @@ class WerewolfPlugin:
         lines.append("具体票型：" + (
             "下一夜开始时公开" if settings.get("show_vote_pattern", False) else "仅结束复盘时公开"
         ))
+        lines.append("弃票过半：" + (
+            "严格过半则无人出局"
+            if settings.get("abstention_majority_no_exile", False)
+            else "不计入有效票"
+        ))
         threshold = float(settings.get("day_ready_threshold", self.day_ready_threshold))
         lines.append(f"结束发言阈值：{threshold:.0%}")
         virtuals = [f"{player['seat']}号 {player['name']}" for player in game.get("players", []) if player.get("virtual")]
@@ -3169,6 +3210,13 @@ class WerewolfPlugin:
         task.add_done_callback(cleanup)
         return True
 
+    def _cancel_virtual_preflight(self, game):
+        chat_id = game["chat_id"]
+        task = self.preflight_tasks.pop(chat_id, None)
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        game["ai_preflight_pending"] = False
+
     async def _run_virtual_preflight(self, chat_id, expected_game):
         error = await self._preflight_virtual_model()
         should_drive = False
@@ -3298,6 +3346,11 @@ class WerewolfPlugin:
             if game.get("settings", {}).get("show_vote_pattern", False)
             else "Individual ballots are revealed only in the postgame action account."
         )
+        abstention_rule = (
+            "If strictly more than half of eligible voters abstain, nobody is exiled that round."
+            if game.get("settings", {}).get("abstention_majority_no_exile", False)
+            else "Abstentions are excluded from the tally; remaining valid votes still determine the exile."
+        )
         wolf_targets = (
             "允许；狼人可选择任意存活玩家，包括狼队友和自己"
             if game.get("settings", {}).get("wolf_can_kill_wolves", False)
@@ -3322,6 +3375,7 @@ class WerewolfPlugin:
             f"- Day completion threshold: {game.get('settings', {}).get('day_ready_threshold', self.day_ready_threshold):.0%}. "
             f"Votes are submitted privately. {ballot_visibility}\n"
             f"- Tie rule: {tie}.\n"
+            f"- Abstention rule: {abstention_rule}\n"
             "- Phase flow: setup and initial night abilities resolve first, then all ordinary night targets are redirected "
             "and fixed; witch-type abilities act after the wolf target is fixed. Living active-pack wolves submit individual kill choices; plurality selects the victim and a "
             "top tie means no wolf kill. Night deaths resolve together before triggered shots and victory checks. "
