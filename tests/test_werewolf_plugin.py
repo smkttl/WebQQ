@@ -63,6 +63,10 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        banned = ("刀", "毒", "枪", "杀", "死", "亡", "爆", "血", "屠", "伤", "殉情", "带走", "出局")
+        for message in self.ctx.sent:
+            for word in banned:
+                self.assertNotIn(word, message["text"], f"sensitive word delivered to {message['chat_id']}")
 
     async def expire_night_stage(self, game):
         timing = game.get("night_timing")
@@ -388,7 +392,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         }, self.ctx)
 
         messages = [item for item in self.ctx.sent if item["chat_id"] == "temp_123_9000"]
-        self.assertTrue(any("【狼人杀调试复盘】" in item["text"] for item in messages))
+        self.assertTrue(any("【狼人游戏调试复盘】" in item["text"] for item in messages))
         self.assertTrue(any(item["text"].startswith("【全局行动记录") for item in messages))
 
         await self.plugin.handle_portal_message({
@@ -401,7 +405,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         verbose = [
             item for item in self.ctx.sent
-            if item["chat_id"] == "temp_123_9000" and "狼人杀完整调试数据" in item["text"]
+            if item["chat_id"] == "temp_123_9000" and "狼人游戏完整调试数据" in item["text"]
         ]
         self.assertTrue(verbose)
 
@@ -434,10 +438,40 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             "添加AI4": ("添加AI", ["4"]),
             "狼聊今晚考虑4号": ("狼聊", ["今晚考虑4号"]),
             "自动配置沿用上一局，但把女巫换成守卫": ("自动配置", ["沿用上一局，但把女巫换成守卫"]),
+            "选择4": ("选择", ["4"]),
+            "双用<2>": ("双用", ["2"]),
         }
         for command_text, expected in cases.items():
             with self.subTest(command_text=command_text):
                 self.assertEqual(self.plugin._parse_command_text(command_text), expected)
+
+    def test_public_action_vocabulary_uses_neutral_commands(self):
+        source = "/wolf 刀 1；/wolf 毒 2；/wolf 救；/wolf 救毒 2；/wolf 空刀；/wolf 开枪 3；/wolf 自爆 4"
+
+        text = self.plugin._neutralize_public_text(source)
+
+        self.assertEqual(
+            text,
+            "/wolf 选择 1；/wolf 选择 2；/wolf 救；/wolf 双用 2；/wolf 过；/wolf 选择 3；/wolf 亮牌 4",
+        )
+
+    async def test_neutral_configuration_vocabulary_is_accepted(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+
+        await self.group(
+            1,
+            "/wolf 配置 村民=2 狼人=2 预言家=1 女巫=1 平票=2 自救=1 双用=否 "
+            "胜利=边局 狼选择队友=否 显示票型=0 弃票过半=0",
+            "Host",
+        )
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["victory"], "slaughter_side")
+        self.assertFalse(game["settings"]["witch_double"])
+        self.assertFalse(game["settings"]["wolf_can_kill_wolves"])
 
     async def test_compact_command_is_routed_as_a_command(self):
         await self.group(1, "/wolf创建", "Host")
@@ -457,11 +491,11 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             item["text"] for item in self.ctx.sent
             if item["chat_id"] in ("temp_123_3", "temp_123_4")
         )
-        self.assertIn("【狼聊】3号 P3：我们刀谁", wolf_chat)
-        self.assertIn("【狼聊】4号 P4：我建议刀1号", wolf_chat)
+        self.assertIn("【狼聊】3号 P3：我们选择谁", wolf_chat)
+        self.assertIn("【狼聊】4号 P4：我建议选择1号", wolf_chat)
 
-        await self.private(3, "/刀1")
-        await self.private(4, "/刀 <1>")
+        await self.private(3, "/选择1")
+        await self.private(4, "/选择 <1>")
         await self.private(5, "/查验3")
         self.assertEqual(game["night_actions"]["wolves"], {"3": "1", "4": "1"})
         self.assertEqual(game["night_actions"]["seer"], "3")
@@ -469,6 +503,18 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.private(6, "/救")
         self.assertEqual(game["night_actions"]["witch"], {"heal": True, "poison": None})
+
+    async def test_neutral_witch_double_action_uses_double_use_command(self):
+        game = await self.configured_six_player_game(start=True)
+        game["settings"]["witch_double"] = True
+        await self.private(3, "/选择 1")
+        await self.private(4, "/选择 1")
+        await self.private(5, "/查验 3")
+        await self.expire_night_stage(game)
+
+        await self.private(6, "/双用 2")
+
+        self.assertEqual(game["night_actions"]["witch"], {"heal": True, "poison": "2"})
 
     async def test_private_shortcuts_are_not_consumed_in_group_or_for_other_plugins(self):
         await self.configured_six_player_game(start=True)
@@ -502,10 +548,10 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(game["settings"]["show_vote_pattern"])
         self.assertTrue(game["settings"]["abstention_majority_no_exile"])
         self.assertEqual(sum(game["settings"]["roles"].values()), 6)
-        self.assertIn("胜利条件：屠城（全部非狼人阵营玩家死亡时", self.ctx.sent[-1]["text"])
-        self.assertIn("狼人刀人：允许刀狼队友和自己", self.ctx.sent[-1]["text"])
+        self.assertIn("胜利条件：全局（全部非狼人阵营玩家离场时", self.ctx.sent[-1]["text"])
+        self.assertIn("狼人选择：允许选择狼队友和自己", self.ctx.sent[-1]["text"])
         self.assertIn("具体票型：下一夜开始时公开", self.ctx.sent[-1]["text"])
-        self.assertIn("弃票过半：严格过半则无人出局", self.ctx.sent[-1]["text"])
+        self.assertIn("弃票过半：严格过半则无人离场", self.ctx.sent[-1]["text"])
 
     async def test_initial_configuration_uses_omitted_rule_defaults(self):
         await self.group(1, "/wolf 创建", "Host")
@@ -590,7 +636,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(1, "/wolf 配置", "Host")
         self.assertEqual(game["phase"], "ready")
         self.assertEqual(game["settings"], original_settings)
-        self.assertIn("【狼人杀一键配置】", self.ctx.sent[-1]["text"])
+        self.assertIn("【狼人游戏一键配置】", self.ctx.sent[-1]["text"])
 
     async def test_reconfiguration_cancels_inflight_ai_preflight(self):
         self.use_virtual_plugin()
@@ -734,14 +780,14 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = self.plugin.state["games"]["group_123"]
         text = self.ctx.sent[-1]["text"]
         self.assertEqual(game["phase"], "lobby")
-        self.assertIn("/wolf 配置 村民=2 狼人=2 预言家 女巫 胜利=屠边", text)
-        self.assertIn("可选规则默认值：平票=2 自救=1 双药=否 狼刀狼人=是 显示票型=1 弃票过半=1", text)
+        self.assertIn("/wolf 配置 村民=2 狼人=2 预言家 女巫 胜利=边局", text)
+        self.assertIn("可选规则默认值：平票=2 自救=1 双用=否 狼选择队友=是 显示票型=1 弃票过半=1", text)
         self.assertIn("常用角色别名：村民：平民、民；狼人：狼、小狼、普狼", text)
-        self.assertIn("屠边：普通村民全部死亡或神职全部死亡时", text)
-        self.assertIn("屠城：全部非狼人阵营玩家死亡时", text)
-        self.assertIn("狼刀狼人=是时，狼人可刀狼队友或自己", text)
+        self.assertIn("边局：普通村民全部离场或神职全部离场时", text)
+        self.assertIn("全局：全部非狼人阵营玩家离场时", text)
+        self.assertIn("狼选择队友=是时，狼人可选择狼队友或自己", text)
         self.assertIn("显示票型：1=每次投票结束后在下一夜开始时公开谁投给谁", text)
-        self.assertIn("弃票过半：1=严格超过半数玩家弃票时本轮无人出局", text)
+        self.assertIn("弃票过半：1=严格超过半数玩家弃票时本轮无人离场", text)
         self.assertIn("丘比特、骑士", text)
         self.assertIn("骑士、白狼王", text)
         self.assertIn("数量为 1 时可省略“=1”", text)
@@ -822,7 +868,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(game["phase"], "lobby")
         self.assertEqual(game["settings"], original_settings)
-        self.assertIn("自动配置需要你确认：请说明要使用屠边还是屠城", self.ctx.sent[-1]["text"])
+        self.assertIn("自动配置需要你确认：请说明要使用边局还是全局", self.ctx.sent[-1]["text"])
         model_input = json.loads(self.plugin._call_configuration_llm.await_args.args[0][1]["content"])
         self.assertIsNone(model_input["previous_game_configuration"])
 
@@ -979,7 +1025,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(game["phase"], "lobby")
         self.assertEqual(game["settings"], original_settings)
-        self.assertIn("双药必须填写 是 或 否", self.ctx.sent[-1]["text"])
+        self.assertIn("双用必须填写 是 或 否", self.ctx.sent[-1]["text"])
 
         await self.group(
             1,
@@ -1023,7 +1069,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         await self.private(3, "/wolf 刀 3")
         self.assertNotIn("3", game["night_actions"]["wolves"])
-        self.assertIn("存活的非狼队玩家", self.ctx.sent[-1]["text"])
+        self.assertIn("在场的非狼队玩家", self.ctx.sent[-1]["text"])
         self.assertEqual(
             [player["seat"] for player in self.plugin._legal_ai_targets(game, wolf, "wolf")],
             [1, 2, 5, 6],
@@ -1045,7 +1091,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game = await self.configured_six_player_game(start=True)
 
         group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
-        rules_index = next(i for i, text in enumerate(group_texts) if text.startswith("【狼人杀规则】"))
+        rules_index = next(i for i, text in enumerate(group_texts) if text.startswith("【狼人游戏规则】"))
         settings_index = next(i for i, text in enumerate(group_texts) if text.startswith("【本局设置】"))
         commands_index = next(i for i, text in enumerate(group_texts) if text.startswith("【命令列表】"))
         night_index = next(i for i, text in enumerate(group_texts) if text.startswith("第 1 夜开始"))
@@ -1053,13 +1099,13 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(rules_index, settings_index)
         self.assertLess(settings_index, commands_index)
         self.assertLess(commands_index, night_index)
-        self.assertIn("胜利条件：屠边", group_texts[settings_index])
-        self.assertIn("骑士在白天讨论时可公开决斗一次", group_texts[rules_index])
+        self.assertIn("胜利条件：边局", group_texts[settings_index])
+        self.assertIn("骑士在白天讨论时可公开选择一次", group_texts[rules_index])
         self.assertIn("白狼王属于狼人阵营", group_texts[rules_index])
         self.assertIn("狼聊 <内容>", group_texts[commands_index])
         self.assertIn("弃票过半：不计入有效票", group_texts[settings_index])
-        self.assertIn("1号 Host（存活）", group_texts[night_index])
-        self.assertIn("6号 P6（存活）", group_texts[night_index])
+        self.assertIn("1号 Host（在场）", group_texts[night_index])
+        self.assertIn("6号 P6（在场）", group_texts[night_index])
         self.assertEqual(game["phase"], "night_actions")
 
         identity_chats = {
@@ -1244,10 +1290,10 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         spectator_messages = [item for item in self.ctx.sent if item["chat_id"] == "temp_123_99"]
         self.assertEqual(len(spectator_messages), 1)
         text = spectator_messages[0]["text"]
-        self.assertIn("【狼人杀观战身份表】", text)
-        self.assertIn("1号 Host：村民（存活）", text)
-        self.assertIn("3号 P3：狼人（存活）", text)
-        self.assertIn("6号 P6：女巫（存活）", text)
+        self.assertIn("【狼人游戏观战身份表】", text)
+        self.assertIn("1号 Host：村民（在场）", text)
+        self.assertIn("3号 P3：狼人（在场）", text)
+        self.assertIn("6号 P6：女巫（在场）", text)
         self.assertNotIn("night_actions", text)
         self.assertEqual(game["phase"], "night_actions")
 
@@ -1281,12 +1327,12 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         messages = [item for item in self.ctx.sent if item["chat_id"] == "temp_123_99"]
         self.assertGreaterEqual(len(messages), 2)
         text = "\n".join(item["text"] for item in messages)
-        self.assertIn("【狼人杀调试复盘】", text)
+        self.assertIn("【狼人游戏调试复盘】", text)
         self.assertIn("当前阶段：夜间行动", text)
         self.assertIn("等待行动角色", text)
         self.assertIn("【本局设置】", text)
         self.assertIn("结束自由发言阈值：100%", text)
-        self.assertIn("3号 P3：狼人（存活）", text)
+        self.assertIn("3号 P3：狼人（在场）", text)
         self.assertIn("【全局行动记录】", text)
         self.assertIn("3号 P3（狼人）", text)
         self.assertNotIn('"phase": "night_actions"', text)
@@ -1306,7 +1352,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         messages = [
             item["text"] for item in self.ctx.sent
-            if item["chat_id"] == "temp_123_99" and "狼人杀完整调试数据" in item["text"]
+            if item["chat_id"] == "temp_123_99" and "狼人游戏完整调试数据" in item["text"]
         ]
         self.assertTrue(messages)
         payload = "".join(message.split("\n", 1)[1] for message in messages)
@@ -1317,7 +1363,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(raw["settings"]["wolf_can_kill_wolves"])
         self.assertNotIn("must-not-leak", payload)
         self.assertNotIn("admin_uids", payload)
-        self.assertEqual(raw, game)
+        expected = json.loads(self.plugin._neutralize_public_text(json.dumps(game, ensure_ascii=False)))
+        self.assertEqual(raw, expected)
 
     async def test_debug_output_is_chunked_and_does_not_mutate_game(self):
         self.ctx = FakeContext({"admin_uids": [99]})
@@ -1344,7 +1391,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(99, "/wolf debug -v", "Admin")
         raw_messages = [
             message for message in self.ctx.sent[sent_before_verbose:]
-            if message["chat_id"] == "temp_123_99" and "狼人杀完整调试数据" in message["text"]
+            if message["chat_id"] == "temp_123_99" and "狼人游戏完整调试数据" in message["text"]
         ]
         self.assertGreater(len(raw_messages), 1)
         self.assertTrue(all(len(message["text"]) <= 3500 for message in raw_messages))
@@ -1397,7 +1444,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(any("属于狼人阵营" in text for text in seer_messages))
         group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
-        self.assertTrue(any("昨夜死亡：1号 Host" in text for text in group_texts))
+        self.assertTrue(any("昨夜离场：1号 Host" in text for text in group_texts))
 
         await self.group(1, "/wolf 推进", "Host")
         self.assertEqual(game["phase"], "vote")
@@ -1435,7 +1482,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(text.startswith("游戏结束，本局由房主提前终止。") for text in group_texts))
         self.assertTrue(any("1号 Host：村民" in text for text in group_texts))
         account = "\n".join(text for text in group_texts if text.startswith("【全局行动记录"))
-        self.assertIn("3号 P3（狼人）选择刀1号 Host（村民）", account)
+        self.assertIn("3号 P3（狼人）选择1号 Host（村民）", account)
         self.assertIn("5号 P5（预言家）查验3号 P3（狼人）：狼人阵营", account)
         self.assertIn("1号 Host（村民）提前结束本局", account)
 
@@ -1499,14 +1546,14 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             await self.private(user_id, "/wolf 投票 2")
 
         group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
-        self.assertTrue(any("2号 P2 被公投出局" in text for text in group_texts))
+        self.assertTrue(any("2号 P2 被公投离场" in text for text in group_texts))
         live_game_texts = [text for text in group_texts if not text.startswith("【全局行动记录")]
         self.assertFalse(any("投给" in text for text in live_game_texts))
         self.assertEqual(game["phase"], "ended")
         self.assertEqual(game["winner"], "wolves")
         account = "\n".join(text for text in group_texts if text.startswith("【全局行动记录"))
         self.assertIn("2号 P2（村民）投票给2号 P2（村民）", account)
-        self.assertIn("2号 P2（村民）死亡，原因：公投", account)
+        self.assertIn("2号 P2（村民）离场，原因：公投", account)
         self.assertIn("胜负判定：狼人阵营获胜", account)
 
     async def test_day_one_dead_speaks_before_circular_living_order(self):
@@ -1627,7 +1674,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(game["phase"], "discussion")
         self.assertEqual(ai["ai_daily_replies"], 0)
-        self.assertTrue(any("这是我的死亡发言" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("这是我的离场发言" in item["text"] for item in self.ctx.sent))
         self.assertTrue(any(f"【{ai['seat']}号 {ai['name']}】过" in item["text"] for item in self.ctx.sent))
 
     async def test_controlled_ai_delivery_failure_still_advances(self):
@@ -1697,7 +1744,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(game["players"][1]["alive"])
         self.assertEqual(game["phase"], "night_actions")
-        self.assertTrue(any("本轮弃票过半（4/6），无人出局" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("本轮弃票过半（4/6），无人离场" in item["text"] for item in self.ctx.sent))
         history = "\n".join(entry["text"] for entry in game["action_history"])
         self.assertIn("4/6 名玩家弃票，弃票严格过半，无人出局", history)
 
@@ -1712,7 +1759,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
             await self.private(user_id, "/wolf 投票 2")
 
         self.assertFalse(game["players"][1]["alive"])
-        self.assertTrue(any("2号 P2 被公投出局" in item["text"] for item in self.ctx.sent))
+        self.assertTrue(any("2号 P2 被公投离场" in item["text"] for item in self.ctx.sent))
 
     async def test_exactly_half_abstentions_do_not_trigger_majority_option(self):
         game = await self.configured_six_player_game(start=True)
@@ -1738,8 +1785,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["night"], 2)
         group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
         second_night = next(text for text in group_texts if text.startswith("第 2 夜开始"))
-        self.assertIn("1号 Host（已死亡）", second_night)
-        self.assertIn("2号 P2（存活）", second_night)
+        self.assertIn("1号 Host（已离场）", second_night)
+        self.assertIn("2号 P2（在场）", second_night)
         self.assertNotIn("票型", second_night)
 
     async def test_new_night_actions_resolve_through_magician_redirection(self):
@@ -1924,7 +1971,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         blood = game["players"][1]
         self.plugin._reset_player_for_role(blood, "blood_moon")
 
-        await self.group(2, "/wolf 血爆")
+        await self.group(2, "/wolf 选择")
 
         self.assertFalse(blood["alive"])
         self.assertEqual(game["phase"], "night_actions")
@@ -2069,7 +2116,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
 
-        await self.group(6, "/wolf 决斗 5")
+        await self.group(6, "/wolf 选择 5")
 
         self.assertFalse(game["players"][4]["alive"])
         self.assertEqual(game["players"][4]["death_causes"], ["duel"])
@@ -2131,13 +2178,13 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_timed_night(game)
         await self.finish_controlled_speech(game)
 
-        await self.group(6, "/wolf自爆5")
+        await self.group(6, "/wolf亮牌5")
 
         self.assertFalse(game["players"][4]["alive"])
         self.assertFalse(game["players"][5]["alive"])
         self.assertEqual(game["pending_shots"], ["5"])
         self.assertEqual(game["phase"], "death_shot")
-        await self.private(5, "/wolf 不开枪")
+        await self.private(5, "/wolf 过")
         self.assertEqual(game["phase"], "night_actions")
 
     async def test_virtual_white_wolf_king_has_explode_schema_and_daily_pass(self):
@@ -2210,13 +2257,13 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["phase"], "death_shot")
         self.assertEqual(game["pending_shots"], ["5"])
 
-        await self.private(5, "/wolf 开枪 2")
+        await self.private(5, "/wolf 选择 2")
         self.assertFalse(self.plugin._player(game, "2")["alive"])
         self.assertFalse(self.plugin._player(game, "3")["alive"])
         await self.finish_controlled_speech(game)
         self.assertEqual(game["phase"], "discussion")
         group_texts = [item["text"] for item in self.ctx.sent if item["chat_id"] == "group_123"]
-        self.assertTrue(any("情侣殉情：3号 P3" in text for text in group_texts))
+        self.assertTrue(any("情侣同伴离场：3号 P3" in text for text in group_texts))
 
     async def test_victory_conditions_and_cross_camp_lovers(self):
         game = await self.configured_six_player_game(start=True)

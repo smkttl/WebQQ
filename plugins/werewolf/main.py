@@ -85,6 +85,8 @@ ROLE_ALIASES = {
     alias: role for role, aliases in ROLE_ALIAS_GROUPS.items() for alias in aliases
 }
 ROLE_KEYS = {name: key for key, name in ROLE_NAMES.items()} | ROLE_ALIASES
+ROLE_KEYS["月影使徒"] = "blood_moon"
+ROLE_KEYS["混合者"] = "mixed_blood"
 ROLE_ALIAS_HELP = "；".join(
     f"{ROLE_NAMES[role]}：{'、'.join(aliases)}" for role, aliases in ROLE_ALIAS_GROUPS.items()
 )
@@ -179,6 +181,68 @@ CONFIG_OPTION_DEFAULTS = {
     "显示票型": "1",
     "弃票过半": "1",
 }
+CONFIG_NAME_ALIASES = {
+    "双用": "双药",
+    "狼选择队友": "狼刀狼人",
+}
+VICTORY_NAME_ALIASES = {"边局": "屠边", "全局": "屠城"}
+UNIQUE_NEUTRAL_COMMAND_ALIASES = {
+    "女巫双用": "女巫双药",
+    "亮牌": "自爆",
+}
+
+NEUTRAL_TEXT_REPLACEMENTS = (
+    ("狼人杀", "狼人游戏"),
+    ("白狼王自爆带走", "白狼王亮牌联动"),
+    ("血月使徒血爆", "月影使徒选择"),
+    ("血月使徒", "月影使徒"),
+    ("混血儿", "混合者"),
+    ("血月", "月影"),
+    ("狼刀狼人", "狼选择队友"),
+    ("女巫双药", "女巫双用"),
+    ("屠边", "边局"),
+    ("屠城", "全局"),
+    ("毒杀不能开枪", "选择效果下不能再次选择"),
+    ("毒死", "受到选择效果后离场"),
+    ("被毒", "受到选择效果"),
+    ("使用毒药毒", "选择"),
+    ("毒药", "选择能力"),
+    ("救毒", "双用"),
+    ("双药", "双用"),
+    ("空刀", "过"),
+    ("狼刀", "狼人选择"),
+    ("刀人目标", "行动目标"),
+    ("刀人", "选择"),
+    ("刀口", "选择结果"),
+    ("选择刀", "选择"),
+    ("不开枪", "过"),
+    ("开枪", "选择"),
+    ("射击", "选择"),
+    ("狼枪", "狼人选择"),
+    ("血爆", "选择"),
+    ("自爆", "亮牌"),
+    ("决斗", "选择"),
+    ("反伤", "反馈"),
+    ("伤害", "影响"),
+    ("殉情", "同伴离场"),
+    ("带走", "联动离场"),
+    ("死者", "离场玩家"),
+    ("死亡", "离场"),
+    ("免死", "免于离场"),
+    ("出局", "离场"),
+    ("淘汰", "离场"),
+    ("存活", "在场"),
+    ("毒", "选择"),
+    ("刀", "选择"),
+    ("枪", "选择"),
+    ("杀", "对局"),
+    ("爆", "选择"),
+    ("血", "月"),
+    ("屠", "全"),
+    ("伤", "影响"),
+    ("死", "离场"),
+    ("亡", "离场"),
+)
 
 COMMAND_NAMES = {
     "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "自动配置", "角色", "平票",
@@ -187,11 +251,13 @@ COMMAND_NAMES = {
     "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "血爆",
 }
+COMMAND_NAMES.update({"选择", "双用", "女巫双用", "亮牌"})
 PRIVATE_COMMAND_NAMES = {
     "状态", "选牌", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "交换", "摄梦",
     "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "救", "毒", "救毒", "过", "开枪",
     "不开枪", "投票", "弃票",
 }
+PRIVATE_COMMAND_NAMES.update({"选择", "双用"})
 HOST_ONLY_COMMANDS = {
     "添加AI", "删除AI", "配置", "自动配置", "角色", "平票", "女巫自救", "女巫双药", "胜利",
     "开始", "结束", "推进", "重发", "取消", "清理",
@@ -201,6 +267,7 @@ COMPACT_ARGUMENT_COMMANDS = {
     "连结", "守护", "刀", "查验", "毒", "救毒", "开枪", "投票", "决斗", "自爆",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持",
 }
+COMPACT_ARGUMENT_COMMANDS.update({"选择", "双用", "女巫双用", "亮牌"})
 COMPACT_COMMAND_ORDER = sorted(COMPACT_ARGUMENT_COMMANDS, key=len, reverse=True)
 
 
@@ -419,6 +486,7 @@ class WerewolfPlugin:
                 or content == self.prefix
                 or (content.startswith(self.prefix) and (prefix_suffix[:1].isspace() or command in COMMAND_NAMES))
             )
+            command = UNIQUE_NEUTRAL_COMMAND_ALIASES.get(command, command)
             if not is_command:
                 game = self.state["games"].get(chat_id) if chat_type == "group" else None
                 if game and game.get("phase") in ("speech", "discussion"):
@@ -644,6 +712,8 @@ class WerewolfPlugin:
             await self._day_ready(game, user_id)
         elif command == "过":
             await self._speech_pass(game, user_id)
+        elif command == "选择":
+            await self._neutral_group_action(game, user_id, args)
         elif command == "决斗":
             await self._knight_duel(game, user_id, args)
         elif command == "自爆":
@@ -662,6 +732,15 @@ class WerewolfPlugin:
             await self._clear(game, user_id)
         else:
             await self._safe_send(chat_id, f"未知群聊命令。发送 {self.prefix} 帮助 查看列表。")
+
+    async def _neutral_group_action(self, game, user_id, args):
+        player = self._player(game, user_id)
+        if game.get("phase") == "discussion" and self._has_ability(player, "knight"):
+            await self._knight_duel(game, user_id, args)
+        elif game.get("phase") == "discussion" and self._has_ability(player, "blood_moon") and not args:
+            await self._blood_moon_blast(game, user_id)
+        else:
+            await self._safe_send(game["chat_id"], "你当前没有可用的选择操作。")
 
     async def _propose_host_action(self, game, user_id, command, args):
         player = self._player(game, user_id)
@@ -782,6 +861,8 @@ class WerewolfPlugin:
             await self._thief_action(game, player, args)
         elif command == "狼聊":
             await self._wolf_relay(game, player, " ".join(args))
+        elif command in ("选择", "双用"):
+            await self._neutral_private_action(game, player, command, args)
         elif command in ("连结", "守护", "空守", "刀", "空刀", "查验"):
             await self._night_action(game, player, command, args)
         elif command in ("交换", "摄梦", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持"):
@@ -791,6 +872,19 @@ class WerewolfPlugin:
         elif command == "过":
             if game.get("phase") == "witch":
                 await self._witch_action(game, player, command, args)
+            elif game.get("phase") == "death_shot":
+                await self._shot_action(game, player, "不开枪", args)
+            elif game.get("phase") == "night_actions" and self._is_active_pack_wolf(player):
+                pending_non_wolf = any(
+                    spec["player"]["user_id"] == player["user_id"]
+                    and spec["kind"] != "wolf"
+                    and not self._night_spec_complete(game, spec)
+                    for spec in self._night_decision_specs(game)
+                )
+                if pending_non_wolf:
+                    await self._special_night_action(game, player, command, args)
+                else:
+                    await self._night_action(game, player, "空刀", args)
             else:
                 await self._special_night_action(game, player, command, args)
         elif command in ("开枪", "不开枪"):
@@ -799,6 +893,19 @@ class WerewolfPlugin:
             await self._vote_action(game, player, command, args)
         else:
             await self._safe_send(chat_id, f"当前私聊命令无效。发送 {self.prefix} 状态 查看身份和可用操作。")
+
+    async def _neutral_private_action(self, game, player, command, args):
+        phase = game.get("phase")
+        if command == "双用":
+            await self._witch_action(game, player, "救毒", args)
+        elif phase == "night_actions" and self._is_active_pack_wolf(player):
+            await self._night_action(game, player, "刀", args)
+        elif phase == "witch" and self._has_ability(player, "witch"):
+            await self._witch_action(game, player, "毒", args)
+        elif phase == "death_shot":
+            await self._shot_action(game, player, "开枪", args)
+        else:
+            await self._private_error(game, player, "你当前没有可用的选择操作。")
 
     async def _spectate(self, game, user_id):
         if self._player(game, user_id):
@@ -1140,8 +1247,8 @@ class WerewolfPlugin:
                     name, raw_value = token.split("=", 1)
                 else:
                     name, raw_value = token, "1"
-                name = name.strip()
-                raw_value = raw_value.strip()
+                name = CONFIG_NAME_ALIASES.get(name.strip(), name.strip())
+                raw_value = VICTORY_NAME_ALIASES.get(raw_value.strip(), raw_value.strip())
                 if not name or not raw_value or name in seen:
                     raise ValueError("每个配置项必须且只能填写一次。")
                 seen.add(name)
@@ -1610,7 +1717,7 @@ class WerewolfPlugin:
     async def _setup_victory(self, game, user_id, args):
         if not await self._setup_allowed(game, user_id, "victory"):
             return
-        choice = args[0] if args else ""
+        choice = VICTORY_NAME_ALIASES.get(args[0], args[0]) if args else ""
         if choice not in ("屠边", "屠城"):
             await self._safe_send(game["chat_id"], f"请选择 {self.prefix} 胜利 屠边 或 {self.prefix} 胜利 屠城。")
             return
@@ -5386,9 +5493,16 @@ class WerewolfPlugin:
             return True
         return await self._safe_send(self._temp_id(game, player["user_id"]), text)
 
+    @staticmethod
+    def _neutralize_public_text(text):
+        value = str(text)
+        for source, replacement in NEUTRAL_TEXT_REPLACEMENTS:
+            value = value.replace(source, replacement)
+        return value
+
     async def _safe_send(self, chat_id, text):
         try:
-            await self.ctx.send_message(chat_id, text)
+            await self.ctx.send_message(chat_id, self._neutralize_public_text(text))
             return True
         except Exception as exc:
             self.ctx.log(f"send to {chat_id} failed: {exc}")
