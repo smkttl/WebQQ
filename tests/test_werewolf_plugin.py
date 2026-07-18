@@ -482,6 +482,37 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(game["players"]), 1)
         self.assertIn("AI 玩家未启用", self.ctx.sent[-1]["text"])
 
+    async def test_role_catalog_is_available_without_a_game(self):
+        await self.group(99, "/wolf 身份", "Reader")
+
+        text = self.ctx.sent[-1]["text"]
+        self.assertIn("【身份列表】", text)
+        self.assertIn("好人阵营：", text)
+        self.assertIn("狼人阵营：", text)
+        self.assertIn("第三方/特殊阵营：", text)
+        for name in ROLE_NAMES.values():
+            self.assertIn(self.plugin._neutralize_public_text(name), text)
+
+    async def test_role_detail_accepts_compact_alias_and_neutral_name(self):
+        await self.group(99, "/wolf身份狼", "Reader")
+
+        wolf_text = self.ctx.sent[-1]["text"]
+        self.assertIn("【身份详情】", wolf_text)
+        self.assertIn("名称：狼人", wolf_text)
+        self.assertIn("阵营：狼人阵营", wolf_text)
+        self.assertIn("规则：", wolf_text)
+        self.assertIn("常用别名：狼、小狼、普狼", wolf_text)
+
+        await self.group(99, "/wolf 身份 月影使徒", "Reader")
+
+        self.assertIn("名称：月影使徒", self.ctx.sent[-1]["text"])
+
+    async def test_unknown_role_detail_returns_catalog_hint(self):
+        await self.group(99, "/wolf 身份 不存在", "Reader")
+
+        self.assertIn("未知身份", self.ctx.sent[-1]["text"])
+        self.assertIn("/wolf 身份", self.ctx.sent[-1]["text"])
+
     async def test_private_commands_accept_short_prefixes_and_colon_wolf_chat(self):
         game = await self.configured_six_player_game(start=True)
 

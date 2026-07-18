@@ -245,7 +245,7 @@ NEUTRAL_TEXT_REPLACEMENTS = (
 )
 
 COMMAND_NAMES = {
-    "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "配置", "自动配置", "角色", "平票",
+    "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "身份", "配置", "自动配置", "角色", "平票",
     "女巫自救", "女巫双药", "胜利", "开始", "结束", "结束自由发言", "状态", "推进", "重发", "取消",
     "清理", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "救", "毒", "救毒",
     "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议",
@@ -263,7 +263,7 @@ HOST_ONLY_COMMANDS = {
     "开始", "结束", "推进", "重发", "取消", "清理",
 }
 COMPACT_ARGUMENT_COMMANDS = {
-    "添加AI", "删除AI", "配置", "自动配置", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
+    "添加AI", "删除AI", "身份", "配置", "自动配置", "角色", "平票", "女巫自救", "女巫双药", "胜利", "重发", "狼聊",
     "连结", "守护", "刀", "查验", "毒", "救毒", "开枪", "投票", "决斗", "自爆",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持",
 }
@@ -650,6 +650,9 @@ class WerewolfPlugin:
         if command == "创建":
             await self._create_game(chat_id, user_id, user_name)
             return
+        if command == "身份":
+            await self._send_role_reference(chat_id, args)
+            return
         if not game:
             await self._safe_send(chat_id, f"当前群没有游戏。发送 {self.prefix} 创建 开房。")
             return
@@ -741,6 +744,36 @@ class WerewolfPlugin:
             await self._blood_moon_blast(game, user_id)
         else:
             await self._safe_send(game["chat_id"], "你当前没有可用的选择操作。")
+
+    async def _send_role_reference(self, chat_id, args):
+        if not args:
+            camps = (("good", "好人阵营"), ("wolf", "狼人阵营"), ("neutral", "第三方/特殊阵营"))
+            lines = ["【身份列表】"]
+            for camp, label in camps:
+                names = [ROLE_NAMES[role] for role in ROLE_NAMES if self._camp(role) == camp]
+                lines.append(f"{label}：{'、'.join(names)}")
+            lines.append(f"发送 {self.prefix} 身份 <身份名> 查看详情。")
+            await self._safe_send(chat_id, "\n".join(lines))
+            return
+        if len(args) != 1 or args[0] not in ROLE_KEYS:
+            await self._safe_send(chat_id, f"未知身份。发送 {self.prefix} 身份 查看全部可用身份。")
+            return
+        role = ROLE_KEYS[args[0]]
+        camp_name = {"good": "好人阵营", "wolf": "狼人阵营", "neutral": "第三方/特殊阵营"}[self._camp(role)]
+        aliases = list(ROLE_ALIAS_GROUPS.get(role, ()))
+        if role == "blood_moon":
+            aliases.append("月影使徒")
+        elif role == "mixed_blood":
+            aliases.append("混合者")
+        lines = [
+            "【身份详情】",
+            f"名称：{ROLE_NAMES[role]}",
+            f"阵营：{camp_name}",
+            f"规则：{ROLE_HELP[role]}",
+        ]
+        if aliases:
+            lines.append("常用别名：" + "、".join(dict.fromkeys(aliases)))
+        await self._safe_send(chat_id, "\n".join(lines))
 
     async def _propose_host_action(self, game, user_id, command, args):
         player = self._player(game, user_id)
@@ -2023,7 +2056,7 @@ class WerewolfPlugin:
     def _command_text(self):
         return (
             "【命令列表】\n"
-            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、过（结束当前顺序/死亡发言）、决斗 <座位>、自爆 <座位>、结束自由发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
+            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、身份 [身份名]、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、过（结束当前顺序/死亡发言）、决斗 <座位>、自爆 <座位>、结束自由发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
             f"白天公开技能：{self.prefix} 决斗 <座位>、自爆 <座位>、血爆\n"
             f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>。可省略 {self.prefix} 并写成 /命令；:内容 或 ：内容 等同于狼聊\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
