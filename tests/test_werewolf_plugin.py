@@ -448,6 +448,38 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(game["players"]), 1)
         self.assertIn("AI 玩家未启用", self.ctx.sent[-1]["text"])
 
+    async def test_private_commands_accept_short_prefixes_and_colon_wolf_chat(self):
+        game = await self.configured_six_player_game(start=True)
+
+        await self.private(3, ":我们刀谁")
+        await self.private(4, "：我建议刀1号")
+        wolf_chat = "\n".join(
+            item["text"] for item in self.ctx.sent
+            if item["chat_id"] in ("temp_123_3", "temp_123_4")
+        )
+        self.assertIn("【狼聊】3号 P3：我们刀谁", wolf_chat)
+        self.assertIn("【狼聊】4号 P4：我建议刀1号", wolf_chat)
+
+        await self.private(3, "/刀1")
+        await self.private(4, "/刀 <1>")
+        await self.private(5, "/查验3")
+        self.assertEqual(game["night_actions"]["wolves"], {"3": "1", "4": "1"})
+        self.assertEqual(game["night_actions"]["seer"], "3")
+        await self.expire_night_stage(game)
+
+        await self.private(6, "/救")
+        self.assertEqual(game["night_actions"]["witch"], {"heal": True, "poison": None})
+
+    async def test_private_shortcuts_are_not_consumed_in_group_or_for_other_plugins(self):
+        await self.configured_six_player_game(start=True)
+        sent_before = len(self.ctx.sent)
+
+        await self.group(3, ":我们刀谁")
+        await self.group(6, "/救")
+        await self.private(3, "/echo hello")
+
+        self.assertEqual(len(self.ctx.sent), sent_before)
+
     async def test_one_command_configures_every_game_option(self):
         await self.group(1, "/wolf 创建", "Host")
         for user_id in range(2, 7):

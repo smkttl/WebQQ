@@ -187,6 +187,11 @@ COMMAND_NAMES = {
     "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "血爆",
 }
+PRIVATE_COMMAND_NAMES = {
+    "状态", "选牌", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "交换", "摄梦",
+    "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "救", "毒", "救毒", "过", "开枪",
+    "不开枪", "投票", "弃票",
+}
 HOST_ONLY_COMMANDS = {
     "添加AI", "删除AI", "配置", "自动配置", "角色", "平票", "女巫自救", "女巫双药", "胜利",
     "开始", "结束", "推进", "重发", "取消", "清理",
@@ -393,12 +398,25 @@ class WerewolfPlugin:
             command = ""
             args = []
             prefix_suffix = ""
+            private_shortcut = False
+            is_private_chat = chat_type == "private" or chat_id.startswith("private_")
             if content.startswith(self.prefix):
                 prefix_suffix = content[len(self.prefix):]
                 command_text = prefix_suffix.strip()
                 command, args = self._parse_command_text(command_text)
+            elif is_private_chat and content[:1] in (":", "："):
+                command_text = "狼聊 " + content[1:].lstrip()
+                command, args = self._parse_command_text(command_text)
+                private_shortcut = True
+            elif is_private_chat and content.startswith("/"):
+                command_text = content[1:].strip()
+                candidate, candidate_args = self._parse_command_text(command_text)
+                if candidate in PRIVATE_COMMAND_NAMES:
+                    command, args = candidate, candidate_args
+                    private_shortcut = True
             is_command = (
-                content == self.prefix
+                private_shortcut
+                or content == self.prefix
                 or (content.startswith(self.prefix) and (prefix_suffix[:1].isspace() or command in COMMAND_NAMES))
             )
             if not is_command:
@@ -428,7 +446,7 @@ class WerewolfPlugin:
                     before = self._game_mutation_fingerprint(game)
                     await self._handle_group(message, command, args)
                     game = self.state["games"].get(chat_id)
-                elif chat_type == "private" or chat_id.startswith("private_"):
+                elif is_private_chat:
                     game = self._active_game_for_user(sender_id)
                     before = self._game_mutation_fingerprint(game)
                     await self._handle_private(message, command, args)
@@ -1900,7 +1918,7 @@ class WerewolfPlugin:
             "【命令列表】\n"
             f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、过（结束当前顺序/死亡发言）、决斗 <座位>、自爆 <座位>、结束自由发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
             f"白天公开技能：{self.prefix} 决斗 <座位>、自爆 <座位>、血爆\n"
-            f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>\n"
+            f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>。可省略 {self.prefix} 并写成 /命令；:内容 或 ：内容 等同于狼聊\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
         )
 
