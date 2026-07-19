@@ -646,6 +646,66 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         await self.group(1, "/wolf 开始", "Host")
         self.assertEqual(game["phase"], "night_actions")
 
+    async def test_city_victory_allows_no_villagers_but_side_victory_rejects_it(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        roles = "狼人=2 预言家 女巫 猎人 守卫"
+
+        await self.group(1, f"/wolf 配置 {roles} 胜利=全局", "Host")
+
+        game = self.plugin.state["games"]["group_123"]
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["victory"], "slaughter_city")
+        self.assertEqual(game["settings"]["roles"]["villager"], 0)
+        city_settings = copy.deepcopy(game["settings"])
+
+        await self.group(1, f"/wolf 配置 {roles} 胜利=边局", "Host")
+
+        self.assertEqual(game["settings"], city_settings)
+        self.assertIn("边局至少需要一名普通好人", self.ctx.sent[-1]["text"])
+
+    async def test_staged_setup_defers_no_villager_check_until_victory_choice(self):
+        await self.group(1, "/wolf 创建", "Host")
+        for user_id in range(2, 7):
+            await self.group(user_id, "/wolf 加入")
+        game = self.plugin.state["games"]["group_123"]
+        game["phase"] = "setup"
+        game["setup_step"] = "roles"
+
+        await self.group(1, "/wolf 角色 狼人=2 预言家 女巫 猎人 守卫", "Host")
+        await self.group(1, "/wolf 平票 2", "Host")
+        await self.group(1, "/wolf 女巫自救 1", "Host")
+        await self.group(1, "/wolf 女巫双药 否", "Host")
+        await self.group(1, "/wolf 胜利 边局", "Host")
+
+        self.assertEqual(game["phase"], "setup")
+        self.assertEqual(game["setup_step"], "victory")
+        self.assertIn("边局至少需要一名普通好人", self.ctx.sent[-1]["text"])
+
+        await self.group(1, "/wolf 胜利 全局", "Host")
+
+        self.assertEqual(game["phase"], "ready")
+        self.assertEqual(game["settings"]["victory"], "slaughter_city")
+
+    async def test_city_thief_deck_can_omit_villagers(self):
+        counts = {role: 0 for role in ROLE_NAMES}
+        counts.update({
+            "wolf": 2,
+            "seer": 1,
+            "witch": 1,
+            "hunter": 1,
+            "guard": 1,
+            "knight": 1,
+            "thief": 1,
+        })
+
+        self.assertEqual(self.plugin._validate_role_counts(counts, 6, "slaughter_city"), "")
+        self.assertIn(
+            "所选胜利条件",
+            self.plugin._validate_role_counts(counts, 6, "slaughter_side"),
+        )
+
     async def test_ready_reconfiguration_preserves_omitted_rule_options(self):
         game = await self.configured_six_player_game(start=False)
         original_rules = {

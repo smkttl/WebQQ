@@ -1327,7 +1327,8 @@ class WerewolfPlugin:
             return None, "显示票型必须填写 0 或 1。"
         if options["弃票过半"] not in ("0", "1"):
             return None, "弃票过半必须填写 0 或 1。"
-        error = self._validate_role_counts(role_counts, player_count)
+        victory = "slaughter_side" if options["胜利"] == "屠边" else "slaughter_city"
+        error = self._validate_role_counts(role_counts, player_count, victory)
         if error:
             return None, error
 
@@ -1337,7 +1338,7 @@ class WerewolfPlugin:
             "tie_policy": TIE_POLICIES[options["平票"]],
             "witch_self": WITCH_SELF_POLICIES[options["自救"]],
             "witch_double": options["双药"] == "是",
-            "victory": "slaughter_side" if options["胜利"] == "屠边" else "slaughter_city",
+            "victory": victory,
             "wolf_can_kill_wolves": options["狼刀狼人"] == "是",
             "show_vote_pattern": options["显示票型"] == "1",
             "abstention_majority_no_exile": options["弃票过半"] == "1",
@@ -1581,8 +1582,9 @@ class WerewolfPlugin:
             "Only 村民 and 狼人 may have counts greater than one; every other role is limited to one. "
             "Normally the sum of role cards must equal current_player_count. When 盗贼 is present, it must instead equal "
             "current_player_count + 2 because two undealt cards are offered to the thief. There must be at least one wolf-camp card "
-            f"({wolf_names}), at least one ordinary-good card ({ordinary_names}), and at least one divine card ({divine_names}). "
-            "The initial wolf-camp count must be strictly less than the number of all other players. A thief deck must permit two "
+            f"({wolf_names}) and at least one divine card ({divine_names}). For 屠边, at least one ordinary-good card "
+            f"({ordinary_names}) is also required; 屠城 may use zero ordinary-good cards. The initial wolf-camp count must be strictly less "
+            "than the number of all other players. A thief deck must permit two "
             "undealt choices while preserving those faction constraints after the thief chooses. "
             "Use canonical names even if the request contains aliases. Common aliases: "
             f"{ROLE_ALIAS_HELP}. There is no sheriff/police role.\n\n"
@@ -1660,7 +1662,7 @@ class WerewolfPlugin:
             f"{self.prefix} 平票 2：立即无人出局\n{self.prefix} 平票 3：随机一人出局",
         )
 
-    def _validate_role_counts(self, counts, player_count):
+    def _validate_role_counts(self, counts, player_count, victory=None):
         has_thief = int(counts.get("thief") or 0) == 1
         expected = player_count + 2 if has_thief else player_count
         if sum(counts.values()) != expected:
@@ -1671,26 +1673,28 @@ class WerewolfPlugin:
         deck = [role for role, count in counts.items() for _ in range(int(count))]
         if has_thief:
             deck.remove("thief")
-            if not self._valid_thief_choice_pairs(deck, player_count):
-                return "盗贼牌组无法保证发牌后仍有普通好人、神职和狼人，或狼人数量过多。"
+            if not self._valid_thief_choice_pairs(deck, player_count, victory):
+                return "盗贼牌组无法保证发牌后符合所选胜利条件的身份构成，或狼人数量过多。"
         else:
-            error = self._active_role_mix_error(deck)
+            error = self._active_role_mix_error(deck, victory)
             if error:
                 return error
         return ""
 
     @staticmethod
-    def _active_role_mix_error(roles):
+    def _active_role_mix_error(roles, victory=None):
         wolf_count = sum(role in WOLF_ROLES for role in roles)
         village_count = sum(role in VILLAGER_ROLES or role == "wild_child" for role in roles)
         divine_count = sum(role in DIVINE_ROLES for role in roles)
-        if not village_count or not divine_count or not wolf_count:
-            return "至少需要一名普通好人、一名神职和一名狼人阵营玩家。"
+        if not divine_count or not wolf_count:
+            return "至少需要一名神职和一名狼人阵营玩家。"
+        if victory == "slaughter_side" and not village_count:
+            return "边局至少需要一名普通好人。"
         if wolf_count >= len(roles) - wolf_count:
             return "狼人阵营初始人数必须少于其他玩家。"
         return ""
 
-    def _valid_thief_choice_pairs(self, deck, player_count):
+    def _valid_thief_choice_pairs(self, deck, player_count, victory=None):
         valid = []
         for first_index in range(len(deck)):
             for second_index in range(first_index + 1, len(deck)):
@@ -1701,7 +1705,7 @@ class WerewolfPlugin:
                 ]
                 allowed_choices = choices if any(role not in WOLF_ROLES for role in choices) else choices[:1]
                 if len(base) == player_count - 1 and all(
-                    not self._active_role_mix_error(base + [choice]) for choice in allowed_choices
+                    not self._active_role_mix_error(base + [choice], victory) for choice in allowed_choices
                 ):
                     valid.append((first_index, second_index))
         return valid
@@ -1759,7 +1763,14 @@ class WerewolfPlugin:
         if choice not in ("屠边", "屠城"):
             await self._safe_send(game["chat_id"], f"请选择 {self.prefix} 胜利 屠边 或 {self.prefix} 胜利 屠城。")
             return
-        game["settings"]["victory"] = "slaughter_side" if choice == "屠边" else "slaughter_city"
+        victory = "slaughter_side" if choice == "屠边" else "slaughter_city"
+        roles = game.get("settings", {}).get("roles")
+        if isinstance(roles, dict):
+            error = self._validate_role_counts(roles, len(game["players"]), victory)
+            if error:
+                await self._safe_send(game["chat_id"], f"{error} 当前角色配置可改选全局，或使用一键配置重新设置角色。")
+                return
+        game["settings"]["victory"] = victory
         game["settings"]["wolf_can_kill_wolves"] = True
         game["settings"]["show_vote_pattern"] = True
         game["settings"]["abstention_majority_no_exile"] = True
@@ -1847,7 +1858,11 @@ class WerewolfPlugin:
             self.rng.shuffle(roles)
             return roles, []
         roles.remove("thief")
-        valid_pairs = self._valid_thief_choice_pairs(roles, len(game["players"]))
+        valid_pairs = self._valid_thief_choice_pairs(
+            roles,
+            len(game["players"]),
+            game.get("settings", {}).get("victory"),
+        )
         first_index, second_index = self.rng.choice(valid_pairs)
         choices = [roles[first_index], roles[second_index]]
         dealt = [
