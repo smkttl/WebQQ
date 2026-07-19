@@ -16,6 +16,7 @@ STATE_VERSION = 6
 SUPPORTED_STATE_VERSIONS = (1, 2, 3, 4, 5, STATE_VERSION)
 NIGHT_ROLE_SECONDS = 45
 WOLF_ROLE_SECONDS = 30
+NIGHT_REMINDER_SECONDS = 30
 DEFAULT_AI_NAMES = [
     "Alice", "Bob", "Chris", "Dan", "Ella", "Frank", "Grace",
     "Helen", "Ivy", "Jack", "Kate", "Leo",
@@ -379,6 +380,11 @@ class WerewolfPlugin:
             game.setdefault("dawn_deaths", [])
             game.setdefault("night_timing", None)
             game.setdefault("night_timing_revision", 0)
+            timing = game.get("night_timing")
+            if isinstance(timing, dict):
+                timing.setdefault("reminder_sent", False)
+                timing.setdefault("time_up_notice_sent", False)
+                timing.setdefault("actor_ids", [])
             if game.pop("ai_preflight_pending", False):
                 migrated = True
             game.setdefault("host_action_proposal", None)
@@ -2131,6 +2137,7 @@ class WerewolfPlugin:
     def _start_night_timing(self, game, stage, started_at=None):
         started_at = float(time.time() if started_at is None else started_at)
         duration = self._night_stage_duration(game, stage)
+        actor_ids = [player["user_id"] for player in self._night_notice_actors(game, stage)]
         game["night_timing_revision"] = int(game.get("night_timing_revision") or 0) + 1
         game["night_timing"] = {
             "night": int(game.get("night") or 0),
@@ -2139,6 +2146,9 @@ class WerewolfPlugin:
             "deadline": started_at + duration,
             "duration": duration,
             "revision": game["night_timing_revision"],
+            "reminder_sent": False,
+            "time_up_notice_sent": False,
+            "actor_ids": actor_ids,
         }
         self._save()
         self._schedule_night_deadline(game["chat_id"])
@@ -2172,7 +2182,11 @@ class WerewolfPlugin:
             timing = game.get("night_timing") if game else None
             if not timing or (timing.get("night"), timing.get("stage"), timing.get("revision")) != token:
                 return
-            delay = float(timing.get("deadline") or 0) - time.time()
+            deadline = float(timing.get("deadline") or 0)
+            wake_at = deadline
+            if not timing.get("reminder_sent"):
+                wake_at = min(wake_at, deadline - NIGHT_REMINDER_SECONDS)
+            delay = wake_at - time.time()
             if delay > 0:
                 await asyncio.sleep(delay)
                 continue
@@ -2181,7 +2195,14 @@ class WerewolfPlugin:
                 timing = game.get("night_timing") if game else None
                 if not timing or (timing.get("night"), timing.get("stage"), timing.get("revision")) != token:
                     return
-                if time.time() < float(timing.get("deadline") or 0):
+                deadline = float(timing.get("deadline") or 0)
+                now = time.time()
+                if (
+                    not timing.get("reminder_sent")
+                    and deadline - NIGHT_REMINDER_SECONDS <= now < deadline
+                ):
+                    await self._send_night_stage_reminder(game, timing.get("stage"))
+                if now < deadline:
                     continue
                 await self._expire_night_stage(game)
                 should_drive = game.get("phase") != "ended" and any(
@@ -2190,6 +2211,60 @@ class WerewolfPlugin:
             if should_drive:
                 self._schedule_virtual_driver(chat_id)
             return
+
+    def _night_notice_specs(self, game, stage):
+        if stage == "initial":
+            return self._night_decision_specs(game)
+        if stage != "witch":
+            return []
+        specs = []
+        for key in game.get("night_actions", {}).get("witch_actor_keys") or []:
+            actor = self._witch_actor_for_key(game, key)
+            if actor and actor.get("alive"):
+                specs.append(self._night_spec(actor, "witch", key, "witch"))
+        return specs
+
+    def _night_notice_actors(self, game, stage, pending_only=False):
+        actors = {}
+        for spec in self._night_notice_specs(game, stage):
+            player = spec["player"]
+            if not player.get("alive") or (pending_only and self._night_spec_complete(game, spec)):
+                continue
+            actors[player["user_id"]] = player
+        return sorted(actors.values(), key=lambda player: player["seat"])
+
+    async def _send_night_stage_reminder(self, game, stage):
+        timing = game.get("night_timing") or {}
+        if timing.get("stage") != stage or timing.get("reminder_sent"):
+            return False
+        timing["reminder_sent"] = True
+        self._save()
+        for player in self._night_notice_actors(game, stage, pending_only=True):
+            await self._send_private(
+                game,
+                player,
+                f"本夜当前阶段剩余 {NIGHT_REMINDER_SECONDS} 秒。你仍有行动未提交，请尽快提交。",
+            )
+        return True
+
+    async def _send_night_stage_time_up(self, game, stage):
+        timing = game.get("night_timing") or {}
+        if timing.get("stage") != stage or timing.get("time_up_notice_sent"):
+            return False
+        timing["time_up_notice_sent"] = True
+        actor_ids = timing.get("actor_ids") or [
+            player["user_id"] for player in self._night_notice_actors(game, stage)
+        ]
+        self._save()
+        for actor_id in actor_ids:
+            player = self._player(game, actor_id)
+            if player and player.get("alive"):
+                await self._send_private(
+                    game,
+                    player,
+                    "本夜当前阶段时间已到，所有行动已锁定；未提交的行动视为过。",
+                )
+        return True
 
     def _night_stage_open(self, game, stage):
         timing = game.get("night_timing") or {}
@@ -2632,6 +2707,7 @@ class WerewolfPlugin:
         timing = game.get("night_timing") or {}
         stage = timing.get("stage")
         if stage == "initial" and game.get("phase") == "night_actions":
+            await self._send_night_stage_time_up(game, stage)
             self._cancel_virtual_driver_task(game["chat_id"])
             self._fill_missing_initial_actions(game, record_timeouts=True)
             self._save()
@@ -2644,6 +2720,7 @@ class WerewolfPlugin:
             )
             return
         if stage == "witch" and game.get("phase") == "witch":
+            await self._send_night_stage_time_up(game, stage)
             self._cancel_virtual_driver_task(game["chat_id"])
             actions = game["night_actions"]
             for key in actions.get("witch_actor_keys") or []:

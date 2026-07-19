@@ -1279,6 +1279,60 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["phase"], "witch")
         self.assertEqual(game["players"][4]["last_seer_result"]["result"], "狼人阵营")
 
+    async def test_night_reminder_and_time_up_notices_use_private_active_actor_lists(self):
+        game = await self.configured_six_player_game(start=True)
+        game["night_actions"]["wolves"]["3"] = "1"
+        game["players"][4]["alive"] = False
+        sent_before = len(self.ctx.sent)
+
+        self.assertTrue(await self.plugin._send_night_stage_reminder(game, "initial"))
+
+        reminders = [
+            item for item in self.ctx.sent[sent_before:]
+            if "剩余 30 秒" in item["text"]
+        ]
+        self.assertEqual([item["chat_id"] for item in reminders], ["temp_123_4"])
+        reminder_count = len(self.ctx.sent)
+        self.assertFalse(await self.plugin._send_night_stage_reminder(game, "initial"))
+        self.assertEqual(len(self.ctx.sent), reminder_count)
+
+        self.assertTrue(await self.plugin._send_night_stage_time_up(game, "initial"))
+
+        time_up = [
+            item for item in self.ctx.sent[reminder_count:]
+            if "时间已到" in item["text"]
+        ]
+        self.assertEqual(
+            [item["chat_id"] for item in time_up],
+            ["temp_123_3", "temp_123_4"],
+        )
+        time_up_count = len(self.ctx.sent)
+        self.assertFalse(await self.plugin._send_night_stage_time_up(game, "initial"))
+        self.assertEqual(len(self.ctx.sent), time_up_count)
+
+    async def test_night_scheduler_sends_thirty_second_reminder(self):
+        game = await self.configured_six_player_game(start=True)
+        self.plugin._cancel_night_deadline_task(game["chat_id"])
+        game["night_timing"]["deadline"] = time.time() + 0.2
+        game["night_timing"]["reminder_sent"] = False
+        sent_before = len(self.ctx.sent)
+        self.plugin._schedule_night_deadline(game["chat_id"])
+
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if any("剩余 30 秒" in item["text"] for item in self.ctx.sent[sent_before:]):
+                break
+
+        reminders = [
+            item for item in self.ctx.sent[sent_before:]
+            if "剩余 30 秒" in item["text"]
+        ]
+        self.assertEqual(
+            [item["chat_id"] for item in reminders],
+            ["temp_123_3", "temp_123_4", "temp_123_5"],
+        )
+        self.plugin._cancel_night_deadline_task(game["chat_id"])
+
     async def test_wolf_target_uses_role_priority_and_ignores_afk_wolves(self):
         game = await self.configured_six_player_game(start=False)
         for player, role in zip(
@@ -1324,6 +1378,11 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(game["night_actions"]["wolves"]["3"])
         self.assertNotEqual(game["night_actions"].get("wolf_target"), "1")
         self.assertIn("当前不能执行该夜间操作", self.ctx.sent[-1]["text"])
+        time_up = [item for item in self.ctx.sent if "时间已到" in item["text"]]
+        self.assertEqual(
+            [item["chat_id"] for item in time_up],
+            ["temp_123_3", "temp_123_4", "temp_123_5"],
+        )
         history = "\n".join(entry["text"] for entry in game["action_history"])
         self.assertIn("夜间狼人行动超时", history)
 
