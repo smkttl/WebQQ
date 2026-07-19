@@ -54,6 +54,7 @@ ROLE_NAMES = {
     "wild_child": "野孩子",
     "mixed_blood": "混血儿",
     "angel": "天使",
+    "echoer": "回响者",
 }
 ROLE_ALIAS_GROUPS = {
     "villager": ("平民", "民"),
@@ -80,6 +81,7 @@ ROLE_ALIAS_GROUPS = {
     "piper": ("吹笛",),
     "wild_child": ("野孩",),
     "mixed_blood": ("混血",),
+    "echoer": ("回响", "回声"),
 }
 ROLE_ALIASES = {
     alias: role for role, aliases in ROLE_ALIAS_GROUPS.items() for alias in aliases
@@ -104,7 +106,7 @@ DIVINE_ROLES = {
     "dreamer", "magician", "bear_tamer", "crow", "silencer", "nine_tailed_fox",
 }
 VILLAGER_ROLES = {"villager", "rogue"}
-NEUTRAL_ROLES = {"thief", "piper", "cursed_fox", "mixed_blood", "angel"}
+NEUTRAL_ROLES = {"thief", "piper", "cursed_fox", "mixed_blood", "angel", "echoer"}
 SPECIAL_ROLES = set(ROLE_NAMES) - {"villager", "wolf"}
 COPYABLE_ROLES = {
     "seer", "witch", "hunter", "guard", "knight", "white_wolf_king", "dreamer",
@@ -151,6 +153,7 @@ ROLE_HELP = {
     "wild_child": "首夜选择榜样，榜样存活时属于普通好人；榜样死亡后加入狼队。",
     "mixed_blood": "首夜选择支持一名玩家；该玩家最终获胜时混血儿共同获胜。",
     "angel": "若第一天被公投出局则独自获胜，否则第一天投票后变为普通村民。",
+    "echoer": "被公投离场时，本轮所有投给自己的玩家一同离场；所有连锁效果、最终行动和离场发言结束后，若没有其他玩家存留，则独自获胜，否则失败。",
 }
 
 TIE_POLICIES = {
@@ -396,6 +399,7 @@ class WerewolfPlugin:
             game.setdefault("wolf_beauty_target", None)
             game.setdefault("good_skills_sealed_night", 0)
             game.setdefault("blood_moon_doomed", None)
+            game.setdefault("echoer_resolution_pending", None)
             game.setdefault("result_winners", [])
             game.setdefault("role_notifications", [])
             settings = game.setdefault("settings", {})
@@ -1054,6 +1058,7 @@ class WerewolfPlugin:
             "wolf_beauty_target": None,
             "good_skills_sealed_night": 0,
             "blood_moon_doomed": None,
+            "echoer_resolution_pending": None,
             "result_winners": [],
             "role_notifications": [],
         }
@@ -1809,6 +1814,7 @@ class WerewolfPlugin:
         game["charmed_players"] = []
         game["last_exile"] = None
         game["blood_moon_doomed"] = None
+        game["echoer_resolution_pending"] = None
         game["result_winners"] = []
         game["ai_pending_speeches"] = []
         game["ai_pending_wolf_replies"] = []
@@ -2015,6 +2021,7 @@ class WerewolfPlugin:
             "【狼人杀规则】\n"
             f"夜间角色通过临时会话行动。非讨论角色的阶段配额为 45 秒；狼队讨论配额为配置中狼人阵营牌数 × 30 秒，同一阶段取最长配额。阶段即使提前完成也会等到截止时间，超时视为跳过；时间始终按开局公开配置保留，不随角色死亡变化。每天先进行死亡发言和随机起点的顺序发言，每人发送 {self.prefix} 过结束当前发言；随后进入自由讨论，达到结束自由发言阈值后进入私密投票。\n"
             "守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
+            "狼队最终目标只在已提交有效目标的成员中决定，优先级为狼王高于白狼王、白狼王高于其他狼队成员；同一最高优先级有多个提交时随机采用其中一个。未提交或选择跳过不参与决定。\n"
             "骑士在白天讨论时可公开决斗一次：目标是狼人则该狼人死亡且不能发动死亡技能，随后入夜；目标不是狼人则骑士死亡，讨论继续。\n"
             "白狼王属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家；两人死亡并结算死亡技能后直接入夜。\n"
             "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利；屠城：全部非狼人阵营玩家死亡时，狼人胜利。具体采用哪种条件以本局设置为准。\n"
@@ -2732,14 +2739,13 @@ class WerewolfPlugin:
         game["silenced_ids"] = silenced_ids
         game["silenced_id"] = silenced_ids[0] if silenced_ids else None
 
-        wolf_choices = [uid for uid in actions.get("wolves", {}).values() if uid]
-        raw_wolf_target = self._plurality(wolf_choices)
+        raw_wolf_target = self._select_wolf_target(game)
         actions["wolf_target"] = self._night_target(game, raw_wolf_target)
         wolf_target = self._player(game, actions["wolf_target"])
         if wolf_target:
             self._record_action(game, f"狼队最终刀口为{self._history_player_label(wolf_target)}。")
         else:
-            self._record_action(game, "狼队未形成唯一刀口，本夜空刀。")
+            self._record_action(game, "狼队没有提交有效目标，本夜空刀。")
 
         charmed = [self._player(game, uid) for uid in game.get("charmed_players", [])]
         charmed_labels = "、".join(f"{player['seat']}号 {player['name']}" for player in charmed if player)
@@ -2922,22 +2928,25 @@ class WerewolfPlugin:
             player["death_causes"] = sorted(causes.get(uid) or {"unknown"})
             newly_dead.append(player)
             cause_names = {
-                "wolf": "狼刀",
-                "poison": "毒药",
-                "shot": "开枪",
+                "wolf": "狼人选择能力",
+                "poison": "女巫选择能力",
+                "shot": "离场角色选择能力",
+                "hunter_selection": "猎人选择能力",
+                "wolf_king_selection": "狼王选择能力",
                 "exile": "公投",
                 "heartbreak": "情侣殉情",
-                "duel": "骑士决斗",
-                "duel_failed": "决斗失败",
+                "duel": "骑士选择能力",
+                "duel_failed": "骑士选择能力失败",
                 "white_wolf_blast": "白狼王自爆带走",
                 "white_wolf_blast_self": "白狼王自爆",
-                "blood_moon_blast": "血月使徒血爆",
+                "blood_moon_blast": "月影使徒选择能力",
                 "blood_moon_delayed": "血月使徒延迟死亡",
                 "evil_reflect": "恶灵骑士反伤",
                 "fox_checked": "咒狐被查验",
                 "dream_follow": "摄梦人死亡牵连",
                 "beauty_follow": "狼美人魅惑殉情",
                 "tails_exhausted": "九尾耗尽",
+                "echo_rebound": "回响牵连",
                 "unknown": "未知原因",
             }
             labels = "、".join(cause_names.get(cause, cause) for cause in player["death_causes"])
@@ -2955,7 +2964,10 @@ class WerewolfPlugin:
             if night_death_resolution and uid not in game.setdefault("dawn_deaths", []):
                 game["dawn_deaths"].append(uid)
             if (
-                {"exile", "heartbreak", "shot", "beauty_follow"} & causes.get(uid, set())
+                {
+                    "exile", "heartbreak", "shot", "hunter_selection", "wolf_king_selection",
+                    "beauty_follow", "echo_rebound",
+                } & causes.get(uid, set())
                 and uid not in game.setdefault("pending_last_words", [])
             ):
                 game["pending_last_words"].append(uid)
@@ -3012,6 +3024,18 @@ class WerewolfPlugin:
             if not shooter:
                 game["pending_shots"].pop(0)
                 continue
+            if not self._living(game):
+                game["pending_shots"].pop(0)
+                self._record_action(
+                    game,
+                    f"{self._history_player_label(shooter)}没有可选目标，最终行动自动视为跳过。",
+                )
+                await self._safe_send(
+                    game["chat_id"],
+                    f"{shooter['seat']}号 {shooter['name']} 没有可选目标，最终行动自动视为过。",
+                )
+                self._save()
+                continue
             game["phase"] = "death_shot"
             self._save()
             await self._send_private(
@@ -3047,7 +3071,8 @@ class WerewolfPlugin:
                 await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 开枪射击 {target['seat']}号 {target['name']}，但目标免疫本次夜间伤害。")
             else:
                 await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 开枪带走了 {target['seat']}号 {target['name']}。")
-                newly_dead = self._apply_deaths(game, [(target["user_id"], "shot")])
+                cause = "wolf_king_selection" if player.get("role") == "wolf_king" else "hunter_selection"
+                newly_dead = self._apply_deaths(game, [(target["user_id"], cause)])
             chained = [item for item in newly_dead if item["user_id"] != target["user_id"]]
             if chained:
                 labels = "、".join(f"{item['seat']}号 {item['name']}" for item in chained)
@@ -3072,6 +3097,14 @@ class WerewolfPlugin:
         await self._deliver_role_notifications(game)
         if pack_changed:
             await self._notify_wolf_pack(game)
+        if game.get("echoer_resolution_pending"):
+            last_words = list(dict.fromkeys(game.get("pending_last_words") or []))
+            game["pending_last_words"] = []
+            if last_words:
+                await self._start_speech_sequence(game, last_words, "last_words", "echoer_resolution")
+            else:
+                await self._complete_echoer_resolution(game)
+            return
         winner = self._winner(game)
         if winner:
             await self._finish_game(game, winner)
@@ -3092,6 +3125,30 @@ class WerewolfPlugin:
             await self._resume_free_discussion(game)
         else:
             await self._begin_night(game)
+
+    async def _complete_echoer_resolution(self, game):
+        echoer_id = game.get("echoer_resolution_pending")
+        if not echoer_id:
+            await self._after_deaths(game)
+            return
+        echoer = self._player(game, echoer_id)
+        living = self._living(game)
+        game["echoer_resolution_pending"] = None
+        if not living:
+            self._record_action(
+                game,
+                f"{self._history_player_label(echoer)}的回响效果结算后没有其他玩家存留，达成独立胜利。",
+            )
+            self._save()
+            await self._finish_game(game, "echoer")
+            return
+        survivors = "、".join(self._history_player_label(player) for player in living)
+        self._record_action(
+            game,
+            f"{self._history_player_label(echoer)}的回响效果结算后仍有玩家存留：{survivors}；未达成独立胜利。",
+        )
+        self._save()
+        await self._after_deaths(game)
 
     async def _deliver_role_notifications(self, game):
         notifications = list(game.get("role_notifications") or [])
@@ -3270,7 +3327,9 @@ class WerewolfPlugin:
 
     async def _continue_after_speech(self, game, continuation):
         game["speech_state"] = None
-        if continuation == "morning_order":
+        if continuation == "echoer_resolution":
+            await self._complete_echoer_resolution(game)
+        elif continuation == "morning_order":
             await self._begin_morning_order(game)
         elif continuation == "free_discussion":
             await self._begin_free_discussion(game)
@@ -3652,6 +3711,42 @@ class WerewolfPlugin:
             game["transition_after_shots"] = "night"
             await self._after_deaths(game)
             return
+        if player["role"] == "echoer":
+            voter_ids = [
+                voter["user_id"] for voter in self._eligible_voters(game)
+                if game.get("votes", {}).get(voter["user_id"]) == user_id
+                and voter["user_id"] != user_id
+            ]
+            game["echoer_resolution_pending"] = user_id
+            game["transition_after_shots"] = "night"
+            self._record_action(game, f"公投决定{self._history_player_label(player)}离场并触发回响效果。")
+            voter_labels = "、".join(
+                self._history_player_label(self._player(game, voter_id)) for voter_id in voter_ids
+            ) or "无"
+            self._record_action(game, f"本轮投给回响者的玩家：{voter_labels}。")
+            newly_dead = self._apply_deaths(
+                game,
+                [(user_id, "exile")] + [(voter_id, "echo_rebound") for voter_id in voter_ids],
+            )
+            game["last_exile"] = user_id
+            await self._convert_angel_after_first_vote(game)
+            await self._safe_send(
+                game["chat_id"],
+                f"{player['seat']}号 {player['name']} 被公投离场，翻牌为回响者。",
+            )
+            affected = [self._player(game, voter_id) for voter_id in voter_ids]
+            affected_labels = "、".join(
+                f"{item['seat']}号 {item['name']}" for item in affected if item
+            ) or "无"
+            await self._safe_send(game["chat_id"], f"回响效果：本轮投给该身份的玩家一同离场：{affected_labels}。")
+            direct_ids = {user_id, *voter_ids}
+            chained = [item for item in newly_dead if item["user_id"] not in direct_ids]
+            if chained:
+                labels = "、".join(f"{item['seat']}号 {item['name']}" for item in chained)
+                await self._safe_send(game["chat_id"], f"连锁离场：{labels}。")
+            self._save()
+            await self._continue_death_resolution(game)
+            return
         self._record_action(game, f"公投决定放逐{self._history_player_label(player)}。")
         await self._safe_send(game["chat_id"], f"{player['seat']}号 {player['name']} 被公投出局。")
         game["transition_after_shots"] = "night"
@@ -3792,6 +3887,8 @@ class WerewolfPlugin:
 
     def _winner(self, game):
         living = self._living(game)
+        if game.get("echoer_resolution_pending"):
+            return "echoer" if not living else None
         if game.get("blood_moon_doomed"):
             return None
         piper = next((player for player in living if player["role"] == "piper"), None)
@@ -3827,6 +3924,7 @@ class WerewolfPlugin:
                 "piper": "吹笛者",
                 "fox": "咒狐",
                 "angel": "天使",
+                "echoer": "回响者",
             }[winner]
             self._record_action(game, f"胜负判定：{winner_name}获胜。")
         game["result_winners"] = self._result_winner_ids(game, winner)
@@ -3840,6 +3938,7 @@ class WerewolfPlugin:
         game["speech_state"] = None
         game["pending_last_words"] = []
         game["dawn_deaths"] = []
+        game["echoer_resolution_pending"] = None
         self._remember_last_configuration(game)
         self._cancel_virtual_tasks(game["chat_id"])
         self._save()
@@ -3875,7 +3974,9 @@ class WerewolfPlugin:
         elif winner == "lovers":
             winners = list(game.get("lovers") or [])
         else:
-            role = {"piper": "piper", "fox": "cursed_fox", "angel": "angel"}[winner]
+            role = {
+                "piper": "piper", "fox": "cursed_fox", "angel": "angel", "echoer": "echoer",
+            }[winner]
             winners = [player["user_id"] for player in game["players"] if player.get("original_role") == role or player["role"] == role]
         winner_set = set(winners)
         for player in game["players"]:
@@ -3893,7 +3994,7 @@ class WerewolfPlugin:
         else:
             winner_name = {
                 "good": "好人阵营", "wolves": "狼人阵营", "lovers": "跨阵营情侣",
-                "piper": "吹笛者", "fox": "咒狐", "angel": "天使",
+                "piper": "吹笛者", "fox": "咒狐", "angel": "天使", "echoer": "回响者",
             }[winner]
             result_line = f"游戏结束，{winner_name}获胜。"
         roles = "\n".join(self._role_reveal_lines(game))
@@ -3929,7 +4030,8 @@ class WerewolfPlugin:
         if winner:
             winner_name = {
                 "good": "好人阵营", "wolves": "狼人阵营", "lovers": "跨阵营情侣",
-                "piper": "吹笛者", "fox": "咒狐", "angel": "天使", "terminated": "房主提前终止",
+                "piper": "吹笛者", "fox": "咒狐", "angel": "天使", "echoer": "回响者",
+                "terminated": "房主提前终止",
             }.get(winner, str(winner))
             lines.append(f"本局结果：{winner_name}")
             winners = [self._player(game, uid) for uid in game.get("result_winners", [])]
@@ -4305,8 +4407,9 @@ class WerewolfPlugin:
             f"- Abstention rule: {abstention_rule}\n"
             f"{timing_rule}"
             "- Phase flow: setup and initial night abilities resolve first, then all ordinary night targets are redirected "
-            "and fixed; witch-type abilities act after the wolf target is fixed. Living active-pack wolves submit individual kill choices; plurality selects the victim and a "
-            "top tie means no wolf kill. Night deaths resolve together before triggered shots and victory checks. "
+            "and fixed; witch-type abilities act after the wolf target is fixed. Living active-pack wolves submit individual kill choices. Only non-pass submissions participate; "
+            "the highest acting tier controls (Wolf King, then White Wolf King, then every other active-pack wolf), and one submission is chosen randomly when multiple wolves share "
+            "the highest acting tier. Therefore any submitted target produces a wolf target. Night deaths resolve together before triggered shots and victory checks. "
             "Each day uses mandatory death speeches when applicable, then a random-start circular living-player speaking order; "
             "each controlled speaker must pass before the next turn. This is followed by free discussion, readiness confirmation, "
             "and private voting. Public daytime abilities are legal only during free discussion.\n"
@@ -4344,6 +4447,11 @@ class WerewolfPlugin:
             objective = "Ensure your privately selected supported player becomes a final winner."
         elif role == "angel" and not player.get("angel_converted"):
             objective = "Be publicly exiled on day one; otherwise continue as a villager."
+        elif role == "echoer":
+            objective = (
+                "Be publicly exiled. Every voter whose decisive-round ballot targets you then leaves; after all "
+                "linked effects, final actions, and mandatory final speeches, you win only if nobody else remains alive."
+            )
         else:
             objective = "Help the good faction eliminate every wolf-aligned role."
         lines = [
@@ -5496,14 +5604,19 @@ class WerewolfPlugin:
                 target = str(pair[0])
         return target
 
-    @staticmethod
-    def _plurality(values):
-        if not values:
+    def _select_wolf_target(self, game):
+        priorities = {"wolf_king": 3, "white_wolf_king": 2}
+        choices = []
+        for actor_id, target_id in game.get("night_actions", {}).get("wolves", {}).items():
+            actor = self._player(game, actor_id)
+            if not actor or not target_id:
+                continue
+            choices.append((priorities.get(actor.get("role"), 1), target_id))
+        if not choices:
             return None
-        counts = {value: values.count(value) for value in set(values)}
-        maximum = max(counts.values())
-        top = [value for value, count in counts.items() if count == maximum]
-        return top[0] if len(top) == 1 else None
+        highest = max(priority for priority, _target in choices)
+        finalists = [target for priority, target in choices if priority == highest]
+        return finalists[0] if len(finalists) == 1 else self.rng.choice(finalists)
 
     @staticmethod
     def _is_host(game, user_id):
