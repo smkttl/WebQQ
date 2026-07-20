@@ -33,6 +33,18 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 
 Then open `http://localhost:8080` (or your configured `web_port`) in a browser.
 
+## Terminal Client
+
+WebQQ also includes a keyboard-first terminal client. It connects to the same HTTP/WebSocket server and works locally, remotely, and over SSH:
+
+```bash
+python3 webqq_tui.py --url http://localhost:8080
+```
+
+Use `--token`, or the `WEBQQ_TOKEN` environment variable, when web authentication is enabled. If neither is supplied, the client prompts without echoing the token. `WEBQQ_URL` sets the server URL, and `--download-dir` selects where attachments are saved.
+
+The main controls are `Tab` / `Shift+Tab` to move focus, arrow keys or `j` / `k` to navigate, `Enter` to open a chat or send, `Ctrl+J` to insert a newline, `Esc` to return to chat selection, `Ctrl+F` to filter or search, `r` to reply, `Ctrl+O` to upload a file, `d` to download an attachment, and `q` to quit. Terminals below 80 columns and portrait terminals use a mobile-style one-pane flow; the minimum supported terminal size is 32 columns by 10 rows.
+
 ## Configuration
 
 Configuration is stored in `config.json` (gitignored). A template is provided in `config.json.example`.
