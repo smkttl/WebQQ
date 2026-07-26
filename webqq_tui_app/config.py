@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +8,19 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_SERVER_URL = "http://localhost:8080"
+LOCAL_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+
+
+def local_server_url(config_path: Path = LOCAL_CONFIG_PATH) -> str:
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            config = json.load(handle)
+        port = int(config.get("web_port", 8080))
+        if not 1 <= port <= 65535:
+            raise ValueError
+        return "http://localhost:{}".format(port)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return DEFAULT_SERVER_URL
 
 
 def normalize_server_url(value: str) -> str:
@@ -46,7 +60,7 @@ class TuiConfig:
         )
         args = parser.parse_args(argv)
         env = os.environ if environ is None else environ
-        server_url = normalize_server_url(args.url or env.get("WEBQQ_URL", DEFAULT_SERVER_URL))
+        server_url = normalize_server_url(args.url or env.get("WEBQQ_URL") or local_server_url())
         token = args.token if args.token is not None else env.get("WEBQQ_TOKEN")
         download_dir = (args.download_dir or Path.cwd()).expanduser().resolve()
         return cls(server_url=server_url, token=token, download_dir=download_dir)

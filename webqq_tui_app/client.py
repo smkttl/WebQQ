@@ -201,6 +201,11 @@ class WebQQClient:
             if allow_auth_error:
                 return payload
             raise AuthenticationError(str(payload.get("error") or "unauthorized"))
+        if response.status == 404:
+            raise ServerResponseError(
+                "WebQQ API not found at {}; check --url and do not include /api".format(self.config.server_url),
+                response.status,
+            )
         if response.status >= 400:
             raise ServerResponseError(str(payload.get("error") or "HTTP {}".format(response.status)), response.status)
         return payload

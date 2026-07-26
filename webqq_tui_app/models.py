@@ -6,6 +6,8 @@ from urllib.parse import unquote, urlsplit
 
 from rich.text import Text
 
+from .emoji import explain_emoji
+
 
 @dataclass(frozen=True)
 class Chat:
@@ -64,6 +66,7 @@ class Message:
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "Message":
         raw = dict(data)
+        message_id = _identifier(data.get("message_id"))
         attachments: List[Attachment] = []
         for kind, key in (("image", "images"), ("file", "files"), ("video", "videos"), ("voice", "records")):
             values = data.get(key)
@@ -77,7 +80,7 @@ class Message:
         mentions = data.get("mentions") if isinstance(data.get("mentions"), dict) else {}
         return cls(
             chat_id=str(data.get("chat_id") or ""),
-            message_id=_identifier(data.get("message_id")),
+            message_id=message_id,
             local_id=_identifier(data.get("local_id")),
             timestamp=_number(data.get("time")),
             sender_id=_identifier(data.get("sender_id")),
@@ -90,7 +93,7 @@ class Message:
             extra_segments=_dict_list(data.get("extra_segments")),
             reactions=_dict_list(data.get("reactions")),
             recalled=bool(data.get("recalled")),
-            pending=bool(data.get("pending")),
+            pending=bool(data.get("pending")) and not bool(message_id),
             send_error=str(data.get("send_error") or ""),
             raw=raw,
         )
@@ -110,6 +113,8 @@ class Message:
     def merged(self, update: Mapping[str, Any]) -> "Message":
         raw = dict(self.raw)
         raw.update(update)
+        if update.get("message_id") is not None and "pending" not in update:
+            raw.pop("pending", None)
         return Message.from_json(raw)
 
 
@@ -181,11 +186,13 @@ def format_timestamp(timestamp: float, now: Optional[datetime] = None) -> str:
 MENTION_RE = re.compile(r"@\[(\d+)\]")
 REPLY_RE = re.compile(r"\[reply:([^\]]+)\]")
 MEDIA_TOKEN_RE = re.compile(r"\[(?:image|file|video|voice|forward)\]")
+FACE_RE = re.compile(r"\[face:(\d+)\]")
 
 
 def display_content(message: Message) -> str:
     content = MENTION_RE.sub(lambda match: "@" + message.mentions.get(match.group(1), match.group(1)), message.content)
     content = REPLY_RE.sub(lambda match: "reply to #" + match.group(1), content)
+    content = FACE_RE.sub(lambda match: explain_emoji(match.group(1)), content)
     # Structured attachments are rendered below, so their transport tokens are noise here.
     if message.attachments or message.forwards:
         content = MEDIA_TOKEN_RE.sub("", content)
@@ -258,7 +265,7 @@ def format_message(message: Message, compact: bool = False, search: str = "") ->
         for reaction in message.reactions:
             emoji_id = str(reaction.get("emoji_id") or "?")
             count = _integer(reaction.get("count"))
-            labels.append("[face:{}] x{}".format(emoji_id, count or 1))
+            labels.append("{} x{}".format(explain_emoji(emoji_id), count or 1))
         text.append("\n" + "  ".join(labels), style="yellow")
     if message.send_error and not compact:
         text.append("\n" + message.send_error, style="red")
@@ -305,10 +312,20 @@ def deduplicate_messages(messages: Iterable[Message]) -> List[Message]:
             existing = len(result)
             result.append(message)
         else:
-            result[existing] = message
+            previous = result[existing]
+            if _message_quality(message) >= _message_quality(previous):
+                result[existing] = message
         for key in keys:
             positions[key] = existing
         if message.local_id:
             local_positions[message.local_id] = existing
     result.sort(key=lambda item: (item.timestamp, item.message_id or item.local_id))
     return result
+
+
+def _message_quality(message: Message) -> tuple:
+    return (
+        not message.pending,
+        message.sender_id not in ("", "self"),
+        bool(message.raw.get("chat_name")),
+    )

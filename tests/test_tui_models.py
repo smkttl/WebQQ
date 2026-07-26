@@ -1,9 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from webqq_tui_app.client import collision_safe_path, safe_filename
-from webqq_tui_app.config import TuiConfig, normalize_server_url
+from webqq_tui_app.config import DEFAULT_SERVER_URL, TuiConfig, local_server_url, normalize_server_url
+from webqq_tui_app.emoji import explain_emoji, load_emoji_names
 from webqq_tui_app.models import (
     Chat,
     Message,
@@ -38,6 +40,20 @@ class TuiConfigTests(unittest.TestCase):
         self.assertEqual(config.server_url, "http://server.test/base")
         self.assertEqual(config.token, "secret")
 
+    def test_local_config_port_is_default_when_url_is_unspecified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text('{"web_port": 14232}', encoding="utf-8")
+            with patch("webqq_tui_app.config.local_server_url", return_value=local_server_url(config_path)):
+                config = TuiConfig.from_args([], {})
+            self.assertEqual(config.server_url, "http://localhost:14232")
+
+    def test_invalid_local_config_falls_back_to_standard_port(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text('{"web_port": 99999}', encoding="utf-8")
+            self.assertEqual(local_server_url(config_path), DEFAULT_SERVER_URL)
+
 
 class TuiModelTests(unittest.TestCase):
     def test_rich_message_normalization_and_summary(self):
@@ -59,7 +75,7 @@ class TuiModelTests(unittest.TestCase):
         self.assertIn("[image: a.png]", rendered)
         self.assertIn("[file: notes.txt (1.5 KB)]", rendered)
         self.assertIn("[music] Track", rendered)
-        self.assertIn("[face:14] x2", rendered)
+        self.assertIn("[face:14 微笑] x2", rendered)
         self.assertEqual(len(message.downloadable_attachments), 2)
 
     def test_compact_rendering_keeps_attachment_information(self):
@@ -83,7 +99,42 @@ class TuiModelTests(unittest.TestCase):
         messages = deduplicate_messages([pending, confirmed])
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0].message_id, "99")
+        self.assertFalse(messages[0].pending)
         self.assertTrue(message_matches(messages[0], "draft"))
+
+    def test_confirmed_message_wins_over_late_pending_duplicate(self):
+        confirmed = Message.from_json({
+            "chat_id": "group_1", "message_id": 99, "time": 10, "sender_id": 42,
+            "sender_name": "Me", "content": "sent", "self": True,
+        })
+        stale = Message.from_json({
+            "chat_id": "group_1", "message_id": 99, "local_id": "late", "time": 10,
+            "sender_id": "self", "sender_name": "You", "content": "sent", "self": True, "pending": True,
+        })
+        messages = deduplicate_messages([confirmed, stale])
+        self.assertEqual(len(messages), 1)
+        self.assertFalse(messages[0].pending)
+        self.assertEqual(messages[0].sender_id, "42")
+
+    def test_server_confirmation_clears_merged_pending_state(self):
+        pending = Message.from_json({
+            "chat_id": "group_1", "local_id": "local-a", "content": "sent", "pending": True,
+        })
+        confirmed = pending.merged({"message_id": 99, "sender_id": 1})
+        self.assertEqual(confirmed.message_id, "99")
+        self.assertFalse(confirmed.pending)
+
+    def test_known_emoji_has_explanation_and_unknown_id_is_preserved(self):
+        self.assertEqual(explain_emoji("14"), "[face:14 微笑]")
+        self.assertEqual(explain_emoji("999999999"), "[face:999999999]")
+        message = Message.from_json({"content": "hello [face:14] [face:999999999]"})
+        self.assertEqual(display_content(message), "hello [face:14 微笑] [face:999999999]")
+
+    def test_invalid_emoji_map_loads_as_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "invalid.json"
+            path.write_text("not json", encoding="utf-8")
+            self.assertEqual(load_emoji_names(path), {})
 
     def test_chat_and_size_formatting(self):
         chat = Chat("group_1", "Group", "group", 100, "preview")

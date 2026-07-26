@@ -82,22 +82,29 @@ async def send_text_and_register(napcat, store, chat_id, text, reply_to=None, so
         raise RuntimeError(err)
     message_id = extract_message_id(result)
     if optimistic:
+        simplified["pending"] = False
         if message_id is not None:
             simplified["message_id"] = message_id
             store._reindex_chat(chat_id)
-            store._dirty.add(chat_id)
-            await napcat._broadcast({
-                "type": "message_update",
-                "data": {
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "local_id": simplified.get("local_id"),
-                    "message": simplified,
-                },
-            })
+        store._dirty.add(chat_id)
+        await napcat._broadcast({
+            "type": "message_update",
+            "data": {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "local_id": simplified.get("local_id"),
+                "message": simplified,
+                "patch": {"pending": False},
+            },
+        })
     else:
+        existing = store.find_message(message_id, chat_id=chat_id) if message_id is not None else None
+        if existing:
+            return {"result": result, "message": existing["message"]}
         simplified = make_local_self_message(store, parsed_chat, chat_id, text, reply_to=reply_to, message_id=message_id, source=source)
         store.register_pending_local_message(chat_id, simplified)
+        if message_id is not None:
+            simplified["pending"] = False
         update_chat_after_local_send(store, chat_id, parsed_chat, text, now=simplified["time"])
         await napcat._broadcast({"type": "new_message", "data": simplified})
         dispatch_plugin_message_later(napcat, simplified, raw=None)

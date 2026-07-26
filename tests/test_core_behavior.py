@@ -17,6 +17,7 @@ from webqq_app.common import (
     recall_notice_text,
 )
 from webqq_app.napcat import NapCatConnection
+from webqq_app.messaging import send_text_and_register
 from webqq_app.store import MessageStore
 
 
@@ -197,6 +198,49 @@ class MessageStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.current_group_role(123), "admin")
             self.assertEqual(store.get_group_member_role(123, 10002), "member")
+
+
+class SendRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_send_with_message_id_is_not_left_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            broadcasts = []
+
+            async def send_message(chat_id, text, reply_to=None):
+                return {"status": "ok", "data": {"message_id": 123}}
+
+            async def broadcast(payload):
+                broadcasts.append(payload)
+
+            napcat = SimpleNamespace(send_message=send_message, _broadcast=broadcast, plugins=None)
+            sent = await send_text_and_register(napcat, store, "group_1", "hello")
+
+            self.assertEqual(sent["message"]["message_id"], 123)
+            self.assertFalse(sent["message"]["pending"])
+            self.assertFalse(broadcasts[0]["data"]["pending"])
+
+    async def test_early_message_echo_prevents_late_pending_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            confirmed = {
+                "chat_id": "group_1", "message_id": 123, "time": int(time.time()),
+                "sender_id": 1, "sender_name": "Me", "content": "hello", "self": True,
+            }
+            store.append_simplified("group_1", confirmed)
+            broadcasts = []
+
+            async def send_message(chat_id, text, reply_to=None):
+                return {"status": "ok", "data": {"message_id": 123}}
+
+            async def broadcast(payload):
+                broadcasts.append(payload)
+
+            napcat = SimpleNamespace(send_message=send_message, _broadcast=broadcast, plugins=None)
+            sent = await send_text_and_register(napcat, store, "group_1", "hello")
+
+            self.assertIs(sent["message"], confirmed)
+            self.assertEqual(len(store.get_messages("group_1")), 1)
+            self.assertEqual(broadcasts, [])
 
 
 class RevokeHandlerTests(unittest.IsolatedAsyncioTestCase):
