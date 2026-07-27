@@ -151,6 +151,28 @@ async def handle_poke(request):
     return web.json_response({"ok": True, "data": data})
 
 
+async def handle_forward(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    forward_id = str(request.query.get("id", "")).strip()
+    if not forward_id or len(forward_id) > 256:
+        return web.json_response({"ok": False, "error": "forward id is required"}, status=400)
+    try:
+        result = await request.app["napcat"].fetch_forward(forward_id)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    if not result or result.get("status") != "ok":
+        err = result.get("wording", result.get("message", "forward unavailable")) if result else "not connected"
+        return web.json_response({"ok": False, "error": err}, status=500)
+    forward = request.app["store"]._simplify_forward_segment({
+        "id": forward_id,
+        "content": result.get("data"),
+    })
+    if not forward.get("nodes"):
+        return web.json_response({"ok": False, "error": "forward content is empty"}, status=500)
+    return web.json_response({"ok": True, "forward": forward})
+
+
 async def handle_send_file(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)

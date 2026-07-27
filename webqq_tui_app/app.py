@@ -23,6 +23,8 @@ from .models import (
     display_content,
     format_chat,
     format_message,
+    forward_nodes,
+    forward_status_label,
     message_matches,
 )
 
@@ -181,6 +183,72 @@ class AttachmentPicker(ModalScreen):
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if isinstance(event.item, AttachmentListItem):
             self.dismiss(event.item.attachment)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ForwardNodeListItem(ListItem):
+    def __init__(self, node: Mapping[str, Any], compact: bool = False):
+        self.message = Message.from_json(node)
+        super().__init__(Static(format_message(self.message, compact=compact), markup=False))
+
+
+class ForwardViewer(ModalScreen):
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+    CSS = """
+    ForwardViewer { align: center middle; background: $background 70%; }
+    ForwardViewer > Container { width: 96; max-width: 96%; height: 90%; min-height: 6; border: solid $accent; background: $surface; padding: 1; }
+    ForwardViewer #forward_title { height: 2; text-style: bold; }
+    ForwardViewer #forward_list { height: 1fr; }
+    ForwardViewer #forward_list > ListItem { height: auto; min-height: 3; padding: 0 1 1 1; }
+    ForwardViewer .hint { height: 1; color: $text-muted; }
+    """
+
+    def __init__(self, client: WebQQClient, forward: Mapping[str, Any]):
+        super().__init__()
+        self.client = client
+        self.forward = forward if isinstance(forward, dict) else dict(forward)
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Forwarded messages", id="forward_title")
+            yield NavigableListView(id="forward_list")
+            yield Static("Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        await self._load_and_render()
+
+    async def _load_and_render(self) -> None:
+        nodes = forward_nodes(self.forward)
+        forward_id = str(self.forward.get("id") or "")
+        if not nodes and forward_id:
+            self.query_one("#forward_title", Static).update("Forwarded messages  [loading]")
+            try:
+                resolved = dict(await self.client.forward(forward_id))
+                self.forward.clear()
+                self.forward.update(resolved)
+            except Exception as exc:
+                self.forward["status"] = "unavailable"
+                self.forward["error"] = str(exc)
+        nodes = forward_nodes(self.forward)
+        title = str(self.forward.get("title") or "Forwarded messages")
+        self.query_one("#forward_title", Static).update(
+            "{}  [{}]".format(title, forward_status_label(self.forward))
+        )
+        view = self.query_one("#forward_list", ListView)
+        await view.clear()
+        if nodes:
+            await view.extend(ForwardNodeListItem(node, compact=self.app.short) for node in nodes)
+            view.index = 0
+        else:
+            error = str(self.forward.get("error") or "Forward content is unavailable")
+            await view.append(ListItem(Static(error, markup=False)))
+        view.focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if isinstance(event.item, ForwardNodeListItem) and event.item.message.forwards:
+            self.app.push_screen(ForwardViewer(self.client, event.item.message.forwards[0]))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -549,6 +617,12 @@ class WebQQTui(App):
             return
         if event.list_view.id == "chat_list" and isinstance(event.item, ChatListItem):
             await self._open_chat(event.item.chat)
+        elif event.list_view.id == "message_list" and isinstance(event.item, MessageListItem):
+            if event.item.message.forwards:
+                self.push_screen(ForwardViewer(self.client, event.item.message.forwards[0]), self._forward_closed)
+
+    def _forward_closed(self, _: Any) -> None:
+        self._spawn(self._render_messages())
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.list_view.id == "chat_list" and isinstance(event.item, ChatListItem):

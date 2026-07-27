@@ -199,6 +199,25 @@ def display_content(message: Message) -> str:
     return content.strip()
 
 
+def forward_nodes(forward: Mapping[str, Any]) -> List[Mapping[str, Any]]:
+    nodes = forward.get("nodes")
+    if not isinstance(nodes, list):
+        nodes = forward.get("messages")
+    if not isinstance(nodes, list):
+        content = forward.get("content")
+        nodes = content if isinstance(content, list) else []
+    return [dict(node) for node in nodes if isinstance(node, dict)]
+
+
+def forward_status_label(forward: Mapping[str, Any]) -> str:
+    nodes = forward_nodes(forward)
+    if nodes:
+        return "{} message{}".format(len(nodes), "" if len(nodes) == 1 else "s")
+    if forward.get("status") == "unavailable" or forward.get("error"):
+        return "unavailable"
+    return "not loaded"
+
+
 def format_chat(chat: Chat, compact: bool = False) -> Text:
     text = Text(no_wrap=True, overflow="ellipsis")
     prefix = "# " if chat.chat_type == "group" or chat.chat_id.startswith("group_") else "@ "
@@ -240,9 +259,9 @@ def format_message(message: Message, compact: bool = False, search: str = "") ->
         )
         text.append("\n" + label, style="magenta")
     for forward in message.forwards:
-        nodes = forward.get("nodes") if isinstance(forward.get("nodes"), list) else []
+        nodes = forward_nodes(forward)
         title = str(forward.get("title") or "Forwarded messages")
-        text.append("\n[forward: {} - {} messages]".format(title, len(nodes)), style="magenta")
+        text.append("\n[forward: {} - {}]".format(title, forward_status_label(forward)), style="magenta")
         if not compact:
             for node in nodes[:3]:
                 if not isinstance(node, dict):

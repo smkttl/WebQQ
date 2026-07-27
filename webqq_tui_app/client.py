@@ -90,6 +90,14 @@ class WebQQClient:
         members = payload.get("members")
         return [dict(item) for item in members if isinstance(item, dict)] if isinstance(members, list) else []
 
+    async def forward(self, forward_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json("GET", "/api/forward", params={"id": forward_id})
+        self._require_ok(payload, "forward load failed")
+        forward = payload.get("forward")
+        if not isinstance(forward, dict):
+            raise ServerResponseError("invalid forward response")
+        return dict(forward)
+
     async def send_message(self, chat_id: str, text: str, reply_to: str = "") -> Mapping[str, Any]:
         body: Dict[str, Any] = {"chat_id": chat_id, "text": text}
         if reply_to:

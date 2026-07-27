@@ -14,12 +14,14 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.upload = {}
         self.pokes = []
+        self.forward_ids = []
         app = web.Application()
         app.router.add_post("/api/login", self.login)
         app.router.add_get("/api/status", self.status)
         app.router.add_get("/api/chats", self.chats)
         app.router.add_get("/api/messages", self.messages)
         app.router.add_get("/api/group-members", self.group_members)
+        app.router.add_get("/api/forward", self.forward)
         app.router.add_post("/api/send", self.send)
         app.router.add_post("/api/poke", self.poke)
         app.router.add_post("/api/mark-read", self.mark_read)
@@ -68,6 +70,13 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
     async def group_members(self, request):
         return web.json_response({"members": [{"user_id": 2, "display_name": "Alice"}]})
 
+    async def forward(self, request):
+        self.forward_ids.append(request.query.get("id"))
+        return web.json_response({
+            "ok": True,
+            "forward": {"id": request.query.get("id"), "status": "ok", "nodes": [{"content": "inside"}]},
+        })
+
     async def send(self, request):
         body = await request.json()
         return web.json_response({"ok": True, "data": body})
@@ -115,6 +124,9 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages[0].content, "hello")
         members = await self.client.group_members("group_1")
         self.assertEqual(members[0]["display_name"], "Alice")
+        forward = await self.client.forward("forward-1")
+        self.assertEqual(forward["nodes"][0]["content"], "inside")
+        self.assertEqual(self.forward_ids, ["forward-1"])
         sent = await self.client.send_message("group_1", "hi", reply_to="1")
         self.assertEqual(sent["data"]["reply_to"], "1")
         await self.client.poke("group_1", "2")

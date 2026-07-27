@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView
 
-from webqq_tui_app.app import Composer, MemberPicker, WebQQTui
+from webqq_tui_app.app import Composer, ForwardViewer, MemberPicker, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -14,6 +14,7 @@ class FakeClient:
         self.config = SimpleNamespace(server_url="http://test", download_dir=Path("/tmp"))
         self.sent = []
         self.poked = []
+        self.forward_ids = []
         self.read = []
 
     async def status(self):
@@ -51,6 +52,18 @@ class FakeClient:
     async def poke(self, chat_id, user_id):
         self.poked.append((chat_id, user_id))
         return {"ok": True}
+
+    async def forward(self, forward_id):
+        self.forward_ids.append(forward_id)
+        return {
+            "id": forward_id,
+            "title": "Saved thread",
+            "status": "ok",
+            "nodes": [
+                {"sender_id": 2, "sender_name": "Alice", "time": 2, "content": "first"},
+                {"sender_id": 3, "sender_name": "Bob", "time": 3, "content": "second"},
+            ],
+        }
 
     async def websocket(self):
         await asyncio.Event().wait()
@@ -217,6 +230,45 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             app.action_poke()
             await pilot.pause(0.05)
             self.assertEqual(client.poked, [("group_1", "2")])
+
+    async def test_enter_opens_and_lazy_loads_forward_on_small_terminal(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            app.messages = [Message.from_json({
+                "chat_id": "group_1",
+                "message_id": 2,
+                "sender_id": 2,
+                "sender_name": "Alice",
+                "content": "[forward]",
+                "forwards": [{
+                    "id": "forward-1",
+                    "title": "Saved thread",
+                    "status": "unavailable",
+                    "error": "initial load failed",
+                    "nodes": [],
+                }],
+            })]
+            await app._render_messages(select_last=True)
+            app.query_one("#message_list", ListView).focus()
+
+            await pilot.press("enter")
+            for _ in range(20):
+                if isinstance(app.screen, ForwardViewer) and len(app.screen.query_one("#forward_list", ListView).children) == 2:
+                    break
+                await pilot.pause(0.05)
+
+            self.assertIsInstance(app.screen, ForwardViewer)
+            self.assertEqual(client.forward_ids, ["forward-1"])
+            self.assertEqual(len(app.screen.query_one("#forward_list", ListView).children), 2)
+            self.assertLessEqual(app.screen.query_one("#forward_list", ListView).region.right, app.size.width)
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            self.assertNotIsInstance(app.screen, ForwardViewer)
+            self.assertEqual(len(app.messages[0].forwards[0]["nodes"]), 2)
 
     async def test_chat_filter(self):
         app = WebQQTui(FakeClient())

@@ -13,6 +13,7 @@ from webqq_tui_app.models import (
     display_content,
     format_chat,
     format_message,
+    forward_status_label,
     human_size,
     message_matches,
 )
@@ -87,7 +88,16 @@ class TuiModelTests(unittest.TestCase):
         })
         rendered = format_message(message, compact=True).plain
         self.assertIn("archive.zip", rendered)
-        self.assertIn("forward: Thread", rendered)
+        self.assertIn("forward: Thread - 1 message", rendered)
+
+    def test_unavailable_forward_does_not_claim_zero_messages(self):
+        forward = {"title": "Thread", "status": "unavailable", "error": "expired", "nodes": []}
+        message = Message.from_json({"sender_name": "A", "content": "[forward]", "forwards": [forward]})
+        rendered = format_message(message, compact=True).plain
+
+        self.assertEqual(forward_status_label(forward), "unavailable")
+        self.assertIn("forward: Thread - unavailable", rendered)
+        self.assertNotIn("0 messages", rendered)
 
     def test_search_and_deduplication_reconcile_local_message(self):
         pending = Message.from_json({

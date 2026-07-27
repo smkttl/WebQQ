@@ -54,6 +54,9 @@ class NapCatParsingTests(unittest.TestCase):
             ],
         )
 
+    def test_empty_forward_container_stays_empty(self):
+        self.assertIsNone(NapCatConnection._extract_forward_response_payload({"messages": []}))
+
 
 class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
     async def test_send_poke_builds_private_and_group_requests(self):
@@ -71,6 +74,25 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [
             ("send_poke", {"user_id": 10002}, 10),
             ("send_poke", {"user_id": 10003, "group_id": 123}, 10),
+        ])
+
+    async def test_fetch_forward_retries_napcat_parameter_alias(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            if "id" in params:
+                return {"status": "failed", "wording": "invalid parameter"}
+            return {"status": "ok", "data": {"messages": [{"content": "inside"}]}}
+
+        connection._request = request
+        response = await connection.fetch_forward("forward-1")
+
+        self.assertEqual(response, {"status": "ok", "data": [{"content": "inside"}]})
+        self.assertEqual(calls, [
+            ("get_forward_msg", {"id": "forward-1"}, 10),
+            ("get_forward_msg", {"message_id": "forward-1"}, 10),
         ])
 
 
@@ -326,6 +348,41 @@ class PokeHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 500)
         self.assertEqual(payload["error"], "poke unavailable")
+
+
+class ForwardHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forward_payload_is_normalized_for_clients(self):
+        async def fetch_forward(forward_id):
+            self.assertEqual(forward_id, "forward-1")
+            return {
+                "status": "ok",
+                "data": [{
+                    "user_id": 2,
+                    "nickname": "Alice",
+                    "time": 10,
+                    "message": [{"type": "text", "data": {"text": "inside"}}],
+                }],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            request = SimpleNamespace(
+                app={
+                    "config": {"web_token": ""},
+                    "store": MessageStore(maxlen=10, data_dir=tmp),
+                    "napcat": SimpleNamespace(fetch_forward=fetch_forward),
+                },
+                query={"id": "forward-1"},
+                cookies={},
+                headers={},
+                remote="",
+            )
+            response = await api.handle_forward(request)
+
+        payload = json.loads(response.text)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["forward"]["status"], "ok")
+        self.assertEqual(payload["forward"]["nodes"][0]["sender_name"], "Alice")
+        self.assertEqual(payload["forward"]["nodes"][0]["content"], "inside")
 
 
 class RevokeHandlerTests(unittest.IsolatedAsyncioTestCase):

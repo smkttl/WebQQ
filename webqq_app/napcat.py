@@ -316,25 +316,42 @@ class NapCatConnection:
             if not forward_id:
                 data["error"] = "missing forward id"
                 continue
-            resp = await self._request("get_forward_msg", {"id": forward_id}, timeout=10)
+            resp = await self.fetch_forward(forward_id)
             if not resp or resp.get("status") != "ok":
                 data["error"] = (resp or {}).get("wording") or (resp or {}).get("message") or "forward unavailable"
                 continue
-            content = self._extract_forward_response_payload(resp.get("data"))
+            content = resp.get("data")
             if content:
                 data["content"] = content
             else:
                 data["error"] = "empty forward content"
+
+    async def fetch_forward(self, forward_id):
+        last_response = None
+        for params in ({"id": str(forward_id)}, {"message_id": str(forward_id)}):
+            response = await self._request("get_forward_msg", params, timeout=10)
+            last_response = response
+            if not response or response.get("status") != "ok":
+                continue
+            content = self._extract_forward_response_payload(response.get("data"))
+            if content:
+                return {"status": "ok", "data": content}
+        return last_response
 
     @staticmethod
     def _extract_forward_response_payload(payload):
         if isinstance(payload, list):
             return payload
         if isinstance(payload, dict):
+            has_container = False
             for key in ("messages", "message", "content", "nodes"):
+                if key in payload:
+                    has_container = True
                 value = payload.get(key)
                 if value:
                     return value
+            if has_container:
+                return None
             return payload
         return payload
 
