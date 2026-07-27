@@ -170,6 +170,7 @@ async def handle_forward(request):
     })
     if not forward.get("nodes"):
         return web.json_response({"ok": False, "error": "forward content is empty"}, status=500)
+    request.app["store"].remember_forward(forward_id, forward)
     return web.json_response({"ok": True, "forward": forward})
 
 

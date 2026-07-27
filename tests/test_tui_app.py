@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from textual.widgets import Input, ListView
+from textual.widgets import Input, ListView, Static
 
 from webqq_tui_app.app import Composer, ForwardViewer, MemberPicker, WebQQTui
 from webqq_tui_app.models import Chat, Message
@@ -70,6 +70,9 @@ class FakeClient:
 
 
 class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
+    def test_internal_text_selection_is_disabled_for_stable_mouse_events(self):
+        self.assertFalse(WebQQTui.ALLOW_SELECT)
+
     async def wait_loaded(self, pilot, app):
         for _ in range(20):
             if app.chats:
@@ -269,6 +272,38 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.05)
             self.assertNotIsInstance(app.screen, ForwardViewer)
             self.assertEqual(len(app.messages[0].forwards[0]["nodes"]), 2)
+
+    async def test_open_chat_hydrates_unavailable_forward_without_opening_it(self):
+        class ForwardClient(FakeClient):
+            async def messages(self, chat_id, limit=50, before=None):
+                return [Message.from_json({
+                    "chat_id": chat_id,
+                    "message_id": 2,
+                    "sender_id": 2,
+                    "sender_name": "Alice",
+                    "content": "[forward]",
+                    "forwards": [{
+                        "id": "forward-1",
+                        "status": "unavailable",
+                        "error": "initial load failed",
+                        "nodes": [],
+                    }],
+                })]
+
+        client = ForwardClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            for _ in range(20):
+                if app.messages and len(app.messages[0].forwards[0].get("nodes", [])) == 2:
+                    break
+                await pilot.pause(0.05)
+
+            self.assertEqual(client.forward_ids, ["forward-1"])
+            self.assertEqual(len(app.messages[0].forwards[0]["nodes"]), 2)
+            row = app.query_one("#message_list", ListView).children[0]
+            self.assertIn("2 messages", row.query_one(Static).render().plain)
 
     async def test_chat_filter(self):
         app = WebQQTui(FakeClient())

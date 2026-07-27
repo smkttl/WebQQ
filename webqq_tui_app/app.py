@@ -10,6 +10,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
 from textual.screen import ModalScreen
 from textual.widgets import Input, ListItem, ListView, Static, TextArea
@@ -257,6 +258,7 @@ class ForwardViewer(ModalScreen):
 class WebQQTui(App):
     TITLE = "WebQQ"
     SUB_TITLE = "Terminal client"
+    ALLOW_SELECT = False
     BINDINGS = [
         Binding("q", "quit_requested", "Quit", show=False),
         Binding("escape", "back", "Back", show=False),
@@ -593,6 +595,47 @@ class WebQQTui(App):
         finally:
             self._rendering = False
 
+    def _refresh_message_row(self, message: Message) -> None:
+        if not self.is_mounted:
+            return
+        try:
+            view = self.query_one("#message_list", ListView)
+            search = self.query_one("#message_search", Input).value.strip()
+        except NoMatches:
+            return
+        for child in view.children:
+            if isinstance(child, MessageListItem) and child.message is message and child.is_mounted:
+                child.query_one(Static).update(format_message(message, compact=self.short, search=search))
+
+    async def _hydrate_forwards(self, chat_id: str, token: int) -> None:
+        pending = {}
+        for message in self.messages:
+            for forward in message.forwards:
+                if not isinstance(forward, dict):
+                    continue
+                forward_id = str(forward.get("id") or "")
+                if forward_id and not forward_nodes(forward):
+                    pending.setdefault(forward_id, []).append((message, forward))
+        if not pending:
+            return
+
+        forward_ids = list(pending)
+        results = await asyncio.gather(
+            *(self.client.forward(forward_id) for forward_id in forward_ids),
+            return_exceptions=True,
+        )
+        if token != self._load_token or not self.current_chat or self.current_chat.chat_id != chat_id:
+            return
+        for forward_id, result in zip(forward_ids, results):
+            if isinstance(result, Exception) or not isinstance(result, Mapping) or not forward_nodes(result):
+                continue
+            resolved = dict(result)
+            resolved.setdefault("id", forward_id)
+            for message, forward in pending[forward_id]:
+                forward.clear()
+                forward.update(resolved)
+                self._refresh_message_row(message)
+
     async def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "chat_filter":
             await self._render_chats()
@@ -619,10 +662,13 @@ class WebQQTui(App):
             await self._open_chat(event.item.chat)
         elif event.list_view.id == "message_list" and isinstance(event.item, MessageListItem):
             if event.item.message.forwards:
-                self.push_screen(ForwardViewer(self.client, event.item.message.forwards[0]), self._forward_closed)
+                item = event.item
 
-    def _forward_closed(self, _: Any) -> None:
-        self._spawn(self._render_messages())
+                def refresh_item(_: Any) -> None:
+                    if item.is_mounted:
+                        item.query_one(Static).update(format_message(item.message, compact=self.short))
+
+                self.push_screen(ForwardViewer(self.client, item.message.forwards[0]), refresh_item)
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.list_view.id == "chat_list" and isinstance(event.item, ChatListItem):
@@ -681,6 +727,7 @@ class WebQQTui(App):
             self.query_one("#chat_header", Static).update(self._chat_header_text())
             await self._render_messages(select_last=True)
             self.query_one("#message_list", ListView).focus()
+            self._spawn(self._hydrate_forwards(chat.chat_id, token))
         except Exception as exc:
             self.query_one("#chat_header", Static).update(self._chat_header_text("load failed"))
             self._set_notice("Failed to load messages: {}".format(exc))
@@ -947,4 +994,7 @@ class WebQQTui(App):
 
     def _update_status_bar(self) -> None:
         if self.is_mounted:
-            self.query_one("#status_bar", Static).update(self._notice or self._base_status)
+            try:
+                self.query_one("#status_bar", Static).update(self._notice or self._base_status)
+            except NoMatches:
+                pass

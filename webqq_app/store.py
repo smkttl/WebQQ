@@ -437,6 +437,26 @@ class MessageStore:
                 return {"chat_id": known_chat_id, "message": msg, "already_recalled": already_recalled}
         return None
 
+    def remember_forward(self, forward_id, forward):
+        forward_id = str(forward_id or "")
+        if not forward_id or not isinstance(forward, dict):
+            return 0
+        updated = 0
+        for chat_id, messages in self._data.items():
+            changed = False
+            for message in messages:
+                forwards = message.get("forwards")
+                if not isinstance(forwards, list):
+                    continue
+                for index, existing in enumerate(forwards):
+                    if isinstance(existing, dict) and str(existing.get("id") or "") == forward_id:
+                        forwards[index] = dict(forward)
+                        updated += 1
+                        changed = True
+            if changed:
+                self._dirty.add(chat_id)
+        return updated
+
     def oldest_message_id(self, chat_id, before=None):
         chat_id = canonical_chat_id(chat_id)
         candidates = list(self._data.get(chat_id, []))

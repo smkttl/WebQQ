@@ -365,10 +365,20 @@ class ForwardHandlerTests(unittest.IsolatedAsyncioTestCase):
             }
 
         with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.append_simplified("group_1", {
+                "message_id": "message-1",
+                "forwards": [{
+                    "id": "forward-1",
+                    "status": "unavailable",
+                    "error": "forward unavailable",
+                    "nodes": [],
+                }],
+            })
             request = SimpleNamespace(
                 app={
                     "config": {"web_token": ""},
-                    "store": MessageStore(maxlen=10, data_dir=tmp),
+                    "store": store,
                     "napcat": SimpleNamespace(fetch_forward=fetch_forward),
                 },
                 query={"id": "forward-1"},
@@ -383,6 +393,9 @@ class ForwardHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["forward"]["status"], "ok")
         self.assertEqual(payload["forward"]["nodes"][0]["sender_name"], "Alice")
         self.assertEqual(payload["forward"]["nodes"][0]["content"], "inside")
+        cached = store.get_messages("group_1")[0]["forwards"][0]
+        self.assertEqual(cached, payload["forward"])
+        self.assertIn("group_1", store._dirty)
 
 
 class RevokeHandlerTests(unittest.IsolatedAsyncioTestCase):
