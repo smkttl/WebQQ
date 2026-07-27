@@ -98,6 +98,15 @@ class WebQQClient:
         self._require_ok(payload, "send failed")
         return payload
 
+    async def poke(self, chat_id: str, user_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST",
+            "/api/poke",
+            json_body={"chat_id": chat_id, "user_id": user_id},
+        )
+        self._require_ok(payload, "poke failed")
+        return payload
+
     async def mark_read(self, chat_id: str) -> None:
         payload = await self._request_json("POST", "/api/mark-read", json_body={"chat_id": chat_id})
         self._require_ok(payload, "mark read failed")

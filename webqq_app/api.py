@@ -111,6 +111,46 @@ async def handle_send(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+async def handle_poke(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = body.get("chat_id")
+    user_id = str(body.get("user_id", "")).strip()
+    parsed_chat = parse_chat_id(chat_id)
+    if not parsed_chat:
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    if not user_id.isdigit():
+        return web.json_response({"ok": False, "error": "user_id is required"}, status=400)
+
+    group_id = None
+    if parsed_chat["type"] == "group":
+        group_id = parsed_chat["group_id"]
+    elif parsed_chat["type"] == "private":
+        if user_id != str(parsed_chat["private_id"]):
+            return web.json_response({"ok": False, "error": "user_id does not match private chat"}, status=400)
+    else:
+        if user_id != str(parsed_chat["user_id"]):
+            return web.json_response({"ok": False, "error": "user_id does not match temporary chat"}, status=400)
+        group_id = parsed_chat["group_id"]
+
+    self_id = str(request.app["store"]._self_user.get("user_id") or "")
+    if user_id == self_id:
+        return web.json_response({"ok": False, "error": "cannot poke yourself"}, status=400)
+    try:
+        result = await request.app["napcat"].send_poke(user_id, group_id=group_id)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+    if not result or result.get("status") != "ok":
+        err = result.get("wording", result.get("message", "poke failed")) if result else "not connected"
+        return web.json_response({"ok": False, "error": err}, status=500)
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("result") is False:
+        err = data.get("errMsg") or data.get("message") or result.get("wording") or "poke was not accepted by QQ"
+        return web.json_response({"ok": False, "error": err}, status=500)
+    return web.json_response({"ok": True, "data": data})
+
+
 async def handle_send_file(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)

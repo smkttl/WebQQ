@@ -13,6 +13,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.upload = {}
+        self.pokes = []
         app = web.Application()
         app.router.add_post("/api/login", self.login)
         app.router.add_get("/api/status", self.status)
@@ -20,6 +21,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_get("/api/messages", self.messages)
         app.router.add_get("/api/group-members", self.group_members)
         app.router.add_post("/api/send", self.send)
+        app.router.add_post("/api/poke", self.poke)
         app.router.add_post("/api/mark-read", self.mark_read)
         app.router.add_post("/api/send-file", self.send_file)
         app.router.add_get("/api/file", self.download)
@@ -70,6 +72,11 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         body = await request.json()
         return web.json_response({"ok": True, "data": body})
 
+    async def poke(self, request):
+        body = await request.json()
+        self.pokes.append(body)
+        return web.json_response({"ok": True})
+
     async def mark_read(self, request):
         return web.json_response({"ok": True})
 
@@ -110,6 +117,8 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(members[0]["display_name"], "Alice")
         sent = await self.client.send_message("group_1", "hi", reply_to="1")
         self.assertEqual(sent["data"]["reply_to"], "1")
+        await self.client.poke("group_1", "2")
+        self.assertEqual(self.pokes, [{"chat_id": "group_1", "user_id": "2"}])
         await self.client.mark_read("group_1")
 
     async def test_invalid_login_is_reported(self):

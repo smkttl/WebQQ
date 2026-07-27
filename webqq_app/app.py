@@ -61,6 +61,7 @@ async def main():
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_post("/api/temp-chat", handle_temp_chat)
     app.router.add_post("/api/send", handle_send)
+    app.router.add_post("/api/poke", handle_poke)
     app.router.add_post("/api/send-file", handle_send_file)
     app.router.add_post("/api/message/revoke", handle_message_revoke)
     app.router.add_post("/api/message/emoji-like", handle_message_emoji_like)

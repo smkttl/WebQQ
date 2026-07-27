@@ -43,7 +43,7 @@ python3 webqq_tui.py
 
 For a local server, the client reads `web_port` from this repository's `config.json`. Use `--url` or `WEBQQ_URL` to connect to a different server. Use `--token`, or the `WEBQQ_TOKEN` environment variable, when web authentication is enabled; if neither is supplied, the client prompts without echoing the token. `--download-dir` selects where attachments are saved.
 
-The main controls are `Tab` / `Shift+Tab` to move focus, arrow keys or `j` / `k` to navigate, `Enter` to open a chat or send, `Ctrl+J` to insert a newline, `Esc` to return to chat selection, `Ctrl+F` to filter or search, `r` to reply, `Ctrl+O` to upload a file, `d` to download an attachment, and `q` to quit. Terminals below 80 columns and portrait terminals use a mobile-style one-pane flow; the minimum supported terminal size is 32 columns by 10 rows.
+The main controls are `Tab` / `Shift+Tab` to move focus, arrow keys or `j` / `k` to navigate, `Enter` to open a chat or send, `Ctrl+J` to insert a newline, `Esc` to return to chat selection, `Ctrl+F` to filter or search, `r` to reply, `p` to poke the selected sender, `Ctrl+O` to upload a file, `d` to download an attachment, and `q` to quit. Terminals below 80 columns and portrait terminals use a mobile-style one-pane flow; the minimum supported terminal size is 32 columns by 10 rows.
 
 ## Configuration
 
@@ -79,6 +79,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | GET    | `/api/chats`                       | List chats               |
 | GET    | `/api/messages?chat_id=X&limit=50` | Get messages (paginated) |
 | POST   | `/api/send`                        | Send a message           |
+| POST   | `/api/poke`                        | Poke a chat participant  |
 | POST   | `/api/message/revoke`              | Revoke a recent self message |
 | POST   | `/api/mark-read`                   | Mark a chat as read      |
 | GET    | `/api/status`                      | Connection status        |
@@ -100,7 +101,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 - Group file management: folders, delete/move/rename/transfer, file-system info, and root/folder listings.
 - Group notice and essence-message management.
 - Online file receive/refuse/cancel workflows.
-- Poke, input-status, user-status, and profile-like features.
+- Input-status, user-status, and profile-like features.
 - Expanded media helpers: OCR, custom face fetch, record conversion, private file URLs, and richer file streaming controls.
 - Bot/system controls: status/version details, restart/exit, cache cleanup, packet/rkey/clientkey/credentials diagnostics.
 

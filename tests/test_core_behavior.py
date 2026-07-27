@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 import unittest
@@ -52,6 +53,25 @@ class NapCatParsingTests(unittest.TestCase):
                 {"type": "face", "data": {"id": "14"}},
             ],
         )
+
+
+class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_poke_builds_private_and_group_requests(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_poke("10002")
+        await connection.send_poke("10003", group_id="123")
+
+        self.assertEqual(calls, [
+            ("send_poke", {"user_id": 10002}, 10),
+            ("send_poke", {"user_id": 10003, "group_id": 123}, 10),
+        ])
 
 
 class NoticeAndReactionTests(unittest.TestCase):
@@ -241,6 +261,71 @@ class SendRegistrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(sent["message"], confirmed)
             self.assertEqual(len(store.get_messages("group_1")), 1)
             self.assertEqual(broadcasts, [])
+
+
+class PokeHandlerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def request(body, send_poke, self_id="10001"):
+        async def request_json():
+            return body
+
+        return SimpleNamespace(
+            app={
+                "config": {"web_token": ""},
+                "store": SimpleNamespace(_self_user={"user_id": self_id}),
+                "napcat": SimpleNamespace(send_poke=send_poke),
+            },
+            query={},
+            cookies={},
+            headers={},
+            remote="",
+            json=request_json,
+        )
+
+    async def test_group_poke_targets_sender(self):
+        calls = []
+
+        async def send_poke(user_id, group_id=None):
+            calls.append((user_id, group_id))
+            return {"status": "ok", "data": {}}
+
+        response = await api.handle_poke(self.request(
+            {"chat_id": "group_123", "user_id": "10002"},
+            send_poke,
+        ))
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(response.text)["ok"])
+        self.assertEqual(calls, [("10002", 123)])
+
+    async def test_private_poke_rejects_wrong_peer_and_self(self):
+        async def send_poke(user_id, group_id=None):
+            raise AssertionError("invalid poke reached NapCat")
+
+        wrong_peer = await api.handle_poke(self.request(
+            {"chat_id": "private_10002", "user_id": "10003"},
+            send_poke,
+        ))
+        self_poke = await api.handle_poke(self.request(
+            {"chat_id": "private_10001", "user_id": "10001"},
+            send_poke,
+        ))
+
+        self.assertEqual(wrong_peer.status, 400)
+        self.assertEqual(self_poke.status, 400)
+
+    async def test_napcat_poke_rejection_is_reported(self):
+        async def send_poke(user_id, group_id=None):
+            return {"status": "failed", "wording": "poke unavailable"}
+
+        response = await api.handle_poke(self.request(
+            {"chat_id": "group_123", "user_id": "10002"},
+            send_poke,
+        ))
+        payload = json.loads(response.text)
+
+        self.assertEqual(response.status, 500)
+        self.assertEqual(payload["error"], "poke unavailable")
 
 
 class RevokeHandlerTests(unittest.IsolatedAsyncioTestCase):

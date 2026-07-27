@@ -283,6 +283,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="msg-menu" id="msgMenu">
   <button type="button" id="msgMenuCopy">Copy</button>
   <button type="button" id="msgMenuReply">Reply</button>
+  <button type="button" id="msgMenuPoke">Poke</button>
   <button type="button" id="msgMenuRevoke">Revoke</button>
   <button type="button" id="msgMenuTempChat">Temp Chat</button>
   <button type="button" id="msgMenuFaceReply">Face Reply</button>
@@ -1733,6 +1734,7 @@ function cancelLongPress() {
 function showMessageMenu(message, x, y) {
   selectedMenuMessage = message;
   const menu = $('msgMenu');
+  $('msgMenuPoke').style.display = canPokeMessage(message) ? 'block' : 'none';
   $('msgMenuTempChat').style.display = canStartTempChat(message) ? 'block' : 'none';
   $('msgMenuRevoke').style.display = canRevokeMessage(message) ? 'block' : 'none';
   menu.classList.add('show');
@@ -1762,6 +1764,16 @@ function canStartTempChat(message) {
   return message.type === 'group'
     && groupIdForMessage(message)
     && normalizeMessageId(message.sender_id);
+}
+
+function canPokeMessage(message) {
+  const userId = normalizeMessageId(message && message.sender_id);
+  const selfId = normalizeMessageId(selfUser && selfUser.user_id);
+  return !!message
+    && !message.self
+    && !message.system
+    && /^\d+$/.test(userId)
+    && (!selfId || userId !== selfId);
 }
 
 function groupIdForMessage(message) {
@@ -1894,6 +1906,31 @@ async function revokeSelectedMessage() {
     }
   } catch (e) {
     showModal(e.message || 'Revoke failed');
+  }
+}
+
+async function pokeSelectedMessage() {
+  const message = selectedMenuMessage;
+  if (!canPokeMessage(message)) {
+    hideMessageMenu();
+    showToast('Cannot poke this message');
+    return;
+  }
+  const userId = normalizeMessageId(message.sender_id);
+  const chatId = message.chat_id || currentChat || '';
+  const senderName = message.sender_name || userId;
+  hideMessageMenu();
+  try {
+    const r = await api('/api/poke', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_id: chatId, user_id: userId})
+    });
+    const d = await readJsonResponse(r);
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    showToast(`Poked ${senderName}`);
+  } catch (e) {
+    showModal(e.message || 'Poke failed');
   }
 }
 
@@ -2462,6 +2499,7 @@ $('sendInput').addEventListener('keyup', e => {
 
 $('msgMenuCopy').addEventListener('click', copySelectedMessage);
 $('msgMenuReply').addEventListener('click', replyToSelectedMessage);
+$('msgMenuPoke').addEventListener('click', pokeSelectedMessage);
 $('msgMenuRevoke').addEventListener('click', revokeSelectedMessage);
 $('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage);
 $('msgMenuFaceReply').addEventListener('click', showFaceReplyPicker);

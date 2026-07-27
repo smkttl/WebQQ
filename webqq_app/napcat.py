@@ -435,6 +435,12 @@ class NapCatConnection:
             "set": bool(enabled),
         })
 
+    async def send_poke(self, user_id, group_id=None):
+        params = {"user_id": int(user_id)}
+        if group_id is not None:
+            params["group_id"] = int(group_id)
+        return await self._request("send_poke", params)
+
     async def delete_msg(self, message_id):
         return await self._request("delete_msg", {"message_id": int(message_id)}, timeout=10)
 

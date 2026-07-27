@@ -196,6 +196,7 @@ class WebQQTui(App):
         Binding("n", "next_match", show=False),
         Binding("shift+n", "previous_match", show=False),
         Binding("r", "reply", show=False),
+        Binding("p", "poke", show=False),
         Binding("d", "download", show=False),
         Binding("ctrl+o", "send_file", show=False),
     ]
@@ -248,6 +249,7 @@ class WebQQTui(App):
         self._live_status = "Live connecting"
         self._napcat_status = "NapCat unknown"
         self._account_status = ""
+        self._self_user_id = ""
         self._chat_count = 0
         self._base_status = "Connecting to {}".format(client.config.server_url)
         self._notice = ""
@@ -439,6 +441,7 @@ class WebQQTui(App):
             connected = bool(status.get("napcat_connected"))
             self_user = status.get("self_user") if isinstance(status.get("self_user"), dict) else {}
             name = str(self_user.get("name") or self_user.get("user_id") or "")
+            self._self_user_id = str(self_user.get("user_id") or "")
             self._napcat_status = "NapCat connected" if connected else "NapCat disconnected"
             self._account_status = name
             self._chat_count = int(status.get("chats_count", len(self.chats)) or 0)
@@ -678,6 +681,32 @@ class WebQQTui(App):
         self.reply_to = message
         self._update_reply_bar()
         self.query_one("#composer", Composer).focus()
+
+    def action_poke(self) -> None:
+        if isinstance(self.focused, (Composer, Input)):
+            return
+        message = self._selected_message()
+        if (
+            not message
+            or message.self_sent
+            or bool(message.raw.get("system"))
+            or not message.sender_id.isdigit()
+            or (self._self_user_id and message.sender_id == self._self_user_id)
+        ):
+            self._set_notice("Select a message from another user to poke")
+            return
+        if not self.current_chat:
+            self._set_notice("Select a chat first")
+            return
+        self._spawn(self._poke(self.current_chat.chat_id, message))
+
+    async def _poke(self, chat_id: str, message: Message) -> None:
+        self._set_notice("Poking {}...".format(message.sender_name), seconds=120)
+        try:
+            await self.client.poke(chat_id, message.sender_id)
+            self._set_notice("Poked {}".format(message.sender_name))
+        except Exception as exc:
+            self._set_notice("Poke failed: {}".format(exc))
 
     def action_download(self) -> None:
         if isinstance(self.focused, (Composer, Input)):

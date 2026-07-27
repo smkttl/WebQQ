@@ -13,10 +13,11 @@ class FakeClient:
     def __init__(self):
         self.config = SimpleNamespace(server_url="http://test", download_dir=Path("/tmp"))
         self.sent = []
+        self.poked = []
         self.read = []
 
     async def status(self):
-        return {"napcat_connected": True, "chats_count": 2, "self_user": {"name": "Me"}}
+        return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
 
     async def chats(self):
         return [
@@ -45,6 +46,10 @@ class FakeClient:
 
     async def send_message(self, chat_id, text, reply_to=""):
         self.sent.append((chat_id, text, reply_to))
+        return {"ok": True}
+
+    async def poke(self, chat_id, user_id):
+        self.poked.append((chat_id, user_id))
         return {"ok": True}
 
     async def websocket(self):
@@ -176,6 +181,42 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause(0.05)
             await pilot.pause(0.1)
             self.assertEqual(composer.text, "hello @[2] ")
+
+    async def test_poke_selected_sender_and_keep_p_as_composer_text(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            await pilot.press("p")
+            await pilot.pause(0.05)
+            self.assertEqual(client.poked, [("group_1", "2")])
+
+            composer = app.query_one("#composer", Composer)
+            composer.focus()
+            await pilot.press("p")
+            self.assertEqual(composer.text, "p")
+            self.assertEqual(client.poked, [("group_1", "2")])
+
+            app.messages = [Message.from_json({
+                "chat_id": "group_1", "message_id": 2, "sender_id": 1,
+                "sender_name": "Me", "content": "self", "self": True,
+            })]
+            await app._render_messages(select_last=True)
+            app.query_one("#message_list", ListView).focus()
+            app.action_poke()
+            await pilot.pause(0.05)
+
+            app.messages = [Message.from_json({
+                "chat_id": "group_1", "message_id": "system-1", "sender_id": 999,
+                "sender_name": "System", "content": "notice", "system": True,
+            })]
+            await app._render_messages(select_last=True)
+            app.action_poke()
+            await pilot.pause(0.05)
+            self.assertEqual(client.poked, [("group_1", "2")])
 
     async def test_chat_filter(self):
         app = WebQQTui(FakeClient())
