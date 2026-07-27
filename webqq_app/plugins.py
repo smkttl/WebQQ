@@ -6,9 +6,36 @@ class PluginContext:
         self.manager = manager
         self.plugin_id = plugin_id
         self.config = config
+        self._tasks = set()
 
     def log(self, message):
         print(f"[plugin:{self.plugin_id}] {message}")
+
+    def create_task(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self._tasks.add(task)
+        task.add_done_callback(self._task_done)
+        return task
+
+    def _task_done(self, task):
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error:
+            self.log(f"background task failed: {error}")
+
+    def close(self):
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        for task in list(self._tasks):
+            if task is not current and not task.done():
+                task.cancel()
 
     async def send_message(self, chat_id, text, reply_to=None):
         sent = await send_text_and_register(
@@ -54,6 +81,8 @@ class PluginManager:
         self.store = store
         self.napcat = napcat
         self._plugins = {}
+        self._handler_tasks = defaultdict(set)
+        self._cleanup_tasks = set()
         self._enabled = self.config.setdefault("plugins", {}).setdefault("enabled", {})
         self.plugin_dir.mkdir(exist_ok=True)
 
@@ -74,6 +103,7 @@ class PluginManager:
                 "handler": state.get("handler"),
                 "portal_handler": state.get("portal_handler"),
                 "ctx": state.get("ctx"),
+                "instance": state.get("instance"),
                 "loaded": False,
                 "error": "",
                 "config_error": "",
@@ -137,6 +167,9 @@ class PluginManager:
         return self._public_state(self._plugins[plugin_id])
 
     def load_enabled(self):
+        for plugin_id, state in list(self._plugins.items()):
+            if state.get("ctx") or state.get("loaded"):
+                self.unload_plugin(plugin_id)
         self.scan()
         for plugin_id in list(self._plugins):
             if self.is_enabled(plugin_id):
@@ -146,14 +179,57 @@ class PluginManager:
         state = self._plugins.get(plugin_id)
         if not state:
             return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        for task in list(self._handler_tasks.pop(plugin_id, set())):
+            if task is not current and not task.done():
+                task.cancel()
+        instance = state.get("instance")
+        teardown = getattr(instance, "teardown", None)
+        if callable(teardown):
+            try:
+                result = teardown()
+                if asyncio.iscoroutine(result):
+                    task = asyncio.create_task(result)
+                    self._cleanup_tasks.add(task)
+                    task.add_done_callback(self._cleanup_done)
+            except Exception as e:
+                print(f"[plugin:{plugin_id}] teardown failed: {e}")
+        ctx = state.get("ctx")
+        if ctx:
+            ctx.close()
         state["module"] = None
         state["handler"] = None
         state["portal_handler"] = None
         state["ctx"] = None
+        state["instance"] = None
         state["loaded"] = False
+
+    def _cleanup_done(self, task):
+        self._cleanup_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error:
+            print(f"[plugin] asynchronous teardown failed: {error}")
+
+    def _handler_done(self, plugin_id, task):
+        tasks = self._handler_tasks.get(plugin_id)
+        if not tasks:
+            return
+        tasks.discard(task)
+        if not tasks:
+            self._handler_tasks.pop(plugin_id, None)
 
     def load_plugin(self, plugin_id):
         state = self._require_plugin(plugin_id)
+        if state.get("ctx") or state.get("loaded"):
+            self.unload_plugin(plugin_id)
         manifest = state.get("manifest") or {}
         entry = manifest.get("entry") or "main.py"
         entry_path = (state["path"] / entry).resolve()
@@ -171,6 +247,7 @@ class PluginManager:
             handler = getattr(module, "handle_event", None)
             portal_handler = getattr(module, "handle_portal_message", None)
             setup = getattr(module, "setup", None)
+            instance = None
             if setup:
                 instance = setup(ctx)
                 if callable(instance):
@@ -186,12 +263,15 @@ class PluginManager:
                 "handler": handler,
                 "portal_handler": portal_handler if callable(portal_handler) else None,
                 "ctx": ctx,
+                "instance": instance,
                 "loaded": True,
                 "error": "",
                 "config_error": "",
             })
         except Exception as e:
-            state.update({"module": None, "handler": None, "portal_handler": None, "ctx": None, "loaded": False, "error": str(e)})
+            if "ctx" in locals():
+                ctx.close()
+            state.update({"module": None, "handler": None, "portal_handler": None, "ctx": None, "instance": None, "loaded": False, "error": str(e)})
             print(f"[plugin:{plugin_id}] load failed: {e}")
         return self._public_state(state)
 
@@ -226,7 +306,10 @@ class PluginManager:
             if not state.get("loaded"):
                 self.load_plugin(plugin_id)
             if state.get("loaded") and callable(state.get("handler")):
-                tasks.append(asyncio.create_task(self._run_handler(plugin_id, state, event)))
+                task = asyncio.create_task(self._run_handler(plugin_id, state, event))
+                self._handler_tasks[plugin_id].add(task)
+                task.add_done_callback(lambda completed, pid=plugin_id: self._handler_done(pid, completed))
+                tasks.append(task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 

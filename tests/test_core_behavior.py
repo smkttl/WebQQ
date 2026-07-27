@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import time
@@ -9,7 +10,9 @@ from webqq_app.app import configured_web_port
 from webqq_app.auth import BanTracker
 import webqq_app.api as api
 from webqq_app.common import (
+    PublicAddressResolver,
     canonical_chat_id,
+    file_url_allowed,
     simplify_group_member,
     normalize_emoji_like_response,
     normalize_emoji_likes,
@@ -19,6 +22,7 @@ from webqq_app.common import (
 )
 from webqq_app.napcat import NapCatConnection
 from webqq_app.messaging import send_text_and_register
+from webqq_app.plugins import PluginContext, PluginManager
 from webqq_app.store import MessageStore
 
 
@@ -240,6 +244,77 @@ class MessageStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.current_group_role(123), "admin")
             self.assertEqual(store.get_group_member_role(123, 10002), "member")
+
+    def test_failed_flush_preserves_existing_file_and_dirty_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.append_simplified("group_1", {"message_id": 1, "time": 1, "content": "new"})
+            store._dirty.add("group_1")
+            path = store._chat_path("group_1")
+            path.write_text('[{"content":"old"}]', encoding="utf-8")
+
+            with patch("webqq_app.store.json.dump", side_effect=OSError("disk full")):
+                store.flush()
+
+            self.assertEqual(path.read_text(encoding="utf-8"), '[{"content":"old"}]')
+            self.assertIn("group_1", store._dirty)
+            store.flush()
+            self.assertNotIn("group_1", store._dirty)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))[0]["content"], "new")
+
+
+class FileProxySafetyTests(unittest.IsolatedAsyncioTestCase):
+    def test_file_url_rejects_local_and_private_addresses(self):
+        for url in (
+            "http://localhost/file",
+            "http://127.0.0.1/file",
+            "http://10.0.0.1/file",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/file",
+        ):
+            self.assertFalse(file_url_allowed(url), url)
+        self.assertTrue(file_url_allowed("https://8.8.8.8/file"))
+        self.assertTrue(file_url_allowed("https://example.com/file"))
+
+    async def test_resolver_rejects_domain_resolving_to_private_address(self):
+        class Resolver:
+            async def resolve(self, host, port=0, family=0):
+                return [{"hostname": host, "host": "127.0.0.1", "port": port, "family": family, "proto": 0, "flags": 0}]
+
+            async def close(self):
+                return None
+
+        resolver = PublicAddressResolver(Resolver())
+        with self.assertRaises(OSError):
+            await resolver.resolve("attacker.example", 80)
+
+
+class PluginLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unload_calls_teardown_and_cancels_context_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            manager = PluginManager(tmp, {"plugins": {"enabled": {}}}, store)
+            ctx = PluginContext(manager, "worker", {})
+
+            class Instance:
+                stopped = False
+
+                def teardown(self):
+                    self.stopped = True
+
+            instance = Instance()
+            task = ctx.create_task(asyncio.Event().wait())
+            manager._plugins["worker"] = {
+                "id": "worker", "ctx": ctx, "instance": instance, "module": object(),
+                "handler": lambda event, context: None, "portal_handler": None, "loaded": True,
+            }
+
+            manager.unload_plugin("worker")
+            await asyncio.sleep(0)
+
+            self.assertTrue(instance.stopped)
+            self.assertTrue(task.cancelled())
+            self.assertFalse(manager._plugins["worker"]["loaded"])
 
 
 class SendRegistrationTests(unittest.IsolatedAsyncioTestCase):

@@ -121,6 +121,7 @@ class NapCatConnection:
         })
         chunks = {}
         info = {}
+        received = 0
         try:
             while True:
                 try:
@@ -133,10 +134,20 @@ class NapCatConnection:
                 data_type = payload.get("data_type")
                 if data_type == "file_info":
                     info = payload
+                    try:
+                        if int(info.get("file_size") or 0) > MAX_FILE_PROXY_SIZE:
+                            return None
+                    except (TypeError, ValueError):
+                        pass
                 elif data_type == "file_chunk":
                     try:
                         index = int(payload.get("index", len(chunks)))
-                        chunks[index] = base64.b64decode(payload.get("data", ""))
+                        chunk = base64.b64decode(payload.get("data", ""))
+                        previous = chunks.get(index, b"")
+                        received += len(chunk) - len(previous)
+                        if received > MAX_FILE_PROXY_SIZE:
+                            return None
+                        chunks[index] = chunk
                     except Exception:
                         return None
                 elif data_type == "file_complete":

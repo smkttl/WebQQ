@@ -393,7 +393,6 @@ async def handle_plugins(request):
 async def handle_plugins_refresh(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
-    request.app["plugins"].scan()
     request.app["plugins"].load_enabled()
     return web.json_response({"ok": True, "plugins": request.app["plugins"].list_plugins()})
 

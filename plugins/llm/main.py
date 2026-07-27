@@ -25,6 +25,10 @@ class LlmPlugin:
         self._active_lock = asyncio.Lock()
         self._oracle_lock = asyncio.Lock()
 
+    def _create_task(self, coroutine):
+        creator = getattr(self.ctx, "create_task", None)
+        return creator(coroutine) if callable(creator) else asyncio.create_task(coroutine)
+
     async def handle_event(self, event, ctx):
         if event.get("type") != "message":
             return
@@ -83,7 +87,7 @@ class LlmPlugin:
         self.ctx.config["runtime_guidance"] = guidance[-limit:]
         self._save_config()
         if self.ctx.config.get("portal_confirm", True) and chat_id:
-            task = asyncio.create_task(self._reply_to_portal_guidance(message, text))
+            task = self._create_task(self._reply_to_portal_guidance(message, text))
             task.add_done_callback(self._log_background_error)
 
     async def _try_acquire_request_slot(self):

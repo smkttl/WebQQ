@@ -315,11 +315,15 @@ class WerewolfPlugin:
             self._save()
         if any(game.get("phase") != "ended" for game in self.state["games"].values()):
             try:
-                loop = asyncio.get_running_loop()
+                asyncio.get_running_loop()
             except RuntimeError:
                 pass
             else:
-                self.resume_task = loop.create_task(self._resume_autonomous_games_when_connected())
+                self.resume_task = self._create_task(self._resume_autonomous_games_when_connected())
+
+    def _create_task(self, coroutine):
+        creator = getattr(self.ctx, "create_task", None)
+        return creator(coroutine) if callable(creator) else asyncio.create_task(coroutine)
 
     def _config_int(self, key, default, minimum, maximum):
         try:
@@ -1445,7 +1449,7 @@ class WerewolfPlugin:
         expected_fingerprint = self._automatic_configuration_fingerprint(game)
         game_snapshot = copy.deepcopy(game)
         previous = copy.deepcopy(self.state["last_configs"].get(chat_id))
-        task = asyncio.create_task(self._run_automatic_configuration(
+        task = self._create_task(self._run_automatic_configuration(
             chat_id,
             game,
             game_snapshot,
@@ -2163,7 +2167,7 @@ class WerewolfPlugin:
         if existing and existing is not current and not existing.done():
             existing.cancel()
         token = (timing["night"], timing["stage"], timing["revision"])
-        task = asyncio.create_task(self._run_night_deadline(chat_id, token))
+        task = self._create_task(self._run_night_deadline(chat_id, token))
         self.night_deadline_tasks[chat_id] = task
 
         def cleanup(completed):
@@ -4293,7 +4297,7 @@ class WerewolfPlugin:
             return False
         game["ai_preflight_pending"] = True
         self._save()
-        task = asyncio.create_task(self._run_virtual_preflight(chat_id, game))
+        task = self._create_task(self._run_virtual_preflight(chat_id, game))
         self.preflight_tasks[chat_id] = task
 
         def cleanup(completed):
@@ -5060,7 +5064,7 @@ class WerewolfPlugin:
         if current and not current.done():
             return False
         seen = {"wake": 0}
-        task = asyncio.create_task(self._run_virtual_driver(chat_id, seen))
+        task = self._create_task(self._run_virtual_driver(chat_id, seen))
         self.virtual_driver_tasks[chat_id] = task
 
         def cleanup(completed):

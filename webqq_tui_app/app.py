@@ -696,6 +696,7 @@ class WebQQTui(App):
         self.conversation_visible = True
         self.reply_to = None
         self.no_more_messages = False
+        self.loading_older = False
         self._load_token += 1
         token = self._load_token
         self.query_one("#chat_header", Static).update(self._chat_header_text("loading"))
@@ -736,10 +737,15 @@ class WebQQTui(App):
         if not self.current_chat or not self.messages or self.loading_older or self.no_more_messages:
             return
         self.loading_older = True
+        token = self._load_token
+        chat_id = self.current_chat.chat_id
+        before = self.messages[0].timestamp
         selected = self._selected_message()
         selected_id = selected.stable_id if selected else ""
         try:
-            older = await self.client.messages(self.current_chat.chat_id, limit=50, before=self.messages[0].timestamp)
+            older = await self.client.messages(chat_id, limit=50, before=before)
+            if token != self._load_token or not self.current_chat or self.current_chat.chat_id != chat_id:
+                return
             self.no_more_messages = len(older) < 50
             self.messages = deduplicate_messages(older + self.messages)
             await self._render_messages()
@@ -748,9 +754,11 @@ class WebQQTui(App):
                 self.query_one("#message_list", ListView).index = index
             self._set_notice("Loaded {} older messages".format(len(older)), seconds=2)
         except Exception as exc:
-            self._set_notice("History load failed: {}".format(exc))
+            if token == self._load_token and self.current_chat and self.current_chat.chat_id == chat_id:
+                self._set_notice("History load failed: {}".format(exc))
         finally:
-            self.loading_older = False
+            if token == self._load_token and self.current_chat and self.current_chat.chat_id == chat_id:
+                self.loading_older = False
 
     async def _send_draft(self) -> None:
         if not self.current_chat:

@@ -101,6 +101,8 @@ class Plugin:
 `handle_event` may be sync or async. Exceptions are caught and shown in the Plugins panel without stopping WebQQ or other plugins.
 `handle_portal_message` may also be sync or async. If a plugin does not expose this receiver, the chat composer will not allow sending portal messages to it.
 
+Use `ctx.create_task(coroutine)` for background work so WebQQ can cancel it when the plugin is disabled, refreshed, or restarted. A class returned by `setup(ctx)` may also define `teardown()`; synchronous and asynchronous teardown methods are supported.
+
 ## Events
 
 Every enabled plugin receives events as dictionaries.

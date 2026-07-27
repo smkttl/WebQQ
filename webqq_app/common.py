@@ -10,6 +10,8 @@ import mimetypes
 import base64
 import importlib.util
 import traceback
+import ipaddress
+import socket
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from collections import defaultdict, deque
 from pathlib import Path
@@ -27,6 +29,7 @@ PLUGIN_DIR = ROOT_DIR / "plugins"
 
 MAX_MESSAGES = 1000
 MAX_FILE_UPLOAD = 100 * 1024 * 1024
+MAX_FILE_PROXY_SIZE = 100 * 1024 * 1024
 AVATAR_CACHE_TTL = 7 * 24 * 60 * 60
 REVOKE_WINDOW_SECONDS = 2 * 60
 REACTION_EMOJI_IDS = tuple(str(i) for i in (
@@ -379,7 +382,29 @@ def image_url_allowed(url):
 
 def file_url_allowed(url):
     parsed = urlparse(url)
-    return parsed.scheme in ("http", "https") and bool(parsed.hostname)
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme not in ("http", "https") or not host:
+        return False
+    if host == "localhost" or host.endswith((".localhost", ".local")):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return True
+
+
+class PublicAddressResolver(aiohttp.abc.AbstractResolver):
+    def __init__(self, resolver=None):
+        self._resolver = resolver or aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        addresses = await self._resolver.resolve(host, port, family)
+        if not addresses or any(not ipaddress.ip_address(item["host"]).is_global for item in addresses):
+            raise OSError(f"refusing non-public file host: {host}")
+        return addresses
+
+    async def close(self):
+        await self._resolver.close()
 
 
 def normalize_file_url(url, filename=""):
@@ -550,9 +575,12 @@ def extract_file_paths(payload):
 
 
 async def fetch_first_file(urls, filename):
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(resolver=PublicAddressResolver(), use_dns_cache=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
         last_status = 502
         for file_url in urls:
+            if not file_url_allowed(file_url):
+                continue
             try:
                 headers = {
                     "User-Agent": "Mozilla/5.0",
@@ -564,15 +592,31 @@ async def fetch_first_file(urls, filename):
                     if resp.status != 200:
                         print(f"[file] upstream returned {resp.status} for {urlparse(file_url).hostname}")
                         continue
+                    length = resp.headers.get("Content-Length")
+                    if length:
+                        try:
+                            if int(length) > MAX_FILE_PROXY_SIZE:
+                                last_status = 413
+                                continue
+                        except ValueError:
+                            pass
+                    body = bytearray()
+                    too_large = False
+                    async for chunk in resp.content.iter_chunked(256 * 1024):
+                        if len(body) + len(chunk) > MAX_FILE_PROXY_SIZE:
+                            too_large = True
+                            last_status = 413
+                            break
+                        body.extend(chunk)
+                    if too_large:
+                        continue
                     content_type = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0]
                     headers = {
                         "Cache-Control": "private, max-age=300",
                         "Content-Disposition": content_disposition(filename),
+                        "Content-Length": str(len(body)),
                     }
-                    length = resp.headers.get("Content-Length")
-                    if length:
-                        headers["Content-Length"] = length
-                    return web.Response(body=await resp.read(), content_type=content_type, headers=headers)
+                    return web.Response(body=bytes(body), content_type=content_type, headers=headers)
             except Exception:
                 print(f"[file] upstream fetch failed for {urlparse(file_url).hostname}")
                 continue

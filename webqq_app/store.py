@@ -214,15 +214,35 @@ class MessageStore:
 
     def flush(self, chat_id=None):
         targets = [chat_id] if chat_id else list(self._dirty)
+        saved = set()
         for cid in targets:
             if cid not in self._data:
+                saved.add(cid)
                 continue
+            path = self._chat_path(cid)
+            fd = None
+            temporary = None
             try:
-                with open(self._chat_path(cid), "w", encoding="utf-8") as f:
+                fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(self._data_dir))
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    fd = None
                     json.dump(list(self._data[cid]), f, ensure_ascii=False, separators=(",", ":"))
-            except Exception:
-                pass
-        self._dirty -= set(targets)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary, path)
+                temporary = None
+                saved.add(cid)
+            except Exception as exc:
+                print(f"[store] failed to persist {cid}: {exc}")
+            finally:
+                if fd is not None:
+                    os.close(fd)
+                if temporary:
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+        self._dirty -= saved
 
     def chat_key(self, msg):
         mt = msg.get("message_type")

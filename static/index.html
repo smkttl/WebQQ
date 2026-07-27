@@ -743,7 +743,7 @@ async function selectChat(chatId, name) {
     if (chatId.startsWith('group_')) {
       await loadGroupMembers(chatId);
     }
-    await loadMessages(chatId);
+    await loadMessages(chatId, null, token);
     if (token !== chatLoadToken || currentChat !== chatId) return;
     const chats = (await (await api('/api/chats')).json()).chats || [];
     if (token !== chatLoadToken || currentChat !== chatId) return;
@@ -832,7 +832,7 @@ function createAvatar(className, src, label) {
   return avatar;
 }
 
-async function loadMessages(chatId, before = null) {
+async function loadMessages(chatId, before = null, token = chatLoadToken) {
   if (before !== null) {
     if (loadingOlder || noMoreMessages) return;
     loadingOlder = true;
@@ -843,6 +843,7 @@ async function loadMessages(chatId, before = null) {
     const r = await api(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
+    if (token !== chatLoadToken || currentChat !== chatId) return;
     const msgs = d.messages || [];
     if (before !== null && msgs.length < 50) noMoreMessages = true;
     const prepend = before !== null;
@@ -866,7 +867,7 @@ async function loadMessages(chatId, before = null) {
       scroll.scrollTop = scroll.scrollHeight;
     }
   } finally {
-    if (before !== null) {
+    if (before !== null && token === chatLoadToken && currentChat === chatId) {
       loadingOlder = false;
       lastLoadTime = Date.now();
     }
@@ -2480,7 +2481,7 @@ $('messagesScroll').addEventListener('scroll', function() {
   if (this.scrollTop < 30 && currentChat && Date.now() - lastLoadTime > 500) {
     const first = this.querySelector('.msg');
     if (first && first.dataset.time) {
-      loadMessages(currentChat, Number(first.dataset.time));
+      loadMessages(currentChat, Number(first.dataset.time), chatLoadToken);
     }
   }
 });

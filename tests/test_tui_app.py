@@ -69,6 +69,27 @@ class FakeClient:
         await asyncio.Event().wait()
 
 
+class SlowHistoryClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.older_started = asyncio.Event()
+        self.older_release = asyncio.Event()
+
+    async def messages(self, chat_id, limit=50, before=None):
+        if before is not None:
+            self.older_started.set()
+            await self.older_release.wait()
+            return [Message.from_json({
+                "chat_id": chat_id,
+                "message_id": 99,
+                "time": 0.5,
+                "sender_id": 2,
+                "sender_name": "Alice",
+                "content": "older",
+            })]
+        return await super().messages(chat_id, limit=limit, before=before)
+
+
 class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
     def test_internal_text_selection_is_disabled_for_stable_mouse_events(self):
         self.assertFalse(WebQQTui.ALLOW_SELECT)
@@ -142,6 +163,25 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.05)
             self.assertEqual(app.query_one("#sidebar").styles.display, "block")
             self.assertEqual(app.query_one("#conversation").styles.display, "none")
+
+    async def test_stale_history_load_does_not_modify_new_chat(self):
+        client = SlowHistoryClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            app.no_more_messages = False
+            history_task = asyncio.create_task(app._load_older())
+            await client.older_started.wait()
+
+            await app._open_chat(app.chats[1])
+            client.older_release.set()
+            await history_task
+
+            self.assertEqual(app.current_chat.chat_id, "private_2")
+            self.assertTrue(app.messages)
+            self.assertTrue(all(message.chat_id == "private_2" for message in app.messages))
 
     async def test_open_send_reply_filter_and_back(self):
         client = FakeClient()
