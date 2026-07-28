@@ -3,6 +3,7 @@ import asyncio
 import random
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 
 import aiohttp
@@ -11,6 +12,8 @@ import aiohttp
 MENTION_RE = re.compile(r"@\[[^\]]+\]")
 REPLY_RE = re.compile(r"^\[reply:[^\]]+\]")
 LEAKED_MESSAGE_ID_RE = re.compile(r"\s*[\(（]?\s*(?:message_id|消息\s*ID|消息id|消息编号)\s*[=:：]?\s*(\d+)\s*[\)）]?\s*", re.IGNORECASE)
+CST = timezone(timedelta(hours=8), name="CST")
+MAX_FORWARD_DEPTH = 4
 
 
 def setup(ctx):
@@ -338,11 +341,11 @@ class LlmPlugin:
         timeline = []
 
         for item in history:
-            content = self._history_content(item)
+            is_trigger = trigger_id and str(item.get("message_id") or "") == trigger_id
+            content = self._history_content(item, prompt if is_trigger else None)
             if not content:
                 continue
-            if trigger_id and str(item.get("message_id") or "") == trigger_id:
-                content = prompt
+            if is_trigger:
                 appended_trigger = True
             timeline.append({
                 "kind": "message",
@@ -353,12 +356,13 @@ class LlmPlugin:
             })
 
         if not appended_trigger:
+            content = self._history_content(trigger_message, prompt)
             timeline.append({
                 "kind": "message",
                 "time": self._item_time(trigger_message),
                 "order": len(timeline),
                 "item": trigger_message,
-                "content": prompt,
+                "content": content,
             })
 
         for item in self._runtime_guidance(chat_id):
@@ -388,6 +392,7 @@ class LlmPlugin:
                 content = self._assistant_history_content(item, content)
             messages.append({"role": role, "content": content})
 
+        messages.append({"role": "system", "content": self._current_time_note()})
         return self._trim_messages(messages)
 
     @staticmethod
@@ -397,12 +402,83 @@ class LlmPlugin:
         except (TypeError, ValueError):
             return 0
 
-    def _history_content(self, message):
+    def _history_content(self, message, text_override=None):
         if message.get("system") or message.get("recalled"):
             return ""
-        content = str(message.get("content") or "").strip()
+        raw_content = message.get("content") if text_override is None else text_override
+        content = str(raw_content or "").strip()
         content = REPLY_RE.sub("", content).strip()
+        forward_content = self._format_forwards(message.get("forwards"))
+        if forward_content:
+            content = content.replace("[forward]", "").strip()
+            content = "\n\n".join(part for part in (content, forward_content) if part)
         return content
+
+    def _format_forwards(self, forwards, depth=0):
+        if not isinstance(forwards, list) or not forwards:
+            return ""
+        if depth >= MAX_FORWARD_DEPTH:
+            return "[Nested forwarded messages omitted: depth limit reached]"
+
+        blocks = []
+        for forward in forwards:
+            if not isinstance(forward, dict):
+                continue
+            title = str(forward.get("title") or "Forwarded messages").strip()
+            lines = [f"[Forwarded messages: {title}]"]
+            summary = str(forward.get("summary") or "").strip()
+            if summary:
+                lines.append(f"Summary: {summary}")
+
+            nodes = forward.get("nodes")
+            if isinstance(nodes, list) and nodes:
+                for index, node in enumerate(nodes, start=1):
+                    rendered = self._format_forward_node(node, depth, index)
+                    if rendered:
+                        lines.append(rendered)
+            else:
+                error = str(forward.get("error") or "").strip()
+                status = str(forward.get("status") or "unavailable").strip()
+                lines.append(f"Content unavailable: {error or status}")
+            lines.append("[/Forwarded messages]")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
+
+    def _format_forward_node(self, node, depth, index):
+        if not isinstance(node, dict):
+            return ""
+        metadata = [self._sender_label(node)]
+        node_time = self._format_cst_timestamp(node.get("time"))
+        if node_time:
+            metadata.append(f"time={node_time}")
+        lines = [f"{index}. " + ", ".join(metadata)]
+
+        content = str(node.get("content") or "").strip()
+        nested = self._format_forwards(node.get("forwards"), depth + 1)
+        if nested:
+            content = content.replace("[forward]", "").strip()
+        if content:
+            lines.append(content)
+        if nested:
+            lines.append(nested)
+        if len(lines) == 1:
+            lines.append("[empty forwarded message]")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_cst_timestamp(value):
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if timestamp <= 0:
+            return ""
+        return datetime.fromtimestamp(timestamp, CST).strftime("%Y-%m-%d %H:%M:%S CST (UTC+8)")
+
+    @staticmethod
+    def _current_time_note():
+        current = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S CST (UTC+8)")
+        return f"Current time: {current}"
 
     @classmethod
     def _assistant_history_content(cls, message, content):

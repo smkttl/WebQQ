@@ -97,6 +97,8 @@ WOLF_ROLES = {
     "wolf", "wolf_king", "white_wolf_king", "wolf_beauty", "evil_knight", "gargoyle",
     "hidden_wolf", "blood_moon", "wolf_witch", "mechanical_wolf",
 }
+WOLF_REVEAL_BLOCKED_ROLES = {"wolf_beauty", "evil_knight"}
+DAYTIME_PHASES = {"speech", "discussion", "vote"}
 PACK_WOLF_ROLES = {
     "wolf", "wolf_king", "white_wolf_king", "wolf_beauty", "evil_knight", "blood_moon",
     "wolf_witch", "mechanical_wolf",
@@ -123,16 +125,16 @@ FIRST_NIGHT_ONLY_ROLE_TYPES = {"cupid", "mechanical_wolf", "wild_child", "mixed_
 
 ROLE_HELP = {
     "villager": "没有夜间技能，通过发言和投票找出狼人。",
-    "wolf": "每晚与狼队友讨论并提交刀人目标。",
+    "wolf": "每晚与狼队友讨论并提交刀人目标；白天可随时公开亮牌并立即转入夜晚。",
     "seer": "每晚查验一名玩家是否属于狼人阵营。",
     "witch": "拥有一瓶解药和一瓶毒药，按本局规则使用。",
     "hunter": "死亡时可以开枪带走一人，但被毒死时不能开枪。",
     "guard": "每晚守护一人，可以自守，但不能连续两晚守同一人。",
     "idiot": "首次被公投出局时翻牌免死，之后失去投票权。",
-    "wolf_king": "属于狼人阵营，死亡时可以开枪，但被毒死时不能开枪。",
+    "wolf_king": "属于狼人阵营，死亡时可以开枪，但被毒死时不能开枪；白天可随时公开亮牌并立即转入夜晚。",
     "cupid": "首夜连接两名玩家成为情侣。",
     "knight": "白天讨论时可公开决斗一名其他玩家一次：目标是狼人则目标死亡并入夜，否则骑士死亡并继续讨论。",
-    "white_wolf_king": "属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家，随后直接入夜。",
+    "white_wolf_king": "属于狼人阵营，白天可随时公开亮牌；可额外选择一名其他存活玩家一同离场，随后直接入夜。",
     "gravekeeper": "每晚获知上一名实际被公投出局玩家的阵营。",
     "dreamer": "每晚摄梦另一名玩家使其免疫夜间伤害；若摄梦人当夜死亡，梦游者一同死亡。",
     "magician": "每晚交换两名存活玩家承受夜间目标技能的座位，连续两晚不能重复使用同一座位。",
@@ -141,13 +143,13 @@ ROLE_HELP = {
     "silencer": "每晚禁言另一名玩家；目标次日跳过顺序发言，且不能发起白天技能或确认结束自由发言，但仍可投票。",
     "nine_tailed_fox": "拥有九条尾巴；普通好人死亡失去一条，神职死亡失去两条，尾巴耗尽时死亡。",
     "rogue": "属于普通村民，不受毒药和狼美人殉情影响。",
-    "wolf_beauty": "属于狼人阵营，每晚魅惑一名非狼队玩家；狼美人死亡时当前魅惑目标随之死亡。",
-    "evil_knight": "属于狼人阵营，免疫夜间伤害；被查验或被毒时分别反伤预言家或女巫。",
-    "gargoyle": "属于狼人阵营，初始不与狼队见面，每晚查验精确身份；狼队全灭后获得刀人能力。",
-    "hidden_wolf": "属于狼人阵营但查验显示非狼人，初始不与狼队见面；狼队全灭后成为普通狼人。",
-    "blood_moon": "属于狼人阵营，可白天血爆封印当夜好人技能；作为最后一狼被公投时可进行最后一刀。",
-    "wolf_witch": "属于狼人阵营，参与刀人并可每晚额外查验一名玩家的精确身份。",
-    "mechanical_wolf": "属于狼人阵营，首夜学习一名玩家的精确身份并复制其可主动使用的技能。",
+    "wolf_beauty": "属于狼人阵营，每晚魅惑一名非狼队玩家；狼美人死亡时当前魅惑目标随之死亡；不能主动公开亮牌。",
+    "evil_knight": "属于狼人阵营，免疫夜间伤害；被查验或被毒时分别反伤预言家或女巫；不能主动公开亮牌。",
+    "gargoyle": "属于狼人阵营，初始不与狼队见面，每晚查验精确身份；狼队全灭后获得刀人能力；白天可随时公开亮牌。",
+    "hidden_wolf": "属于狼人阵营但查验显示非狼人，初始不与狼队见面；狼队全灭后成为普通狼人；白天可随时公开亮牌。",
+    "blood_moon": "属于狼人阵营，可白天亮牌封印当夜好人技能并直接入夜；作为最后一狼被公投时可进行最后一刀。",
+    "wolf_witch": "属于狼人阵营，参与刀人并可每晚额外查验一名玩家的精确身份；白天可随时公开亮牌。",
+    "mechanical_wolf": "属于狼人阵营，首夜学习一名玩家的精确身份并复制其可主动使用的技能；白天可随时公开亮牌。",
     "thief": "开局从两张未发身份牌中选择一张，随后完全成为该身份。",
     "piper": "每晚迷惑至多两名玩家；当其他所有存活玩家均被迷惑时独自获胜。",
     "cursed_fox": "第三方身份，免疫狼刀，被查验则死亡；存活到阵营胜利时夺取胜利。",
@@ -252,7 +254,7 @@ COMMAND_NAMES = {
     "帮助", "创建", "加入", "退出", "添加AI", "删除AI", "名单", "身份", "配置", "自动配置", "角色", "平票",
     "女巫自救", "女巫双药", "胜利", "开始", "结束", "结束自由发言", "状态", "推进", "重发", "取消",
     "清理", "狼聊", "连结", "守护", "空守", "刀", "空刀", "查验", "救", "毒", "救毒",
-    "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议",
+    "过", "开枪", "不开枪", "投票", "弃票", "决斗", "自爆", "观战", "debug", "同意", "撤销提议", "kill",
     "选牌", "摄梦", "交换", "加票", "禁言", "魅惑", "窥视", "学习", "迷惑", "榜样", "支持", "血爆",
 }
 COMMAND_NAMES.update({"选择", "双用", "女巫双用", "亮牌"})
@@ -480,6 +482,7 @@ class WerewolfPlugin:
             args = []
             prefix_suffix = ""
             private_shortcut = False
+            direct_group_kill = False
             is_private_chat = chat_type == "private" or chat_id.startswith("private_")
             if content.startswith(self.prefix):
                 prefix_suffix = content[len(self.prefix):]
@@ -495,8 +498,14 @@ class WerewolfPlugin:
                 if candidate in PRIVATE_COMMAND_NAMES:
                     command, args = candidate, candidate_args
                     private_shortcut = True
+            elif chat_type == "group":
+                kill_match = re.fullmatch(r"/kill(?:\s+(.*))?", content)
+                if kill_match:
+                    command = "kill"
+                    args = self._tokenize_command_args(command, kill_match.group(1) or "")
+                    direct_group_kill = True
             is_command = (
-                private_shortcut
+                direct_group_kill or private_shortcut
                 or content == self.prefix
                 or (content.startswith(self.prefix) and (prefix_suffix[:1].isspace() or command in COMMAND_NAMES))
             )
@@ -562,8 +571,8 @@ class WerewolfPlugin:
         if message.get("chat_type") != "group" or not chat_id.startswith("group_"):
             raise ValueError("Werewolf portal commands require a group chat")
         text = str(message.get("text") or "").strip()
-        if not text.startswith(self.prefix):
-            raise ValueError(f"Werewolf portal commands must start with {self.prefix}")
+        if not text.startswith(self.prefix) and not re.fullmatch(r"/kill(?:\s+.*)?", text):
+            raise ValueError(f"Werewolf portal commands must start with {self.prefix} or use /kill <id>")
         self_user = message.get("self_user") or {}
         synthetic = {
             "message_id": "",
@@ -671,12 +680,15 @@ class WerewolfPlugin:
             await self._safe_send(chat_id, f"当前群没有游戏。发送 {self.prefix} 创建 开房。")
             return
         await self._expire_night_if_due(game)
+        if command == "kill":
+            await self._host_kill(game, user_id, args)
+            return
         if (
             game.get("phase") == "discussion"
             and self._is_silenced(game, self._player(game, user_id))
-            and command in {"结束自由发言", "决斗", "自爆", "血爆"}
+            and command in {"结束自由发言", "决斗"}
         ):
-            await self._safe_send(chat_id, "你本日被禁言，不能使用白天发言或公开技能命令，但仍可私下投票。")
+            await self._safe_send(chat_id, "你本日被禁言，不能结束自由发言或使用骑士决斗，但仍可私下投票；符合条件的狼人仍可公开亮牌。")
             return
 
         if command == "同意":
@@ -734,7 +746,7 @@ class WerewolfPlugin:
         elif command == "决斗":
             await self._knight_duel(game, user_id, args)
         elif command == "自爆":
-            await self._white_wolf_blast(game, user_id, args)
+            await self._wolf_reveal(game, user_id, args)
         elif command == "血爆":
             await self._blood_moon_blast(game, user_id)
         elif command == "状态":
@@ -2047,6 +2059,7 @@ class WerewolfPlugin:
             f"夜间角色通过临时会话行动。非讨论角色的阶段配额为 45 秒；狼队讨论配额为配置中狼人阵营牌数 × 30 秒，同一阶段取最长配额。阶段即使提前完成也会等到截止时间，超时视为跳过；时间始终按开局公开配置保留，不随角色死亡变化。每天先进行死亡发言和随机起点的顺序发言，每人发送 {self.prefix} 过结束当前发言；随后进入自由讨论，达到结束自由发言阈值后进入私密投票。\n"
             "守卫不能连续守同一人，同守同救仍死亡；毒杀不能开枪。\n"
             "狼队最终目标只在已提交有效目标的成员中决定，优先级为狼王高于白狼王、白狼王高于其他狼队成员；同一最高优先级有多个提交时随机采用其中一个。未提交或选择跳过不参与决定。\n"
+            "除恶灵骑士和狼美人外，在场狼人可在白天发言或投票阶段随时公开亮牌；亮牌者离场，完成相关离场结算后立即入夜。\n"
             "骑士在白天讨论时可公开决斗一次：目标是狼人则该狼人死亡且不能发动死亡技能，随后入夜；目标不是狼人则骑士死亡，讨论继续。\n"
             "白狼王属于狼人阵营，白天讨论时可公开自爆并带走一名其他存活玩家；两人死亡并结算死亡技能后直接入夜。\n"
             "屠边：普通村民全部死亡或神职全部死亡时，狼人胜利；屠城：全部非狼人阵营玩家死亡时，狼人胜利。具体采用哪种条件以本局设置为准。\n"
@@ -2088,8 +2101,8 @@ class WerewolfPlugin:
     def _command_text(self):
         return (
             "【命令列表】\n"
-            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、身份 [身份名]、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、过（结束当前顺序/死亡发言）、决斗 <座位>、自爆 <座位>、结束自由发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
-            f"白天公开技能：{self.prefix} 决斗 <座位>、自爆 <座位>、血爆\n"
+            f"群聊：{self.prefix} 创建、加入、退出、添加AI [数量]、删除AI <座位>、名单、身份 [身份名]、配置、自动配置 <要求>、开始、结束（提前终止并复盘）、观战、debug [-v]（管理员）、过（结束当前顺序/死亡发言）、/kill <座位|uid>（房主强制离场）、决斗 <座位>、亮牌 [座位]、结束自由发言、状态、推进、重发 [座位]、取消、清理、同意、撤销提议、帮助\n"
+            f"白天公开技能：{self.prefix} 决斗 <座位>、亮牌 [座位]、血爆\n"
             f"临时会话：{self.prefix} 状态、选牌、连结、榜样、支持、学习、交换、摄梦、守护、空守、刀、空刀、查验、窥视、加票、禁言、魅惑、迷惑、救、毒、救毒、过、开枪、不开枪、投票、弃票、狼聊 <内容>。可省略 {self.prefix} 并写成 /命令；:内容 或 ：内容 等同于狼聊\n"
             "所有目标均使用座位号。只有当前阶段和身份允许的命令会生效。"
         )
@@ -3033,6 +3046,7 @@ class WerewolfPlugin:
                 "heartbreak": "情侣殉情",
                 "duel": "骑士选择能力",
                 "duel_failed": "骑士选择能力失败",
+                "wolf_reveal": "狼人公开亮牌",
                 "white_wolf_blast": "白狼王自爆带走",
                 "white_wolf_blast_self": "白狼王自爆",
                 "blood_moon_blast": "月影使徒选择能力",
@@ -3544,9 +3558,45 @@ class WerewolfPlugin:
         self._save()
         await self._continue_death_resolution(game)
 
+    async def _wolf_reveal(self, game, user_id, args):
+        if game.get("phase") not in DAYTIME_PHASES:
+            await self._safe_send(game["chat_id"], "狼人只能在白天发言或投票阶段公开亮牌。")
+            return
+        player = self._player(game, user_id)
+        if not player or not player.get("alive") or player.get("role") not in WOLF_ROLES:
+            await self._safe_send(game["chat_id"], "只有符合条件的在场狼人可以公开亮牌。")
+            return
+        if not self._can_wolf_reveal(player):
+            await self._safe_send(game["chat_id"], "恶灵骑士和狼美人不能公开亮牌。")
+            return
+        if args:
+            if self._has_ability(player, "white_wolf_king"):
+                await self._white_wolf_blast(game, user_id, args)
+            else:
+                await self._safe_send(game["chat_id"], f"格式：{self.prefix} 亮牌（无需目标）")
+            return
+        if self._has_ability(player, "blood_moon") and not player.get("blood_blast_used"):
+            await self._blood_moon_blast(game, user_id)
+            return
+
+        role_name = ROLE_NAMES[player["role"]]
+        self._record_action(game, f"{self._history_player_label(player)}公开亮牌，白天立即结束。")
+        await self._safe_send(
+            game["chat_id"],
+            f"{player['seat']}号 {player['name']} 公开翻牌为{role_name}并离场；本日立即结束，完成离场结算后进入夜晚。",
+        )
+        game["transition_after_shots"] = "night"
+        newly_dead = self._apply_deaths(game, [(player["user_id"], "wolf_reveal")])
+        chained = [item for item in newly_dead if item["user_id"] != player["user_id"]]
+        if chained:
+            labels = "、".join(f"{item['seat']}号 {item['name']}" for item in chained)
+            await self._safe_send(game["chat_id"], f"连锁离场：{labels}。")
+        self._save()
+        await self._continue_death_resolution(game)
+
     async def _white_wolf_blast(self, game, user_id, args):
-        if game.get("phase") != "discussion":
-            await self._safe_send(game["chat_id"], "白狼王只能在白天讨论阶段自爆。")
+        if game.get("phase") not in DAYTIME_PHASES:
+            await self._safe_send(game["chat_id"], "白狼王只能在白天发言或投票阶段自爆。")
             return
         white_wolf = self._player(game, user_id)
         if not white_wolf or not white_wolf.get("alive") or not self._has_ability(white_wolf, "white_wolf_king"):
@@ -3580,8 +3630,8 @@ class WerewolfPlugin:
         await self._continue_death_resolution(game)
 
     async def _blood_moon_blast(self, game, user_id):
-        if game.get("phase") != "discussion":
-            await self._safe_send(game["chat_id"], "血月使徒只能在白天讨论阶段血爆。")
+        if game.get("phase") not in DAYTIME_PHASES:
+            await self._safe_send(game["chat_id"], "血月使徒只能在白天发言或投票阶段血爆。")
             return
         player = self._player(game, user_id)
         if not player or not player.get("alive") or not self._has_ability(player, "blood_moon"):
@@ -3948,6 +3998,105 @@ class WerewolfPlugin:
             await self._continue_death_resolution(game)
         else:
             await self._safe_send(game["chat_id"], "当前阶段不能推进。")
+
+    async def _host_kill(self, game, user_id, args):
+        if not self._is_host(game, user_id):
+            await self._safe_send(game["chat_id"], "只有房主可以使用 /kill。")
+            return
+        if len(args) != 1:
+            await self._safe_send(game["chat_id"], "格式：/kill <座位|uid>")
+            return
+        if game.get("phase") not in {"night_actions", "witch", "death_shot", "speech", "discussion", "vote"}:
+            await self._safe_send(game["chat_id"], "只有正式开局后且游戏尚未结束时可以使用 /kill。")
+            return
+        identifier = str(args[0]).strip()
+        target = None
+        try:
+            target = self._by_seat(game, int(identifier))
+        except (TypeError, ValueError):
+            pass
+        if not target:
+            target = self._player(game, identifier)
+        if not target:
+            await self._safe_send(game["chat_id"], "未找到该座位或 uid。")
+            return
+        if not target.get("alive"):
+            await self._safe_send(game["chat_id"], f"{target['seat']}号 {target['name']} 已经离场。")
+            return
+
+        target_id = target["user_id"]
+        phase = game.get("phase")
+        speech_state = game.get("speech_state") or {}
+        speech_queue = speech_state.get("queue") or []
+        was_current_speaker = phase == "speech" and bool(speech_queue) and speech_queue[0] == target_id
+        night_specs = self._night_notice_specs(game, "initial") if phase == "night_actions" else []
+
+        target["alive"] = False
+        target["death_causes"] = ["host_kill"]
+        self._record_action(
+            game,
+            f"{self._history_player_label(target)}离场，原因：房主使用 /kill 强制离场；不触发离场技能或连锁效果。",
+        )
+        game["ready"] = [uid for uid in game.get("ready", []) if uid != target_id]
+        game["votes"].pop(target_id, None)
+        for voter_id, choice in list(game.get("votes", {}).items()):
+            if choice == target_id:
+                game["votes"][voter_id] = None
+        game["vote_candidates"] = [
+            uid for uid in game.get("vote_candidates", []) if uid != target_id
+        ]
+        if speech_queue:
+            speech_state["queue"] = [uid for uid in speech_queue if uid != target_id]
+        for key in ("ai_pending_speeches", "ai_pending_wolf_replies"):
+            game[key] = [uid for uid in game.get(key, []) if uid != target_id]
+
+        actions = game.get("night_actions", {})
+        for spec in night_specs:
+            if spec["player"]["user_id"] != target_id:
+                continue
+            if spec["kind"] == "wolf":
+                actions.get("wolves", {}).pop(spec["key"], None)
+            else:
+                actions.pop(spec["key"], None)
+        if phase == "witch":
+            actor_keys = actions.get("witch_actor_keys") or []
+            for key in list(actor_keys):
+                actor = self._witch_actor_for_key(game, key)
+                if actor and actor["user_id"] == target_id:
+                    actor_keys.remove(key)
+                    actions.pop(key, None)
+
+        await self._safe_send(
+            game["chat_id"],
+            f"房主使用 /kill：{target['seat']}号 {target['name']} 强制离场；不触发离场技能或连锁效果。",
+        )
+        activated = self._activate_dormant_wolves(game)
+        if activated:
+            for player in activated:
+                game.setdefault("role_notifications", []).append({
+                    "user_id": player["user_id"],
+                    "text": "其他可刀狼人已经死亡，你已激活并加入当前狼队，从下一夜起可以刀人和使用狼聊。",
+                })
+            await self._deliver_role_notifications(game)
+            await self._notify_wolf_pack(game)
+        self._save()
+
+        winner = self._winner(game)
+        if winner:
+            await self._finish_game(game, winner)
+            return
+        if phase == "speech" and game.get("phase") == "speech":
+            queue = (game.get("speech_state") or {}).get("queue") or []
+            if not queue:
+                await self._continue_after_speech(game, speech_state.get("continuation"))
+            elif was_current_speaker:
+                await self._prompt_speech_turn(game)
+        elif phase == "vote" and game.get("phase") == "vote":
+            voters = self._eligible_voters(game)
+            if not voters:
+                await self._finish_vote_without_exile(game)
+            elif all(voter["user_id"] in game.get("votes", {}) for voter in voters):
+                await self._resolve_vote(game)
 
     async def _cancel(self, game, user_id):
         if not self._is_host(game, user_id):
@@ -4508,7 +4657,8 @@ class WerewolfPlugin:
             "the highest acting tier. Therefore any submitted target produces a wolf target. Night deaths resolve together before triggered shots and victory checks. "
             "Each day uses mandatory death speeches when applicable, then a random-start circular living-player speaking order; "
             "each controlled speaker must pass before the next turn. This is followed by free discussion, readiness confirmation, "
-            "and private voting. Public daytime abilities are legal only during free discussion.\n"
+            "and private voting. Public daytime abilities are legal only during free discussion, except an eligible wolf may reveal "
+            "during any daytime speaking or voting phase to leave play and end the day immediately.\n"
             f"- Witch: {witch_self}; {double} same-night antidote and poison use.\n"
             f"- Wolf friendly fire: {wolf_targets}.\n"
             "- Guard may protect self, may not protect the same player on consecutive nights, and guard plus antidote "
@@ -4518,13 +4668,14 @@ class WerewolfPlugin:
             "- During daytime discussion, the Knight may publicly duel one other living player once. A wolf target "
             "dies without triggering a death shot and the game proceeds toward night; a non-wolf target survives, "
             "the Knight dies, and discussion continues.\n"
-            "- During daytime discussion, the White Wolf King may publicly explode and take one other living player "
-            "down with it. Both die, eligible death shots resolve, voting is skipped, and the game proceeds toward night.\n"
+            "- During any daytime speaking or voting phase, every wolf except Evil Knight and Wolf Beauty may reveal its exact role, "
+            "leave play, and end the day immediately. The White Wolf King may optionally take one other living player down with it. "
+            "Eligible death shots resolve, voting is skipped, and the game proceeds toward night.\n"
             "- Cupid links two lovers. One lover dying kills the other. Same-camp lovers retain their faction. "
             "Cross-camp lovers win only as the final two survivors and suspend normal faction victory while both live.\n"
             "- Dormant Gargoyle and Hidden Wolf do not know or chat with the active pack and cannot kill until the active pack is gone.\n"
             "- The Hidden Wolf appears non-wolf to Seer alignment checks; exact-role checks still reveal it.\n"
-            "- Knight may publicly duel during discussion; White Wolf King may publicly explode with a target; Blood Moon may publicly explode without a target.\n"
+            "- Knight may publicly duel during discussion; eligible wolves may publicly reveal throughout the day; Blood Moon's reveal seals good abilities for the coming night.\n"
             "- Configured role rules:\n"
             f"{configured_rules}\n"
             "- Good wins by eliminating every wolf-aligned role. Neutral roles use their documented personal conditions. "
@@ -4595,7 +4746,7 @@ class WerewolfPlugin:
         if player["user_id"] in game.get("charmed_players", []):
             lines.append("- You are charmed by the Piper.")
         if self._is_silenced(game, player):
-            lines.append("- You are silenced today: your ordered turn is skipped; do not speak, confirm free-discussion readiness, or use public daytime skills; you may vote.")
+            lines.append("- You are silenced today: your ordered turn is skipped; do not speak, confirm readiness, or duel; you may vote, and an eligible wolf may still reveal.")
         if player.get("ai_last_decision"):
             lines.append("- Your previous recorded decision: " + json.dumps(player["ai_last_decision"], ensure_ascii=False))
         return "\n".join(lines)
@@ -4620,6 +4771,12 @@ class WerewolfPlugin:
     def _ai_decision_instruction(self, game, player, kind):
         legal = self._legal_ai_targets(game, player, kind)
         labels = ", ".join(f"{item['seat']}={item['name']}" for item in legal) or "none"
+        can_reveal = self._can_wolf_reveal(player)
+        controlled_reveal = (
+            " As an eligible wolf, you may instead reveal your exact role, leave play, and end the day immediately "
+            "with {\"action\":\"reveal\"}."
+            if can_reveal and player.get("alive") else ""
+        )
         wolf_target_rule = (
             "living player, including yourself or a wolf teammate"
             if game.get("settings", {}).get("wolf_can_kill_wolves", False)
@@ -4647,10 +4804,11 @@ class WerewolfPlugin:
         instructions = {
             "controlled_speech": (
                 f"This is your one controlled speaking turn for {controlled_reason}. Remaining order: [{controlled_order}]. "
-                "Public abilities are forbidden in this phase. "
+                "Other public abilities are forbidden in this phase. "
                 "You may give one strategically useful Chinese statement of at most 120 characters, or remain silent. "
                 "After this response the game will automatically mark your turn complete. Use exactly one schema: "
                 "{\"action\":\"speak\",\"speech\":\"...\"} or {\"action\":\"silent\"}."
+                + controlled_reveal
             ),
             "speech": (
                 f"This is your discussion turn {reply_number}/{max_replies}; currently {ready_count}/{ready_needed} "
@@ -4685,10 +4843,12 @@ class WerewolfPlugin:
             "mixed_blood": f"Choose one player to support from [{labels}]. Schema: {{\"action\":\"support\",\"seat\":4}}.",
             "witch": self._ai_witch_instruction(game, player, labels),
             "knight": f"Choose one living player to duel publicly from [{labels}], or pass for this day. Schema: {{\"action\":\"duel\",\"seat\":4}} or {{\"action\":\"pass\"}}.",
-            "white_wolf_blast": f"Choose one other living player to take down by publicly exploding from [{labels}], or pass for this day. Schema: {{\"action\":\"explode\",\"seat\":4}} or {{\"action\":\"pass\"}}.",
+            "white_wolf_blast": f"Choose one other living player to take down by publicly revealing from [{labels}], reveal without a target, or pass for this day. Schema: {{\"action\":\"explode\",\"seat\":4}} or {{\"action\":\"reveal\"}} or {{\"action\":\"pass\"}}.",
             "blood_moon_blast": "Choose whether to publicly blood-explode today. Schema: {\"action\":\"blood_explode\"} or {\"action\":\"pass\"}.",
+            "wolf_reveal": "Choose whether to reveal your exact wolf identity, leave play, and end the day immediately, or pass for this day. Schema: {\"action\":\"reveal\"} or {\"action\":\"pass\"}.",
             "shot": f"Choose a living target from [{labels}], or decline. Schema: {{\"action\":\"shoot\",\"seat\":4}} or {{\"action\":\"pass\"}}.",
-            "vote": f"Vote for a legal candidate from [{labels}], or abstain. Schema: {{\"action\":\"vote\",\"seat\":3}} or {{\"action\":\"pass\"}}.",
+            "vote": f"Vote for a legal candidate from [{labels}], or abstain. Schema: {{\"action\":\"vote\",\"seat\":3}} or {{\"action\":\"pass\"}}."
+            + (" As an eligible wolf, you may instead reveal and end the day with {\"action\":\"reveal\"}." if can_reveal else ""),
         }
         return "Current required decision:\n" + instructions[kind]
 
@@ -4752,6 +4912,13 @@ class WerewolfPlugin:
         if kind in ("speech", "controlled_speech"):
             action = payload.get("action")
             if kind == "controlled_speech":
+                if (
+                    action == "reveal"
+                    and set(payload) == {"action"}
+                    and self._can_wolf_reveal(player)
+                    and player.get("alive")
+                ):
+                    return {"action": "reveal"}
                 if action == "silent" and set(payload) == {"action"}:
                     return {"action": "silent"}
                 speech = payload.get("speech")
@@ -4791,8 +4958,15 @@ class WerewolfPlugin:
         action = payload.get("action")
         legal = self._legal_ai_targets(game, player, kind)
         legal_seats = {item["seat"]: item for item in legal}
-        if action == "pass" and kind in ("guard", "wolf", "witch", "knight", "white_wolf_blast", "blood_moon_blast", "shot", "vote") and set(payload) == {"action"}:
-            return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "knight": "过", "white_wolf_blast": "过", "blood_moon_blast": "过", "shot": "不开枪", "vote": "弃票"}[kind], "args": []}
+        if action == "pass" and kind in ("guard", "wolf", "witch", "knight", "white_wolf_blast", "blood_moon_blast", "wolf_reveal", "shot", "vote") and set(payload) == {"action"}:
+            return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "knight": "过", "white_wolf_blast": "过", "blood_moon_blast": "过", "wolf_reveal": "过", "shot": "不开枪", "vote": "弃票"}[kind], "args": []}
+        if (
+            action == "reveal"
+            and set(payload) == {"action"}
+            and kind in {"white_wolf_blast", "wolf_reveal", "vote"}
+            and self._can_wolf_reveal(player)
+        ):
+            return {"command": "自爆", "args": []}
         if kind == "thief":
             card = payload.get("card")
             if set(payload) != {"action", "card"} or action != "choose" or card not in (1, 2) or isinstance(card, bool):
@@ -4894,7 +5068,7 @@ class WerewolfPlugin:
         if kind in command_map and legal:
             target = self.rng.choice(legal)
             return {"command": command_map[kind], "args": [str(target["seat"])]}
-        return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "knight": "过", "white_wolf_blast": "过", "blood_moon_blast": "过", "shot": "不开枪", "vote": "弃票"}.get(kind, "过"), "args": []}
+        return {"command": {"guard": "空守", "wolf": "空刀", "witch": "过", "knight": "过", "white_wolf_blast": "过", "blood_moon_blast": "过", "wolf_reveal": "过", "shot": "不开枪", "vote": "弃票"}.get(kind, "过"), "args": []}
 
     def _discussion_turn_is_final(self, player):
         return int(player.get("ai_daily_replies") or 0) + 1 >= self._virtual_int(
@@ -5174,11 +5348,21 @@ class WerewolfPlugin:
                 pending.append((shooter, "shot"))
         elif phase == "discussion":
             for player in self._living(game):
-                if not player.get("virtual") or self._is_silenced(game, player):
+                if not player.get("virtual"):
                     continue
                 day = int(game.get("day") or 0)
                 tokens = player.setdefault("ai_role_decision_tokens", {})
-                if self._has_ability(player, "knight") and not self._skill_used(player, "knight") and int(tokens.get("knight") or player.get("ai_knight_decision_day") or 0) != day:
+                has_special_reveal = (
+                    self._has_ability(player, "white_wolf_king")
+                    or self._has_ability(player, "blood_moon")
+                )
+                if (
+                    self._can_wolf_reveal(player)
+                    and not has_special_reveal
+                    and int(tokens.get("wolf_reveal") or 0) != day
+                ):
+                    pending.append((player, "wolf_reveal"))
+                if self._has_ability(player, "knight") and not self._is_silenced(game, player) and not self._skill_used(player, "knight") and int(tokens.get("knight") or player.get("ai_knight_decision_day") or 0) != day:
                     pending.append((player, "knight"))
                 if self._has_ability(player, "white_wolf_king") and int(tokens.get("white_wolf_blast") or player.get("ai_white_wolf_decision_day") or 0) != day:
                     pending.append((player, "white_wolf_blast"))
@@ -5232,14 +5416,22 @@ class WerewolfPlugin:
             player.setdefault("ai_role_decision_tokens", {})["white_wolf_blast"] = int(game.get("day") or 0)
             self._save()
             if command == "自爆":
-                await self._white_wolf_blast(game, player["user_id"], args)
+                await self._wolf_reveal(game, player["user_id"], args)
         elif kind == "blood_moon_blast":
             player.setdefault("ai_role_decision_tokens", {})["blood_moon_blast"] = int(game.get("day") or 0)
             self._save()
             if command == "血爆":
                 await self._blood_moon_blast(game, player["user_id"])
+        elif kind == "wolf_reveal":
+            player.setdefault("ai_role_decision_tokens", {})["wolf_reveal"] = int(game.get("day") or 0)
+            self._save()
+            if command == "自爆":
+                await self._wolf_reveal(game, player["user_id"], args)
         elif kind == "vote":
-            await self._vote_action(game, player, command, args)
+            if command == "自爆":
+                await self._wolf_reveal(game, player["user_id"], args)
+            else:
+                await self._vote_action(game, player, command, args)
 
     async def _handle_virtual_discussion(self, game, message):
         sender_id = str(message.get("sender_id") or message.get("user_id") or "")
@@ -5296,6 +5488,9 @@ class WerewolfPlugin:
         queue = state.get("queue") or []
         if game.get("phase") != "speech" or not queue or queue[0] != player["user_id"]:
             return False
+        if decision.get("action") == "reveal":
+            await self._wolf_reveal(game, player["user_id"], [])
+            return True
         if decision.get("action") == "speak":
             await self._safe_send(
                 game["chat_id"],
@@ -5528,7 +5723,7 @@ class WerewolfPlugin:
             charmed = [self._player(game, uid) for uid in game.get("charmed_players", [])]
             lines.append("被吹笛者迷惑的玩家：" + "、".join(f"{item['seat']}号 {item['name']}" for item in charmed if item))
         if self._is_silenced(game, player):
-            lines.append("你今日被禁言：顺序发言会自动跳过，不能确认结束自由发言或使用公开白天技能，但仍可投票。")
+            lines.append("你今日被禁言：顺序发言会自动跳过，不能确认结束自由发言或使用骑士决斗，但仍可投票；符合条件的狼人仍可公开亮牌。")
         speech_queue = (game.get("speech_state") or {}).get("queue") or []
         if game.get("phase") == "speech" and speech_queue and speech_queue[0] == player["user_id"]:
             lines.append(f"当前轮到你发言；结束时在群聊发送 {self.prefix} 过。")
@@ -5543,6 +5738,18 @@ class WerewolfPlugin:
     def _current_private_prompt(self, game, player):
         phase = game["phase"]
         role = player["role"]
+        reveal_prompt = ""
+        if phase in DAYTIME_PHASES and self._can_wolf_reveal(player):
+            if self._has_ability(player, "white_wolf_king"):
+                reveal_prompt = f"公开亮牌：在群聊发送 {self.prefix} 亮牌 [另一名存活玩家座位]；目标可以省略。"
+            elif self._has_ability(player, "blood_moon"):
+                reveal_prompt = f"公开亮牌：在群聊发送 {self.prefix} 亮牌；封印下一夜好人技能并直接入夜。"
+            else:
+                reveal_prompt = f"公开亮牌：在群聊发送 {self.prefix} 亮牌；离场结算后立即入夜。"
+
+        def include_reveal(text):
+            return "\n".join(item for item in (text, reveal_prompt) if item)
+
         if phase == "thief_choice" and role == "thief":
             return f"当前操作：{self.prefix} 选牌 <1|2>"
         if phase == "night_actions":
@@ -5559,18 +5766,18 @@ class WerewolfPlugin:
                 return "本夜女巫操作已经提交并锁定。"
             return self._witch_prompt(game, player)
         if phase == "discussion" and self._has_ability(player, "knight") and not self._skill_used(player, "knight"):
-            return f"公开技能：在群聊发送 {self.prefix} 决斗 <座位>；每局限一次。"
+            return include_reveal(f"公开技能：在群聊发送 {self.prefix} 决斗 <座位>；每局限一次。")
         if phase == "discussion" and self._has_ability(player, "white_wolf_king"):
-            return f"公开技能：在群聊发送 {self.prefix} 自爆 <座位>，自爆并带走一名其他存活玩家。"
+            return reveal_prompt
         if phase == "discussion" and self._has_ability(player, "blood_moon") and not player.get("blood_blast_used"):
-            return f"公开技能：在群聊发送 {self.prefix} 血爆，死亡并封印下一夜好人技能。"
+            return include_reveal(f"公开技能：在群聊发送 {self.prefix} 血爆，死亡并封印下一夜好人技能。")
         if phase == "death_shot" and game.get("pending_shots") and game["pending_shots"][0] == player["user_id"]:
             return f"当前操作：{self.prefix} 开枪 <座位>，或 {self.prefix} 不开枪"
         if phase == "vote" and player in self._eligible_voters(game):
             candidates = [self._player(game, uid) for uid in game.get("vote_candidates", [])]
             labels = "、".join(f"{item['seat']}号 {item['name']}" for item in candidates)
-            return f"候选人：{labels}。当前操作：{self.prefix} 投票 <座位>，或 {self.prefix} 弃票"
-        return ""
+            return include_reveal(f"候选人：{labels}。当前操作：{self.prefix} 投票 <座位>，或 {self.prefix} 弃票")
+        return reveal_prompt
 
     def _witch_prompt(self, game, witch):
         target_id = game["night_actions"].get("wolf_target")
@@ -5668,6 +5875,15 @@ class WerewolfPlugin:
     @staticmethod
     def _has_ability(player, role):
         return bool(player and (player.get("role") == role or player.get("copied_role") == role))
+
+    @staticmethod
+    def _can_wolf_reveal(player):
+        return bool(
+            player
+            and player.get("alive")
+            and player.get("role") in WOLF_ROLES
+            and player.get("role") not in WOLF_REVEAL_BLOCKED_ROLES
+        )
 
     @staticmethod
     def _skill_used(player, skill):

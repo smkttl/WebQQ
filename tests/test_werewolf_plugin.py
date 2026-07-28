@@ -340,6 +340,72 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["players"][0]["user_id"], "9000")
         self.assertEqual(game["players"][0]["name"], "WebQQ Admin")
 
+    async def test_host_kill_is_strict_and_bypasses_role_and_lover_effects(self):
+        game = await self.configured_six_player_game(start=False)
+        roles = ["villager", "hunter", "villager", "wolf", "seer", "wolf"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["lovers"] = ["2", "3"]
+        game["lovers_cross"] = False
+        game["phase"] = "speech"
+        game["day"] = 1
+        game["speech_state"] = {
+            "kind": "ordered",
+            "queue": ["2", "3", "4"],
+            "continuation": "free_discussion",
+        }
+
+        await self.group(3, "/kill 2")
+
+        self.assertTrue(game["players"][1]["alive"])
+        self.assertIsNone(game["host_action_proposal"])
+        self.assertIn("只有房主可以使用 /kill", self.ctx.sent[-1]["text"])
+
+        await self.group(1, "/kill 2", "Host")
+
+        self.assertFalse(game["players"][1]["alive"])
+        self.assertTrue(game["players"][2]["alive"])
+        self.assertEqual(game["players"][1]["death_causes"], ["host_kill"])
+        self.assertEqual(game["pending_shots"], [])
+        self.assertEqual(game["phase"], "speech")
+        self.assertEqual(game["speech_state"]["queue"], ["3", "4"])
+        self.assertIn("不触发离场技能或连锁效果", self.ctx.sent[-2]["text"])
+
+    async def test_host_kill_accepts_uid_and_webqq_host_privilege(self):
+        game = await self.configured_six_player_game(start=False)
+        roles = ["villager", "villager", "wolf", "wolf", "seer", "witch"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["players"][1]["user_id"] = "200"
+        game["phase"] = "discussion"
+        game["day"] = 1
+
+        await self.group(1, "/kill 200", "Host")
+
+        self.assertFalse(game["players"][1]["alive"])
+
+        game["players"][2]["alive"] = True
+        await self.plugin.handle_portal_message({
+            "chat_id": "group_123",
+            "chat_type": "group",
+            "text": "/kill 3",
+            "source": "ui_portal",
+            "self_user": {"user_id": "9000", "name": "WebQQ Admin"},
+        }, self.ctx)
+
+        self.assertFalse(game["players"][2]["alive"])
+
+    async def test_host_kill_cancels_submitted_night_actions_without_advancing(self):
+        game = await self.configured_six_player_game(start=True)
+        game["night_actions"]["wolves"] = {"3": "1", "4": "1"}
+
+        await self.web_group("/kill 3")
+
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertFalse(game["players"][2]["alive"])
+        self.assertEqual(game["night_actions"]["wolves"], {"4": "1"})
+        self.assertIsNotNone(game["night_timing"])
+
     async def test_webqq_ui_group_command_has_host_privileges(self):
         game = await self.reach_first_day()
 
@@ -1211,6 +1277,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(rules_index, settings_index)
         self.assertLess(settings_index, commands_index)
         self.assertLess(commands_index, night_index)
+        self.assertIn("/kill <座位|uid>", group_texts[commands_index])
         self.assertIn("胜利条件：边局", group_texts[settings_index])
         self.assertIn("骑士在白天讨论时可公开选择一次", group_texts[rules_index])
         self.assertIn("白狼王属于狼人阵营", group_texts[rules_index])
@@ -2476,6 +2543,96 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(knight["ai_knight_decision_day"], game["day"])
         self.assertFalse(any(player is knight and kind == "knight" for player, kind in self.plugin._pending_virtual_decisions(game)))
 
+    async def test_wolf_can_reveal_during_ordered_speech_and_go_directly_to_night(self):
+        game = await self.reach_first_day()
+        wolf = game["players"][2]
+        game["phase"] = "speech"
+        game["speech_state"] = {
+            "kind": "ordered",
+            "queue": ["1", "2", "3", "4"],
+            "continuation": "free_discussion",
+        }
+
+        await self.group(3, "/wolf 亮牌")
+
+        self.assertFalse(wolf["alive"])
+        self.assertEqual(wolf["death_causes"], ["wolf_reveal"])
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["night"], 2)
+        self.assertIsNone(game["speech_state"])
+        history = "\n".join(entry["text"] for entry in game["action_history"])
+        self.assertIn("3号 P3（狼人）公开亮牌，白天立即结束", history)
+        self.assertIn("3号 P3（狼人）死亡，原因：狼人公开亮牌", history)
+
+    async def test_wolf_king_can_reveal_during_vote_then_resolve_departure_action(self):
+        game = await self.configured_six_player_game(start=False)
+        roles = ["villager", "villager", "wolf", "seer", "witch", "wolf_king"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["phase"] = "vote"
+        game["day"] = 1
+        game["night"] = 1
+        game["vote_candidates"] = [player["user_id"] for player in game["players"]]
+        game["votes"] = {"1": "3"}
+
+        await self.group(6, "/wolf 自爆")
+
+        self.assertFalse(game["players"][5]["alive"])
+        self.assertEqual(game["pending_shots"], ["6"])
+        self.assertEqual(game["phase"], "death_shot")
+        await self.private(6, "/wolf 不开枪")
+        self.assertEqual(game["phase"], "night_actions")
+        self.assertEqual(game["night"], 2)
+
+    async def test_evil_knight_and_wolf_beauty_cannot_reveal(self):
+        game = await self.configured_six_player_game(start=False)
+        roles = ["villager", "villager", "evil_knight", "wolf_beauty", "seer", "wolf"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        game["phase"] = "discussion"
+        game["day"] = 1
+
+        await self.group(3, "/wolf 亮牌")
+        self.assertTrue(game["players"][2]["alive"])
+        self.assertIn("恶灵骑士和狼美人不能公开亮牌", self.ctx.sent[-1]["text"])
+
+        await self.group(4, "/wolf 自爆")
+        self.assertTrue(game["players"][3]["alive"])
+        self.assertEqual(game["phase"], "discussion")
+        self.assertIn("恶灵骑士和狼美人不能公开亮牌", self.ctx.sent[-1]["text"])
+
+    async def test_virtual_wolf_can_choose_reveal_through_daytime_schemas(self):
+        game = await self.configured_six_player_game(start=False)
+        roles = ["villager", "villager", "wolf", "wolf", "seer", "witch"]
+        for player, role in zip(game["players"], roles):
+            self.plugin._reset_player_for_role(player, role)
+        wolf = game["players"][2]
+        wolf["virtual"] = True
+        game["phase"] = "discussion"
+        game["day"] = 1
+
+        pending = self.plugin._pending_virtual_decisions(game)
+        self.assertTrue(any(player is wolf and kind == "wolf_reveal" for player, kind in pending))
+        self.assertIn('{"action":"reveal"}', self.plugin._ai_decision_instruction(game, wolf, "wolf_reveal"))
+        self.assertEqual(
+            self.plugin._validate_ai_decision(game, wolf, "wolf_reveal", '{"action":"reveal"}'),
+            {"command": "自爆", "args": []},
+        )
+
+        game["phase"] = "speech"
+        game["speech_state"] = {"kind": "ordered", "queue": [wolf["user_id"]], "continuation": "free_discussion"}
+        self.assertEqual(
+            self.plugin._validate_ai_decision(game, wolf, "controlled_speech", '{"action":"reveal"}'),
+            {"action": "reveal"},
+        )
+
+        game["phase"] = "vote"
+        game["vote_candidates"] = [player["user_id"] for player in game["players"]]
+        self.assertEqual(
+            self.plugin._validate_ai_decision(game, wolf, "vote", '{"action":"reveal"}'),
+            {"command": "自爆", "args": []},
+        )
+
     async def test_white_wolf_king_blast_kills_both_and_moves_to_night(self):
         game = await self.reach_first_day_with_white_wolf_king()
 
@@ -2943,7 +3100,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("屠边：狼人消灭全部普通村民或全部神职", system_text)
         self.assertIn("Knight may publicly duel", system_text)
-        self.assertIn("White Wolf King may publicly explode", system_text)
+        self.assertIn("every wolf except Evil Knight and Wolf Beauty may reveal", system_text)
+        self.assertIn("White Wolf King may optionally take one other living player", system_text)
         self.assertIn("Abstentions are excluded from the tally", system_text)
         self.assertIn("role: 女巫", system_text)
         self.assertIn('{"action":"speak","speech":', system_text)
@@ -3048,6 +3206,8 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.ctx.get_messages = transcript
         responses = iter([
+            '{"action":"pass"}',
+            '{"action":"pass"}',
             '{"action":"speak","speech":"我先提出一号疑点。","ready":false}',
             '{"action":"silent","ready":false}',
             '{"action":"speak","speech":"我倾向听完后投票。","ready":true}',
@@ -3073,7 +3233,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["phase"], "vote")
         self.assertEqual([player["ai_daily_replies"] for player in game["players"]], [2, 2, 1, 1, 2, 2])
         self.assertEqual(set(game["ready"]), {player["user_id"] for player in game["players"]})
-        second_prompt = "\n".join(item["content"] for item in captured[1] if item["role"] == "user")
+        second_prompt = "\n".join(item["content"] for item in captured[3] if item["role"] == "user")
         self.assertIn("【1号 Host】我先提出一号疑点", second_prompt)
         fourth_player_messages = [
             item["text"] for item in self.ctx.sent if item["text"].startswith("【4号 P4】")
@@ -3124,6 +3284,7 @@ class WerewolfPluginTests(unittest.IsolatedAsyncioTestCase):
         game["day"] = 1
         game["ready"] = []
         self.plugin._call_virtual_llm = AsyncMock(side_effect=[
+            '{"action":"pass"}',
             '{"action":"silent","ready":true}',
             '{"action":"speak","speech":"我认为二号最值得投票。","ready":true}',
             '{"action":"silent","ready":true}',
