@@ -1381,6 +1381,16 @@ function mediaProxyUrl(media) {
   return '';
 }
 
+function safeHttpUrl(value) {
+  if (!value) return '';
+  try {
+    const url = new URL(String(value), window.location.href);
+    return (url.protocol === 'http:' || url.protocol === 'https:') ? url.href : '';
+  } catch {
+    return '';
+  }
+}
+
 function appendVideos(bubble, videos) {
   if (!Array.isArray(videos) || !videos.length) return;
   const wrap = document.createElement('div');
@@ -1436,19 +1446,89 @@ function appendExtraSegments(bubble, segments) {
   const wrap = document.createElement('div');
   wrap.className = 'extra-segments';
   for (const segment of segments) {
+    if (!segment || typeof segment !== 'object') continue;
     const item = document.createElement('div');
-    item.className = 'extra-segment';
-    const label = document.createElement('strong');
-    label.textContent = (segment && segment.label) || `[${(segment && segment.type) || 'segment'}]`;
-    item.appendChild(label);
-    if (segment && segment.text) {
-      const text = document.createElement('span');
-      text.textContent = segment.text;
-      item.appendChild(text);
+    const type = String(segment.type || 'segment').replace(/[^a-z0-9_-]/gi, '').toLowerCase();
+    item.className = `extra-segment extra-${type || 'segment'}`;
+
+    const imageUrl = safeHttpUrl(segment.image);
+    if (imageUrl) {
+      const image = document.createElement('img');
+      image.className = 'extra-preview';
+      image.src = imageUrl;
+      image.alt = '';
+      image.loading = 'lazy';
+      image.referrerPolicy = 'no-referrer';
+      image.addEventListener('error', () => image.remove());
+      item.appendChild(image);
     }
+
+    const body = document.createElement('div');
+    body.className = 'extra-body';
+    const eyebrow = document.createElement('div');
+    eyebrow.className = 'extra-eyebrow';
+    eyebrow.textContent = [segment.label || `[${type || 'segment'}]`, segment.source || ''].filter(Boolean).join(' · ');
+    body.appendChild(eyebrow);
+
+    if (segment.title) {
+      const title = document.createElement('strong');
+      title.className = 'extra-title';
+      title.textContent = segment.title;
+      body.appendChild(title);
+    }
+    const description = segment.description || segment.text || '';
+    if (description && description !== segment.title) {
+      const text = document.createElement('div');
+      text.className = 'extra-description';
+      text.textContent = description;
+      body.appendChild(text);
+    }
+
+    const metadata = [];
+    if (type === 'contact' && segment.contact_id) {
+      metadata.push(`${segment.contact_type || 'contact'} ${segment.contact_id}`);
+    }
+    if (type === 'location' && segment.latitude && segment.longitude) {
+      metadata.push(`${segment.latitude}, ${segment.longitude}`);
+    }
+    if ((type === 'dice' || type === 'rps') && segment.result !== undefined) {
+      metadata.push(`Result ${segment.result}`);
+    }
+    if (metadata.length) {
+      const meta = document.createElement('div');
+      meta.className = 'extra-meta';
+      meta.textContent = metadata.join(' · ');
+      body.appendChild(meta);
+    }
+
+    const audioUrl = safeHttpUrl(segment.audio);
+    if (audioUrl) {
+      const player = document.createElement('audio');
+      player.controls = true;
+      player.preload = 'metadata';
+      player.src = audioUrl;
+      body.appendChild(player);
+    }
+
+    let linkUrl = safeHttpUrl(segment.url);
+    if (!linkUrl && type === 'location' && segment.latitude && segment.longitude) {
+      const latitude = encodeURIComponent(segment.latitude);
+      const longitude = encodeURIComponent(segment.longitude);
+      linkUrl = `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}#map=16/${latitude}/${longitude}`;
+    }
+    if (linkUrl) {
+      const link = document.createElement('a');
+      link.className = 'extra-link';
+      link.href = linkUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = type === 'location' ? 'Open location' : 'Open';
+      body.appendChild(link);
+    }
+    item.appendChild(body);
     wrap.appendChild(item);
   }
-  bubble.appendChild(wrap);
+  if (wrap.childElementCount) bubble.appendChild(wrap);
 }
 
 function appendRecalledTag(bubble, message) {
@@ -2050,6 +2130,11 @@ function renderMessageElement(div, m) {
   if (Array.isArray(m.files) && m.files.length) visibleText = visibleText.replace(/\[file\]/g, '').trim();
   if (Array.isArray(m.videos) && m.videos.length) visibleText = visibleText.replace(/\[video\]/g, '').trim();
   if (Array.isArray(m.records) && m.records.length) visibleText = visibleText.replace(/\[voice\]/g, '').trim();
+  if (Array.isArray(m.extra_segments)) {
+    for (const segment of m.extra_segments) {
+      if (segment && segment.label) visibleText = visibleText.replace(String(segment.label), '').trim();
+    }
+  }
   const rendered = splitReplyTokens(visibleText);
   const senderLabel = m.sender_name || String(m.sender_id || '');
   div.appendChild(createAvatar('msg-avatar', m.sender_avatar_url || avatarUrl('user', m.sender_id), senderLabel));

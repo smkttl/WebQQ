@@ -199,6 +199,53 @@ class FaceManifestTests(unittest.TestCase):
 
 
 class MessageStoreTests(unittest.TestCase):
+    def test_structured_segments_preserve_card_and_media_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            card = json.dumps({
+                "app": "com.tencent.structmsg",
+                "prompt": "A shared article",
+                "meta": {"news": {
+                    "title": "Card title",
+                    "desc": "Card description",
+                    "jumpUrl": "https://example.test/read",
+                    "preview": "https://example.test/cover.jpg",
+                    "tag": "Example News",
+                }},
+            })
+            content, _, _, _, _, videos, records, extras = store._extract_text({
+                "message": [
+                    {"type": "json", "data": {"data": card}},
+                    {"type": "music", "data": {
+                        "title": "Track", "audio": "https://example.test/track.mp3",
+                        "url": "javascript:alert(1)", "image": "https://example.test/art.jpg",
+                    }},
+                    {"type": "location", "data": {
+                        "title": "Meeting point", "lat": 31.2, "lon": 121.5,
+                    }},
+                    {"type": "video", "data": {"file": "clip.mp4", "url": "https://example.test/clip.mp4"}},
+                    {"type": "record", "data": {"file": "voice.amr", "url": "https://example.test/voice.amr"}},
+                ]
+            })
+
+            self.assertIn("[json card]", content)
+            self.assertEqual(extras[0]["title"], "Card title")
+            self.assertEqual(extras[0]["description"], "Card description")
+            self.assertEqual(extras[0]["source"], "Example News")
+            self.assertEqual(extras[0]["url"], "https://example.test/read")
+            self.assertEqual(extras[0]["image"], "https://example.test/cover.jpg")
+            self.assertEqual(extras[1]["audio"], "https://example.test/track.mp3")
+            self.assertNotIn("url", extras[1])
+            self.assertEqual(extras[2]["latitude"], "31.2")
+            self.assertEqual(extras[2]["longitude"], "121.5")
+            self.assertEqual(videos[0]["file"], "clip.mp4")
+            self.assertEqual(records[0]["file"], "voice.amr")
+
+    def test_invalid_json_card_has_bounded_text_fallback(self):
+        extra = MessageStore._simplify_extra_segment("json", {"data": "{not json"})
+        self.assertEqual(extra["label"], "[json card]")
+        self.assertEqual(extra["text"], "{not json")
+
     def test_temp_history_loads_as_private_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = f"{tmp}/temp_10_20.json"

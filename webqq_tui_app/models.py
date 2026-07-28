@@ -75,8 +75,14 @@ class Message:
             for value in values:
                 if not isinstance(value, dict):
                     continue
-                name = _attachment_name(kind, value)
-                attachments.append(Attachment(kind, name, _integer(value.get("size") or value.get("fileSize")), dict(value)))
+                attachment_kind = str(value.get("kind") or kind) if kind == "file" else kind
+                name = _attachment_name(attachment_kind, value)
+                attachments.append(Attachment(
+                    attachment_kind,
+                    name,
+                    _integer(value.get("size") or value.get("fileSize")),
+                    dict(value),
+                ))
         mentions = data.get("mentions") if isinstance(data.get("mentions"), dict) else {}
         return cls(
             chat_id=str(data.get("chat_id") or ""),
@@ -185,7 +191,7 @@ def format_timestamp(timestamp: float, now: Optional[datetime] = None) -> str:
 
 MENTION_RE = re.compile(r"@\[(\d+)\]")
 REPLY_RE = re.compile(r"\[reply:([^\]]+)\]")
-MEDIA_TOKEN_RE = re.compile(r"\[(?:image|file|video|voice|forward)\]")
+MEDIA_TOKEN_RE = re.compile(r"\[(?:image|file|video|voice|forward|onlinefile|flashtransfer)\]")
 FACE_RE = re.compile(r"\[face:(\d+)\]")
 
 
@@ -196,7 +202,49 @@ def display_content(message: Message) -> str:
     # Structured attachments are rendered below, so their transport tokens are noise here.
     if message.attachments or message.forwards:
         content = MEDIA_TOKEN_RE.sub("", content)
+    for segment in message.extra_segments:
+        label = str(segment.get("label") or "")
+        if label:
+            content = content.replace(label, "", 1)
     return content.strip()
+
+
+def extra_segment_summary(segment: Mapping[str, Any], compact: bool = False) -> str:
+    label = str(segment.get("label") or "[{}]".format(segment.get("type") or "unknown"))
+    title = str(segment.get("title") or "").strip()
+    description = str(segment.get("description") or segment.get("text") or "").strip()
+    source = str(segment.get("source") or "").strip()
+    details: List[str] = []
+    if title:
+        details.append(title)
+    if source and source != title:
+        details.append("from " + source)
+
+    segment_type = str(segment.get("type") or "")
+    if segment_type == "location":
+        latitude = str(segment.get("latitude") or "")
+        longitude = str(segment.get("longitude") or "")
+        if latitude and longitude:
+            details.append("{}, {}".format(latitude, longitude))
+    elif segment_type == "contact":
+        contact_type = str(segment.get("contact_type") or "contact")
+        contact_id = str(segment.get("contact_id") or "")
+        if contact_id:
+            details.append("{} {}".format(contact_type, contact_id))
+    elif segment_type in ("dice", "rps") and segment.get("result") is not None:
+        details.append("result {}".format(segment.get("result")))
+    if segment.get("url"):
+        details.append("link")
+    if segment.get("audio"):
+        details.append("audio")
+
+    headline = label + (" " + " | ".join(details) if details else "")
+    if description and description != title:
+        limit = 80 if compact else 500
+        if len(description) > limit:
+            description = description[:max(0, limit - 3)] + "..."
+        headline += (" " if not details else (" - " if compact else "\n  ")) + description
+    return headline
 
 
 def forward_nodes(forward: Mapping[str, Any]) -> List[Mapping[str, Any]]:
@@ -273,11 +321,7 @@ def format_message(message: Message, compact: bool = False, search: str = "") ->
             if len(nodes) > 3:
                 text.append("\n  ... {} more".format(len(nodes) - 3), style="dim")
     for segment in message.extra_segments:
-        label = str(segment.get("label") or "[{}]".format(segment.get("type") or "unknown"))
-        detail = str(segment.get("text") or "")
-        if compact and len(detail) > 80:
-            detail = detail[:77] + "..."
-        text.append("\n{}{}".format(label, " " + detail if detail else ""), style="magenta")
+        text.append("\n" + extra_segment_summary(segment, compact=compact), style="magenta")
 
     if message.reactions:
         labels = []
@@ -312,7 +356,9 @@ def message_matches(message: Message, query: str) -> bool:
     query = query.strip().casefold()
     if not query:
         return False
-    haystack = "\n".join((message.sender_name, message.sender_id, display_content(message))).casefold()
+    extras = "\n".join(extra_segment_summary(segment) for segment in message.extra_segments)
+    attachments = "\n".join(item.name for item in message.attachments)
+    haystack = "\n".join((message.sender_name, message.sender_id, display_content(message), extras, attachments)).casefold()
     return query in haystack
 
 

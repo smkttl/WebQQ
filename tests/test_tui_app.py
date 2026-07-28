@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView, Static
 
-from webqq_tui_app.app import Composer, ForwardViewer, MemberPicker, WebQQTui
+from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, MemberPicker, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -14,6 +14,7 @@ class FakeClient:
         self.config = SimpleNamespace(server_url="http://test", download_dir=Path("/tmp"))
         self.sent = []
         self.poked = []
+        self.reactions = []
         self.forward_ids = []
         self.read = []
 
@@ -52,6 +53,14 @@ class FakeClient:
     async def poke(self, chat_id, user_id):
         self.poked.append((chat_id, user_id))
         return {"ok": True}
+
+    async def send_face_reply(self, chat_id, message_id, emoji_id):
+        self.reactions.append((chat_id, message_id, emoji_id))
+        return {
+            "ok": True,
+            "message_id": message_id,
+            "reactions": [{"emoji_id": emoji_id, "count": 1}],
+        }
 
     async def forward(self, forward_id):
         self.forward_ids.append(forward_id)
@@ -273,6 +282,38 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             app.action_poke()
             await pilot.pause(0.05)
             self.assertEqual(client.poked, [("group_1", "2")])
+
+    async def test_face_reply_picker_filters_sends_and_escapes_on_small_terminal(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            await pilot.press("e")
+            await pilot.pause(0.05)
+            self.assertIsInstance(app.screen, FaceReplyPicker)
+            self.assertLessEqual(app.screen.query_one("#face_list", ListView).region.right, app.size.width)
+            face_filter = app.screen.query_one("#face_filter", Input)
+            face_filter.value = "微笑"
+            await pilot.pause(0.05)
+            await pilot.press("enter")
+            for _ in range(20):
+                if not isinstance(app.screen, FaceReplyPicker) and client.reactions:
+                    break
+                await pilot.pause(0.05)
+            self.assertEqual(client.reactions, [("group_1", "1", "14")])
+            self.assertEqual(app.messages[0].reactions[0]["emoji_id"], "14")
+
+            app.query_one("#message_list", ListView).focus()
+            await pilot.press("e")
+            await pilot.pause(0.05)
+            self.assertIsInstance(app.screen, FaceReplyPicker)
+            await pilot.press("escape")
+            await pilot.pause(0.05)
+            self.assertNotIsInstance(app.screen, FaceReplyPicker)
+            self.assertEqual(client.reactions, [("group_1", "1", "14")])
 
     async def test_enter_opens_and_lazy_loads_forward_on_small_terminal(self):
         client = FakeClient()

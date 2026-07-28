@@ -16,6 +16,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, ListItem, ListView, Static, TextArea
 
 from .client import AuthenticationError, WebQQClient, WebQQClientError
+from .emoji import reaction_emoji_entries
 from .models import (
     Attachment,
     Chat,
@@ -65,6 +66,13 @@ class AttachmentListItem(ListItem):
     def __init__(self, attachment: Attachment):
         self.attachment = attachment
         super().__init__(Static("{}: {}".format(attachment.kind, attachment.name), markup=False))
+
+
+class FaceListItem(ListItem):
+    def __init__(self, emoji_id: str, name: str):
+        self.emoji_id = emoji_id
+        self.face_name = name
+        super().__init__(Static("{}  {}".format(name, emoji_id), markup=False))
 
 
 class NavigableListView(ListView):
@@ -189,6 +197,59 @@ class AttachmentPicker(ModalScreen):
         self.dismiss(None)
 
 
+class FaceReplyPicker(ModalScreen):
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+    CSS = """
+    FaceReplyPicker { align: center middle; background: $background 70%; }
+    FaceReplyPicker > Container { width: 64; max-width: 92%; height: 22; max-height: 88%; border: solid $accent; background: $surface; padding: 1; }
+    FaceReplyPicker Input { margin-bottom: 1; }
+    FaceReplyPicker ListView { height: 1fr; }
+    FaceReplyPicker .hint { height: 1; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("React with a face", classes="dialog-title")
+            yield Input(placeholder="Filter by name or face ID", id="face_filter")
+            yield NavigableListView(id="face_list")
+            yield Static("Enter select  Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        await self._render_faces("")
+        self.query_one("#face_filter", Input).focus()
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "face_filter":
+            await self._render_faces(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "face_filter":
+            return
+        item = self.query_one("#face_list", ListView).highlighted_child
+        if isinstance(item, FaceListItem):
+            self.dismiss(item.emoji_id)
+
+    async def _render_faces(self, query: str) -> None:
+        query = query.strip().casefold()
+        matches = [
+            FaceListItem(emoji_id, name)
+            for emoji_id, name in reaction_emoji_entries()
+            if not query or query in emoji_id.casefold() or query in name.casefold()
+        ]
+        view = self.query_one("#face_list", ListView)
+        await view.clear()
+        if matches:
+            await view.extend(matches)
+            view.index = 0
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if isinstance(event.item, FaceListItem):
+            self.dismiss(event.item.emoji_id)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ForwardNodeListItem(ListItem):
     def __init__(self, node: Mapping[str, Any], compact: bool = False):
         self.message = Message.from_json(node)
@@ -267,6 +328,7 @@ class WebQQTui(App):
         Binding("shift+n", "previous_match", show=False),
         Binding("r", "reply", show=False),
         Binding("p", "poke", show=False),
+        Binding("e", "face_reply", show=False),
         Binding("d", "download", show=False),
         Binding("ctrl+o", "send_file", show=False),
     ]
@@ -836,6 +898,37 @@ class WebQQTui(App):
             self._set_notice("Poked {}".format(message.sender_name))
         except Exception as exc:
             self._set_notice("Poke failed: {}".format(exc))
+
+    def action_face_reply(self) -> None:
+        if isinstance(self.focused, (Composer, Input)):
+            return
+        message = self._selected_message()
+        if not message or not message.message_id.lstrip("-").isdigit():
+            self._set_notice("Select a server-confirmed message to react")
+            return
+        if not self.current_chat:
+            self._set_notice("Select a chat first")
+            return
+        self.push_screen(
+            FaceReplyPicker(),
+            lambda emoji_id: self._face_reply_selected(message, emoji_id),
+        )
+
+    def _face_reply_selected(self, message: Message, emoji_id: Optional[str]) -> None:
+        if emoji_id and self.current_chat:
+            self._spawn(self._send_face_reply(self.current_chat.chat_id, message, emoji_id))
+
+    async def _send_face_reply(self, chat_id: str, message: Message, emoji_id: str) -> None:
+        self._set_notice("Sending reaction...", seconds=120)
+        try:
+            payload = await self.client.send_face_reply(chat_id, message.message_id, emoji_id)
+            await self._apply_reaction_update({
+                "message_id": str(payload.get("message_id") or message.message_id),
+                "reactions": payload.get("reactions") if isinstance(payload.get("reactions"), list) else message.reactions,
+            })
+            self._set_notice("Reaction sent")
+        except Exception as exc:
+            self._set_notice("Reaction failed: {}".format(exc))
 
     def action_download(self) -> None:
         if isinstance(self.focused, (Composer, Input)):

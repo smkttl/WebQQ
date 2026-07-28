@@ -90,6 +90,26 @@ class TuiModelTests(unittest.TestCase):
         self.assertIn("archive.zip", rendered)
         self.assertIn("forward: Thread - 1 message", rendered)
 
+    def test_structured_cards_and_additional_media_are_rendered_and_searchable(self):
+        message = Message.from_json({
+            "content": "[json card] [onlinefile] [video] [voice]",
+            "files": [{"kind": "onlinefile", "name": "cloud.zip", "url": "https://example.test/cloud.zip"}],
+            "videos": [{"name": "clip.mp4", "url": "https://example.test/clip.mp4"}],
+            "records": [{"name": "memo.ogg", "url": "https://example.test/memo.ogg"}],
+            "extra_segments": [{
+                "type": "json", "label": "[json card]", "title": "Release notes",
+                "description": "Important changes", "source": "Docs", "url": "https://example.test/read",
+            }],
+        })
+        rendered = format_message(message, compact=True).plain
+
+        self.assertEqual(display_content(message), "")
+        self.assertIn("[json card] Release notes | from Docs | link - Important changes", rendered)
+        self.assertEqual([item.kind for item in message.attachments], ["onlinefile", "video", "voice"])
+        self.assertEqual(len(message.downloadable_attachments), 3)
+        self.assertTrue(message_matches(message, "release notes"))
+        self.assertTrue(message_matches(message, "cloud.zip"))
+
     def test_unavailable_forward_does_not_claim_zero_messages(self):
         forward = {"title": "Thread", "status": "unavailable", "error": "expired", "nodes": []}
         message = Message.from_json({"sender_name": "A", "content": "[forward]", "forwards": [forward]})

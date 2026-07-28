@@ -14,6 +14,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.upload = {}
         self.pokes = []
+        self.reactions = []
         self.forward_ids = []
         app = web.Application()
         app.router.add_post("/api/login", self.login)
@@ -24,6 +25,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_get("/api/forward", self.forward)
         app.router.add_post("/api/send", self.send)
         app.router.add_post("/api/poke", self.poke)
+        app.router.add_post("/api/message/emoji-like", self.face_reply)
         app.router.add_post("/api/mark-read", self.mark_read)
         app.router.add_post("/api/send-file", self.send_file)
         app.router.add_get("/api/file", self.download)
@@ -86,6 +88,15 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.pokes.append(body)
         return web.json_response({"ok": True})
 
+    async def face_reply(self, request):
+        body = await request.json()
+        self.reactions.append(body)
+        return web.json_response({
+            "ok": True,
+            "message_id": body["message_id"],
+            "reactions": [{"emoji_id": body["emoji_id"], "count": 1}],
+        })
+
     async def mark_read(self, request):
         return web.json_response({"ok": True})
 
@@ -131,6 +142,9 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["data"]["reply_to"], "1")
         await self.client.poke("group_1", "2")
         self.assertEqual(self.pokes, [{"chat_id": "group_1", "user_id": "2"}])
+        reaction = await self.client.send_face_reply("group_1", "1", "14")
+        self.assertEqual(self.reactions, [{"chat_id": "group_1", "message_id": "1", "emoji_id": "14"}])
+        self.assertEqual(reaction["reactions"][0]["emoji_id"], "14")
         await self.client.mark_read("group_1")
 
     async def test_invalid_login_is_reported(self):

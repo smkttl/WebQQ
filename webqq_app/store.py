@@ -1,5 +1,77 @@
 from .common import *
 
+
+EXTRA_SEGMENT_LABELS = {
+    "json": "[json card]",
+    "markdown": "[markdown]",
+    "music": "[music]",
+    "xml": "[xml]",
+    "poke": "[poke]",
+    "dice": "[dice]",
+    "rps": "[rps]",
+    "miniapp": "[mini app]",
+    "contact": "[contact]",
+    "location": "[location]",
+}
+
+
+def _bounded_scalar(value, limit=500):
+    if isinstance(value, (str, int, float, bool)):
+        return str(value).strip()[:limit]
+    return ""
+
+
+def _embedded_payload(value):
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if len(value) > 256 * 1024 or not value.startswith(("{", "[")):
+        return None
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def _payload_mappings(payload, max_depth=6, max_items=160):
+    result = []
+    pending = [(payload, 0)]
+    while pending and len(result) < max_items:
+        value, depth = pending.pop(0)
+        parsed = _embedded_payload(value)
+        if parsed is not None and parsed is not value:
+            value = parsed
+        if isinstance(value, dict):
+            result.append(value)
+            if depth < max_depth:
+                pending.extend((child, depth + 1) for child in value.values() if isinstance(child, (dict, list, str)))
+        elif isinstance(value, list) and depth < max_depth:
+            pending.extend((child, depth + 1) for child in value[:40])
+    return result
+
+
+def _payload_value(mappings, *keys):
+    for wanted in (key.casefold() for key in keys):
+        for mapping in mappings:
+            for key, value in mapping.items():
+                if str(key).casefold() == wanted:
+                    text = _bounded_scalar(value)
+                    if text:
+                        return text
+    return ""
+
+
+def _http_url(value):
+    value = _bounded_scalar(value, 2000)
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+    return value if parsed.scheme in ("http", "https") and parsed.netloc else ""
+
 class MessageStore:
     def __init__(self, maxlen=1000, data_dir=DATA_DIR):
         self.maxlen = maxlen
@@ -859,26 +931,59 @@ class MessageStore:
 
     @staticmethod
     def _simplify_extra_segment(segment_type, data):
-        label_map = {
-            "json": "[json card]",
-            "markdown": "[markdown]",
-            "music": "[music]",
-            "xml": "[xml]",
-            "poke": "[poke]",
-            "dice": "[dice]",
-            "rps": "[rps]",
-            "miniapp": "[mini app]",
-            "contact": "[contact]",
-            "location": "[location]",
-        }
-        text = ""
-        if isinstance(data, dict):
-            text = first_text(data.get("summary"), data.get("title"), data.get("content"), data.get("text"), data.get("data"))
-        return {
+        segment_type = str(segment_type or "unknown")
+        data = data if isinstance(data, dict) else {}
+        payload = data
+        for key in ("data", "content", "raw"):
+            parsed = _embedded_payload(data.get(key))
+            if parsed is not None:
+                payload = parsed
+                break
+        mappings = _payload_mappings(payload)
+        if payload is not data:
+            mappings.extend(_payload_mappings(data))
+
+        title = _payload_value(mappings, "title", "name", "musicName", "appName")
+        description = _payload_value(mappings, "desc", "description", "summary", "prompt", "content")
+        source = _payload_value(mappings, "tag", "source", "appName", "app_name", "app")
+        url = _http_url(_payload_value(
+            mappings, "jumpUrl", "jump_url", "qqdocurl", "detailUrl", "detail_url", "url",
+        ))
+        image = _http_url(_payload_value(
+            mappings, "preview", "image", "imageUrl", "image_url", "cover", "icon", "thumb", "thumbnail",
+        ))
+        audio = _http_url(_payload_value(
+            mappings, "audio", "audioUrl", "audio_url", "musicUrl", "music_url", "playUrl", "play_url",
+        ))
+
+        text = _bounded_scalar(first_text(data.get("summary"), data.get("text")), 500)
+        if not text and payload is data:
+            text = _bounded_scalar(first_text(data.get("content"), data.get("data")), 500)
+        if not text:
+            text = description or title
+
+        result = {
             "type": segment_type,
-            "label": label_map.get(segment_type, f"[{segment_type}]"),
-            "text": text[:500],
+            "label": EXTRA_SEGMENT_LABELS.get(segment_type, f"[{segment_type}]"),
+            "title": title,
+            "description": description if description != title else "",
+            "source": source if source not in (title, description) else "",
+            "url": url,
+            "image": image,
+            "audio": audio,
+            "text": text if text not in (title, description) else "",
         }
+
+        if segment_type == "location":
+            result["latitude"] = _payload_value(mappings, "lat", "latitude")
+            result["longitude"] = _payload_value(mappings, "lon", "lng", "longitude")
+        elif segment_type == "contact":
+            result["contact_type"] = _payload_value(mappings, "type", "contactType", "contact_type")
+            result["contact_id"] = _payload_value(mappings, "id", "qq", "uin", "group_id", "user_id")
+        elif segment_type in ("dice", "rps"):
+            result["result"] = _payload_value(mappings, "result", "value", "id")
+
+        return {key: value for key, value in result.items() if value is not None and value != ""}
 
     def _simplify_forward_segment(self, data):
         forward = {

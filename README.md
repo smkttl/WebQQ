@@ -14,6 +14,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Folder-copy plugin system with per-plugin config and web UI controls
 - Auto-approves friend requests and group invitations for the logged-in account
 - Group lifecycle notices and recall tags are shown in chat history
+- Images, files, video, voice, merged forwards, JSON cards, music, contacts, locations, and other structured messages render in web and terminal clients
 
 ## Requirements
 
@@ -43,7 +44,7 @@ python3 webqq_tui.py
 
 For a local server, the client reads `web_port` from this repository's `config.json`. Use `--url` or `WEBQQ_URL` to connect to a different server. Use `--token`, or the `WEBQQ_TOKEN` environment variable, when web authentication is enabled; if neither is supplied, the client prompts without echoing the token. `--download-dir` selects where attachments are saved.
 
-The main controls are `Tab` / `Shift+Tab` to move focus, arrow keys or `j` / `k` to navigate, `Enter` to open a chat, open a merged forward, or send, `Ctrl+J` to insert a newline, `Esc` to return, `Ctrl+F` to filter or search, `r` to reply, `p` to poke the selected sender, `Ctrl+O` to upload a file, `d` to download an attachment, and `q` to quit. Terminals below 80 columns and portrait terminals use a mobile-style one-pane flow; the minimum supported terminal size is 32 columns by 10 rows.
+The main controls are `Tab` / `Shift+Tab` to move focus, arrow keys or `j` / `k` to navigate, `Enter` to open a chat, open a merged forward, or send, `Ctrl+J` to insert a newline, `Esc` to return, `Ctrl+F` to filter or search, `r` to reply, `e` to react with a face, `p` to poke the selected sender, `Ctrl+O` to upload a file, `d` to download an attachment, and `q` to quit. Terminals below 80 columns and portrait terminals use a mobile-style one-pane flow; the minimum supported terminal size is 32 columns by 10 rows.
 
 ## Configuration
 
@@ -81,6 +82,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | GET    | `/api/forward?id=X`                | Load a merged forward    |
 | POST   | `/api/send`                        | Send a message           |
 | POST   | `/api/poke`                        | Poke a chat participant  |
+| POST   | `/api/message/emoji-like`          | React to a message       |
 | POST   | `/api/message/revoke`              | Revoke a recent self message |
 | POST   | `/api/mark-read`                   | Mark a chat as read      |
 | GET    | `/api/status`                      | Connection status        |
