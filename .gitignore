@@ -4,5 +4,8 @@ napcat/
 __pycache__/
 *.pyc
 .env
+plugins/*/
+!plugins/echo/
+!plugins/llm/
 plugins/*/config.json
 !plugins/*/config.json.example

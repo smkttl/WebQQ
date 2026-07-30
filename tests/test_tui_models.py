@@ -79,6 +79,13 @@ class TuiModelTests(unittest.TestCase):
         self.assertIn("[face:14 微笑] x2", rendered)
         self.assertEqual(len(message.downloadable_attachments), 2)
 
+    def test_named_mention_uses_inline_name_without_duplicate_suffix(self):
+        message = Message.from_json({
+            "chat_id": "group_1",
+            "content": "hello @[3](Bob)",
+        })
+        self.assertEqual(display_content(message), "hello @Bob")
+
     def test_compact_rendering_keeps_attachment_information(self):
         message = Message.from_json({
             "chat_id": "private_1",

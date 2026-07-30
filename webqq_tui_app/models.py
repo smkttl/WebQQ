@@ -189,14 +189,17 @@ def format_timestamp(timestamp: float, now: Optional[datetime] = None) -> str:
     return value.strftime("%Y-%m-%d %H:%M")
 
 
-MENTION_RE = re.compile(r"@\[(\d+)\]")
+MENTION_RE = re.compile(r"@\[(\d+)\](?:\(([^)\r\n]*)\))?")
 REPLY_RE = re.compile(r"\[reply:([^\]]+)\]")
 MEDIA_TOKEN_RE = re.compile(r"\[(?:image|file|video|voice|forward|onlinefile|flashtransfer)\]")
 FACE_RE = re.compile(r"\[face:(\d+)\]")
 
 
 def display_content(message: Message) -> str:
-    content = MENTION_RE.sub(lambda match: "@" + message.mentions.get(match.group(1), match.group(1)), message.content)
+    content = MENTION_RE.sub(
+        lambda match: "@" + (message.mentions.get(match.group(1)) or match.group(2) or match.group(1)),
+        message.content,
+    )
     content = REPLY_RE.sub(lambda match: "reply to #" + match.group(1), content)
     content = FACE_RE.sub(lambda match: explain_emoji(match.group(1)), content)
     # Structured attachments are rendered below, so their transport tokens are noise here.

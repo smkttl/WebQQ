@@ -22,6 +22,7 @@ from webqq_app.common import (
 )
 from webqq_app.napcat import NapCatConnection
 from webqq_app.messaging import send_text_and_register
+from webqq_app.mentions import format_mentions_for_agent
 from webqq_app.plugins import PluginContext, PluginManager
 from webqq_app.store import MessageStore
 
@@ -57,6 +58,21 @@ class NapCatParsingTests(unittest.TestCase):
                 {"type": "face", "data": {"id": "14"}},
             ],
         )
+
+    def test_named_and_short_mentions_convert_to_the_same_segments(self):
+        expected = [
+            {"type": "at", "data": {"qq": "10001"}},
+            {"type": "text", "data": {"text": " and "}},
+            {"type": "at", "data": {"qq": "10002"}},
+        ]
+        self.assertEqual(NapCatConnection._parse_message("@[10001](Alice) and @[10002]"), expected)
+
+    def test_agent_mentions_include_known_names(self):
+        self.assertEqual(
+            format_mentions_for_agent("Hi @[10001] and @[10002](old)", {"10001": "Alice", 10002: "Bob"}),
+            "Hi @[10001](Alice) and @[10002](Bob)",
+        )
+        self.assertEqual(format_mentions_for_agent("Hi @[10003]", {}), "Hi @[10003]")
 
     def test_empty_forward_container_stays_empty(self):
         self.assertIsNone(NapCatConnection._extract_forward_response_payload({"messages": []}))

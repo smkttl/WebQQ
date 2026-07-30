@@ -8,8 +8,8 @@ from urllib.parse import urljoin
 
 import aiohttp
 
+from webqq_app.mentions import MENTION_RE, format_mentions_for_agent
 
-MENTION_RE = re.compile(r"@\[[^\]]+\]")
 REPLY_RE = re.compile(r"^\[reply:[^\]]+\]")
 LEAKED_MESSAGE_ID_RE = re.compile(r"\s*[\(（]?\s*(?:message_id|消息\s*ID|消息id|消息编号)\s*[=:：]?\s*(\d+)\s*[\)）]?\s*", re.IGNORECASE)
 CST = timezone(timedelta(hours=8), name="CST")
@@ -408,6 +408,7 @@ class LlmPlugin:
         raw_content = message.get("content") if text_override is None else text_override
         content = str(raw_content or "").strip()
         content = REPLY_RE.sub("", content).strip()
+        content = format_mentions_for_agent(content, message.get("mentions"))
         forward_content = self._format_forwards(message.get("forwards"))
         if forward_content:
             content = content.replace("[forward]", "").strip()
@@ -453,7 +454,7 @@ class LlmPlugin:
             metadata.append(f"time={node_time}")
         lines = [f"{index}. " + ", ".join(metadata)]
 
-        content = str(node.get("content") or "").strip()
+        content = format_mentions_for_agent(node.get("content"), node.get("mentions")).strip()
         nested = self._format_forwards(node.get("forwards"), depth + 1)
         if nested:
             content = content.replace("[forward]", "").strip()
@@ -552,7 +553,10 @@ class LlmPlugin:
         rows = []
         for member in members[:limit]:
             rows.append(self._member_label(member))
-        return "Known chat users. Use qid/user_id for @[qq_number] mentions when needed:\n" + "\n".join(rows)
+        return (
+            "Known chat users. Mention them as @[user_id](name) when possible; "
+            "@[user_id] is also accepted:\n" + "\n".join(rows)
+        )
 
     def _chat_members(self, chat_id):
         store = getattr(getattr(self.ctx, "manager", None), "store", None)

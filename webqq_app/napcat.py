@@ -1,4 +1,5 @@
 from .common import *
+from .mentions import MENTION_PATTERN
 
 class NapCatConnection:
     def __init__(self, ws_url, token, store, plugins=None):
@@ -535,7 +536,7 @@ class NapCatConnection:
         if reply_to:
             prefix.append({"type": "reply", "data": {"id": str(reply_to)}})
 
-        token_re = re.compile(r"@\[(\d+)\]|\[face:(\d+)\]")
+        token_re = re.compile(rf"{MENTION_PATTERN}|\[face:(\d+)\]")
         if not token_re.search(text):
             return prefix + [{"type": "text", "data": {"text": text}}] if prefix else text
 
@@ -547,7 +548,7 @@ class NapCatConnection:
             if match.group(1) is not None:
                 result.append({"type": "at", "data": {"qq": match.group(1)}})
             else:
-                result.append({"type": "face", "data": {"id": match.group(2)}})
+                result.append({"type": "face", "data": {"id": match.group(3)}})
             pos = match.end()
         if pos < len(text):
             result.append({"type": "text", "data": {"text": text[pos:]}})

@@ -876,9 +876,10 @@ async function loadMessages(chatId, before = null, token = chatLoadToken) {
 
 function renderContent(text, mentions) {
   let html = esc(text);
-  html = html.replace(/@\[(\d+)\]/g, (match, uid) => {
-    const name = (mentions && mentions[uid]) || nicknames[uid] || uid;
-    return `<span class="at-mention" onclick="copyUid('${uid}')" title="Click to copy UID: ${uid}">@${esc(name)}</span>`;
+  html = html.replace(/@\[(\d+)\](?:\(([^)\r\n]*)\))?/g, (match, uid, suppliedName) => {
+    const knownName = (mentions && mentions[uid]) || nicknames[uid];
+    const nameHtml = knownName ? esc(knownName) : (suppliedName || uid);
+    return `<span class="at-mention" onclick="copyUid('${uid}')" title="Click to copy UID: ${uid}">@${nameHtml}</span>`;
   });
   html = html.replace(/\[face:(\d+)\]/g, (match, id) => {
     return faceHtml(id);
