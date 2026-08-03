@@ -1,5 +1,7 @@
-import json
 import asyncio
+import base64
+import binascii
+import json
 import random
 import re
 import time
@@ -8,12 +10,26 @@ from urllib.parse import urljoin
 
 import aiohttp
 
+from webqq_app.common import image_url_allowed
 from webqq_app.mentions import MENTION_RE, format_mentions_for_agent
 
 REPLY_RE = re.compile(r"^\[reply:[^\]]+\]")
 LEAKED_MESSAGE_ID_RE = re.compile(r"\s*[\(（]?\s*(?:message_id|消息\s*ID|消息id|消息编号)\s*[=:：]?\s*(\d+)\s*[\)）]?\s*", re.IGNORECASE)
 CST = timezone(timedelta(hours=8), name="CST")
 MAX_FORWARD_DEPTH = 4
+IMAGE_FALLBACK_STATUSES = (400, 415, 422)
+SUPPORTED_IMAGE_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+
+
+class LlmRequestError(RuntimeError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
 
 
 def setup(ctx):
@@ -207,7 +223,7 @@ class LlmPlugin:
                 await self._send(message["chat_id"], "LLM is not configured: missing api_key.")
             return
 
-        llm_messages = self._build_messages(message, prompt)
+        llm_messages = await self._build_messages(message, prompt)
         oracle_rounds = 0
         max_oracle_rounds = self._int_config("max_oracle_rounds", 2, minimum=0)
         force_no_oracle = False
@@ -315,7 +331,7 @@ class LlmPlugin:
             self.ctx.log(f"repair produced invalid output: {repaired[:300]!r}")
         return actions
 
-    def _build_messages(self, trigger_message, prompt):
+    async def _build_messages(self, trigger_message, prompt):
         messages = []
         for prompt_key in ("persona_prompt", "reply_prompt", "system_prompt"):
             system_prompt = str(self.ctx.config.get(prompt_key) or "").strip()
@@ -353,6 +369,7 @@ class LlmPlugin:
                 "order": len(timeline),
                 "item": item,
                 "content": content,
+                "trigger": bool(is_trigger),
             })
 
         if not appended_trigger:
@@ -363,6 +380,7 @@ class LlmPlugin:
                 "order": len(timeline),
                 "item": trigger_message,
                 "content": content,
+                "trigger": True,
             })
 
         for item in self._runtime_guidance(chat_id):
@@ -390,6 +408,10 @@ class LlmPlugin:
                 content = f"(message_id={item.get('message_id') or 0}) {content}"
             else:
                 content = self._assistant_history_content(item, content)
+            if entry.get("trigger") and role == "user":
+                image_parts = await self._trigger_image_parts(trigger_message)
+                if image_parts:
+                    content = [{"type": "text", "text": content}] + image_parts
             messages.append({"role": role, "content": content})
 
         messages.append({"role": "system", "content": self._current_time_note()})
@@ -414,6 +436,153 @@ class LlmPlugin:
             content = content.replace("[forward]", "").strip()
             content = "\n\n".join(part for part in (content, forward_content) if part)
         return content
+
+    async def _trigger_image_parts(self, message):
+        if not bool(self.ctx.config.get("image_input_enabled", False)):
+            return []
+        images = message.get("images")
+        if not isinstance(images, list) or not images:
+            return []
+
+        limit = self._int_config("max_images_per_request", 4, minimum=1)
+        max_bytes = self._int_config("max_image_bytes", 5 * 1024 * 1024, minimum=1024)
+        timeout_seconds = self._float_config("image_fetch_timeout_seconds", 15, minimum=1)
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        parts = []
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for index, image in enumerate(images[:limit], start=1):
+                if not isinstance(image, dict):
+                    continue
+                try:
+                    data_url = await self._image_data_url(session, image, max_bytes, timeout_seconds)
+                except Exception as error:
+                    self.ctx.log(f"image {index} omitted from LLM request: {error}")
+                    continue
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": data_url, "detail": "auto"},
+                })
+        return parts
+
+    async def _image_data_url(self, session, image, max_bytes, timeout_seconds):
+        candidates = []
+        for value in (image.get("url"), image.get("thumbnail"), image.get("file")):
+            value = str(value or "").strip()
+            if value and value not in candidates and (value.startswith("data:") or image_url_allowed(value)):
+                candidates.append(value)
+
+        last_error = None
+        for candidate in candidates:
+            try:
+                return await self._candidate_data_url(session, candidate, max_bytes)
+            except Exception as error:
+                last_error = error
+
+        file_id = str(image.get("file") or "").strip()
+        napcat = getattr(self.ctx, "napcat", None)
+        if file_id and callable(napcat):
+            try:
+                response = await napcat("get_image", {"file": file_id}, timeout=timeout_seconds)
+                data = response.get("data") if isinstance(response, dict) and response.get("status") == "ok" else {}
+                if isinstance(data, dict):
+                    for value in (data.get("url"), data.get("file")):
+                        value = str(value or "").strip()
+                        if not value or value in candidates or not image_url_allowed(value):
+                            continue
+                        try:
+                            return await self._candidate_data_url(session, value, max_bytes)
+                        except Exception as error:
+                            last_error = error
+            except Exception as error:
+                last_error = error
+
+        if last_error:
+            raise ValueError(str(last_error))
+        raise ValueError("no usable image URL")
+
+    async def _candidate_data_url(self, session, candidate, max_bytes):
+        if candidate.startswith("data:"):
+            mime_type, body = self._decode_image_data_url(candidate, max_bytes)
+        else:
+            mime_type, body = await self._download_remote_image(session, candidate, max_bytes)
+        encoded = base64.b64encode(body).decode("ascii")
+        return f"data:{mime_type};base64,{encoded}"
+
+    @classmethod
+    def _decode_image_data_url(cls, value, max_bytes):
+        header, separator, payload = value.partition(",")
+        metadata = header[5:].split(";") if header.startswith("data:") else []
+        mime_type = (metadata[0] if metadata else "").strip().lower()
+        if not separator or "base64" not in {item.lower() for item in metadata[1:]}:
+            raise ValueError("image data URL must use base64 encoding")
+        if mime_type == "image/jpg":
+            mime_type = "image/jpeg"
+        if mime_type not in SUPPORTED_IMAGE_TYPES:
+            raise ValueError(f"unsupported image type: {mime_type or 'unknown'}")
+        if len(payload) > ((max_bytes + 2) // 3) * 4 + 4:
+            raise ValueError("image exceeds configured size limit")
+        try:
+            body = base64.b64decode(payload, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("invalid base64 image data")
+        if not body or len(body) > max_bytes:
+            raise ValueError("image exceeds configured size limit")
+        detected = cls._detect_image_type(body)
+        if detected != mime_type:
+            raise ValueError("image content does not match its media type")
+        return mime_type, body
+
+    @classmethod
+    async def _download_remote_image(cls, session, url, max_bytes):
+        current_url = url
+        for _ in range(4):
+            if not image_url_allowed(current_url):
+                raise ValueError("image URL host is not allowed")
+            async with session.get(
+                current_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                allow_redirects=False,
+            ) as response:
+                if response.status in (301, 302, 303, 307, 308):
+                    location = str(response.headers.get("Location") or "").strip()
+                    if not location:
+                        raise ValueError("image redirect has no location")
+                    current_url = urljoin(current_url, location)
+                    continue
+                if response.status != 200:
+                    raise ValueError(f"image server returned HTTP {response.status}")
+
+                declared_type = str(response.headers.get("Content-Type") or "application/octet-stream")
+                declared_type = declared_type.split(";", 1)[0].strip().lower()
+                if declared_type == "image/jpg":
+                    declared_type = "image/jpeg"
+                if declared_type not in SUPPORTED_IMAGE_TYPES and declared_type != "application/octet-stream":
+                    raise ValueError(f"unsupported image type: {declared_type}")
+                if response.content_length is not None and response.content_length > max_bytes:
+                    raise ValueError("image exceeds configured size limit")
+
+                body = bytearray()
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    body.extend(chunk)
+                    if len(body) > max_bytes:
+                        raise ValueError("image exceeds configured size limit")
+                mime_type = cls._detect_image_type(body)
+                if not mime_type:
+                    raise ValueError("response is not a supported image")
+                return mime_type, bytes(body)
+        raise ValueError("too many image redirects")
+
+    @staticmethod
+    def _detect_image_type(body):
+        if body.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if body.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if body.startswith((b"GIF87a", b"GIF89a")):
+            return "image/gif"
+        if len(body) >= 12 and body.startswith(b"RIFF") and body[8:12] == b"WEBP":
+            return "image/webp"
+        return ""
 
     def _format_forwards(self, forwards, depth=0):
         if not isinstance(forwards, list) or not forwards:
@@ -520,7 +689,40 @@ class LlmPlugin:
 
     @staticmethod
     def _messages_chars(messages):
-        return sum(len(str(item.get("content") or "")) for item in messages)
+        return sum(len(LlmPlugin._content_text(item.get("content"))) for item in messages)
+
+    @staticmethod
+    def _content_text(content):
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content or "")
+        parts = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "text":
+                continue
+            text = part.get("text") or part.get("content")
+            if isinstance(text, str) and text:
+                parts.append(text)
+        return "\n".join(parts)
+
+    @classmethod
+    def _messages_have_images(cls, messages):
+        return any(
+            isinstance(item.get("content"), list)
+            and any(isinstance(part, dict) and part.get("type") == "image_url" for part in item["content"])
+            for item in messages
+        )
+
+    @classmethod
+    def _without_images(cls, messages):
+        stripped = []
+        for item in messages:
+            copied = dict(item)
+            if isinstance(copied.get("content"), list):
+                copied["content"] = cls._content_text(copied["content"])
+            stripped.append(copied)
+        return stripped
 
     def _self_user_note(self, trigger_message=None):
         user = {}
@@ -639,6 +841,18 @@ class LlmPlugin:
             return False
 
     async def _call_llm(self, api_key, messages):
+        try:
+            return await self._post_llm(api_key, messages)
+        except LlmRequestError as error:
+            if error.status not in IMAGE_FALLBACK_STATUSES or not self._messages_have_images(messages):
+                raise
+            self.ctx.log(
+                f"model rejected multimodal input with HTTP {error.status}; retrying without images"
+            )
+            messages[:] = self._without_images(messages)
+            return await self._post_llm(api_key, messages)
+
+    async def _post_llm(self, api_key, messages):
         base_url = str(self.ctx.config.get("base_url") or "https://api.openai.com/v1").rstrip("/") + "/"
         url = urljoin(base_url, "chat/completions")
         payload = {
@@ -659,7 +873,7 @@ class LlmPlugin:
             async with session.post(url, json=payload, headers=headers) as resp:
                 data = await resp.json(content_type=None)
                 if resp.status >= 400:
-                    raise RuntimeError(self._error_text(data, resp.status))
+                    raise LlmRequestError(resp.status, self._error_text(data, resp.status))
         return self._extract_response_text(data)
 
     async def _run_oracle_action(self, llm_messages, action):
@@ -729,9 +943,9 @@ class LlmPlugin:
             messages.append({"role": "system", "content": oracle_persona})
 
         context = "\n".join(
-            str(item.get("content") or "")
+            self._content_text(item.get("content"))
             for item in llm_messages
-            if item.get("role") != "system" and item.get("content")
+            if item.get("role") != "system" and self._content_text(item.get("content"))
         )
         if context:
             messages.append({"role": "user", "content": f"Recent chat context:\n{context}"})
