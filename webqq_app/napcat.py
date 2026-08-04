@@ -388,6 +388,49 @@ class NapCatConnection:
             "message": message,
         })
 
+    async def send_forward(self, chat_id, nodes):
+        if not self.ws:
+            raise RuntimeError("not connected to NapCat")
+        parsed = parse_chat_id(chat_id)
+        if not parsed:
+            raise ValueError(f"unknown chat_id: {chat_id}")
+        if any("message_id" not in node for node in nodes):
+            packet_status = await self._request("nc_get_packet_status", {}, timeout=10)
+            if not packet_status or packet_status.get("status") != "ok":
+                detail = packet_status.get("wording", packet_status.get("message", "")) if packet_status else ""
+                error = "custom forward sender identities require the NapCat packet backend"
+                if detail:
+                    error += ": " + str(detail)
+                raise RuntimeError(error)
+        messages = []
+        for node in nodes:
+            if "message_id" in node:
+                data = {"id": str(node["message_id"])}
+            else:
+                data = {
+                    "user_id": str(node["sender_id"]),
+                    "nickname": str(node["sender_name"]),
+                    "content": self._parse_message(node["content"]),
+                }
+            messages.append({"type": "node", "data": data})
+        if parsed["type"] == "group":
+            return await self._request("send_group_forward_msg", {
+                "group_id": parsed["group_id"],
+                "messages": messages,
+            }, timeout=60)
+        if parsed["type"] == "private":
+            params = {"user_id": parsed["private_id"], "messages": messages}
+            context = self.store.private_send_context(parsed["private_id"])
+            if context.get("group_id"):
+                params["group_id"] = context["group_id"]
+        else:
+            params = {
+                "user_id": parsed["user_id"],
+                "group_id": parsed["group_id"],
+                "messages": messages,
+            }
+        return await self._request("send_private_forward_msg", params, timeout=60)
+
     async def upload_file(self, chat_id, path, name):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")

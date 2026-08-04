@@ -21,7 +21,7 @@ from webqq_app.common import (
     recall_notice_text,
 )
 from webqq_app.napcat import NapCatConnection
-from webqq_app.messaging import send_text_and_register
+from webqq_app.messaging import normalize_forward_nodes, send_forward_and_register, send_text_and_register
 from webqq_app.mentions import format_mentions_for_agent
 from webqq_app.plugins import PluginContext, PluginManager
 from webqq_app.store import MessageStore
@@ -114,6 +114,103 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             ("get_forward_msg", {"id": "forward-1"}, 10),
             ("get_forward_msg", {"message_id": "forward-1"}, 10),
         ])
+
+    async def test_send_forward_builds_reference_and_custom_group_nodes(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok", "data": {"message_id": 123}}
+
+        connection._request = request
+        await connection.send_forward("group_9", [
+            {"message_id": "10"},
+            {"sender_id": "10001", "sender_name": "Alice", "content": "Hi @[2] [face:14]"},
+        ])
+
+        self.assertEqual(calls[0], ("nc_get_packet_status", {}, 10))
+        self.assertEqual(calls[1][0], "send_group_forward_msg")
+        self.assertEqual(calls[1][1]["group_id"], 9)
+        self.assertEqual(calls[1][1]["messages"][0], {"type": "node", "data": {"id": "10"}})
+        custom = calls[1][1]["messages"][1]["data"]
+        self.assertEqual(custom["user_id"], "10001")
+        self.assertEqual(custom["nickname"], "Alice")
+        self.assertIsInstance(custom["content"], list)
+        self.assertEqual(calls[1][2], 60)
+
+    async def test_send_reference_forward_uses_private_temp_context_without_packet_check(self):
+        calls = []
+        store = SimpleNamespace(private_send_context=lambda user_id: {"group_id": 8})
+        connection = NapCatConnection("", "", store)
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_forward("private_7", [{"message_id": "10"}])
+
+        self.assertEqual(calls, [(
+            "send_private_forward_msg",
+            {"user_id": 7, "group_id": 8, "messages": [{"type": "node", "data": {"id": "10"}}]},
+            60,
+        )])
+
+    async def test_send_reference_forward_supports_legacy_temp_chat_id(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_forward("temp_8_7", [{"message_id": "10"}])
+
+        self.assertEqual(calls, [(
+            "send_private_forward_msg",
+            {"user_id": 7, "group_id": 8, "messages": [{"type": "node", "data": {"id": "10"}}]},
+            60,
+        )])
+
+    async def test_custom_forward_fails_when_packet_backend_is_unavailable(self):
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            return {"status": "failed", "wording": "packet disabled"}
+
+        connection._request = request
+        with self.assertRaisesRegex(RuntimeError, "packet backend"):
+            await connection.send_forward("group_9", [
+                {"sender_id": "10001", "sender_name": "Alice", "content": "hello"},
+            ])
+
+
+class ForwardNodeValidationTests(unittest.TestCase):
+    def test_normalizes_reference_and_custom_nodes(self):
+        self.assertEqual(normalize_forward_nodes([
+            {"message_id": 12},
+            {"sender_id": 10001, "sender_name": " Alice ", "content": "long text"},
+        ]), [
+            {"message_id": "12"},
+            {"sender_id": "10001", "sender_name": "Alice", "content": "long text"},
+        ])
+
+    def test_rejects_empty_mixed_and_oversized_nodes(self):
+        invalid = (
+            [],
+            [{"message_id": "1", "content": "mixed"}],
+            [{"sender_id": "1", "sender_name": "", "content": "text"}],
+            [{"sender_id": "1", "sender_name": "name", "content": "x" * 20001}],
+        )
+        for nodes in invalid:
+            with self.subTest(nodes=str(nodes)[:40]), self.assertRaises(ValueError):
+                normalize_forward_nodes(nodes)
 
 
 class NoticeAndReactionTests(unittest.TestCase):
@@ -421,6 +518,138 @@ class SendRegistrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(sent["message"], confirmed)
             self.assertEqual(len(store.get_messages("group_1")), 1)
             self.assertEqual(broadcasts, [])
+
+    async def test_forward_send_registers_renderable_local_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(10001, "Me")
+            broadcasts = []
+
+            async def send_forward(chat_id, nodes):
+                return {"status": "ok", "data": {
+                    "message_id": 123, "forward_id": "forward-1",
+                }}
+
+            async def broadcast(payload):
+                broadcasts.append(payload)
+
+            napcat = SimpleNamespace(
+                send_forward=send_forward,
+                _parse_message=NapCatConnection._parse_message,
+                _broadcast=broadcast,
+                plugins=None,
+            )
+            sent = await send_forward_and_register(napcat, store, "group_1", [{
+                "sender_id": "10002", "sender_name": "Alice", "content": "long text",
+            }])
+
+            message = sent["message"]
+            self.assertEqual(message["message_id"], 123)
+            self.assertEqual(message["content"], "[forward]")
+            self.assertFalse(message["pending"])
+            self.assertEqual(message["forwards"][0]["id"], "forward-1")
+            self.assertEqual(message["forwards"][0]["nodes"][0]["sender_name"], "Alice")
+            self.assertEqual(broadcasts[0]["type"], "new_message")
+            self.assertEqual(store.get_chats()[0]["last_text"], "[forward]")
+
+    async def test_forward_early_echo_prevents_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            confirmed = {
+                "chat_id": "group_1", "message_id": 123, "time": int(time.time()),
+                "sender_id": 1, "sender_name": "Me", "content": "[forward]", "self": True,
+            }
+            store.append_simplified("group_1", confirmed)
+            broadcasts = []
+
+            async def send_forward(chat_id, nodes):
+                return {"status": "ok", "data": {"message_id": 123}}
+
+            async def broadcast(payload):
+                broadcasts.append(payload)
+
+            napcat = SimpleNamespace(send_forward=send_forward, _broadcast=broadcast, plugins=None)
+            sent = await send_forward_and_register(
+                napcat, store, "group_1", [{"message_id": "10"}],
+            )
+
+            self.assertIs(sent["message"], confirmed)
+            self.assertEqual(len(store.get_messages("group_1")), 1)
+            self.assertEqual(broadcasts, [])
+
+    async def test_plugin_context_sends_forward_with_plugin_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            broadcasts = []
+
+            async def send_forward(chat_id, nodes):
+                return {"status": "ok", "data": {"message_id": 123}}
+
+            async def broadcast(payload):
+                broadcasts.append(payload)
+
+            napcat = SimpleNamespace(
+                send_forward=send_forward,
+                _parse_message=NapCatConnection._parse_message,
+                _broadcast=broadcast,
+                plugins=None,
+            )
+            manager = PluginManager(tmp, {"plugins": {"enabled": {}}}, store, napcat=napcat)
+            ctx = PluginContext(manager, "worker", {})
+
+            result = await ctx.send_forward("group_1", [{
+                "sender_id": "10001", "sender_name": "Worker", "content": "result",
+            }])
+
+            self.assertEqual(result["data"]["message_id"], 123)
+            self.assertEqual(store.get_messages("group_1")[0]["source"], "plugin:worker")
+
+
+class SendForwardHandlerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def request(body, napcat, store):
+        async def request_json():
+            return body
+
+        return SimpleNamespace(
+            app={"config": {"web_token": ""}, "store": store, "napcat": napcat},
+            query={}, cookies={}, headers={}, remote="", json=request_json,
+        )
+
+    async def test_handler_returns_validation_errors_as_bad_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            napcat = SimpleNamespace()
+            response = await api.handle_send_forward(self.request(
+                {"chat_id": "group_1", "nodes": []}, napcat, store,
+            ))
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("1 to 100", json.loads(response.text)["error"])
+
+    async def test_handler_sends_valid_forward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+
+            async def send_forward(chat_id, nodes):
+                return {"status": "ok", "data": {"message_id": 123}}
+
+            async def broadcast(payload):
+                return None
+
+            napcat = SimpleNamespace(
+                send_forward=send_forward,
+                _parse_message=NapCatConnection._parse_message,
+                _broadcast=broadcast,
+                plugins=None,
+            )
+            response = await api.handle_send_forward(self.request({
+                "chat_id": "group_1",
+                "nodes": [{"sender_id": "10001", "sender_name": "Alice", "content": "text"}],
+            }, napcat, store))
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(response.text)["ok"])
 
 
 class PokeHandlerTests(unittest.IsolatedAsyncioTestCase):

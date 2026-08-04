@@ -1,6 +1,6 @@
 from .common import *
 from .auth import check_auth, record_auth_failure, client_ip, read_json_body
-from .messaging import send_text_and_register
+from .messaging import send_forward_and_register, send_text_and_register
 
 async def handle_login(request):
     cfg = request.app["config"]
@@ -109,6 +109,24 @@ async def handle_send(request):
         return web.json_response({"ok": True, "data": sent["result"]})
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def handle_send_forward(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = body.get("chat_id")
+    if not isinstance(chat_id, str) or not chat_id:
+        return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+    try:
+        sent = await send_forward_and_register(
+            request.app["napcat"], request.app["store"], chat_id, body.get("nodes"),
+        )
+        return web.json_response({"ok": True, "data": sent["result"]})
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
 
 
 async def handle_poke(request):

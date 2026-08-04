@@ -27,6 +27,12 @@ try {
   <symbol id="icon-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
   <symbol id="icon-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
   <symbol id="icon-message" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/></symbol>
+  <symbol id="icon-layers" viewBox="0 0 24 24"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.5-9.17 4.17a2 2 0 0 1-1.66 0L2 12.5M22 17.5l-9.17 4.17a2 2 0 0 1-1.66 0L2 17.5"/></symbol>
+  <symbol id="icon-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+  <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/></symbol>
+  <symbol id="icon-chevron-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
+  <symbol id="icon-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
 </svg>
 
 <div class="login-overlay" id="loginOverlay" style="display:none">
@@ -86,6 +92,11 @@ try {
       <button class="icon-button header-icon-button" id="memberListButton" type="button" aria-label="View group members" data-tooltip="Members">
         <svg><use href="#icon-users"/></svg>
       </button>
+      <div class="selection-toolbar" id="selectionToolbar">
+        <button class="icon-button" id="selectionCancel" type="button" aria-label="Cancel selection" data-tooltip="Cancel"><svg><use href="#icon-x"/></svg></button>
+        <strong id="selectionCount">0 selected</strong>
+        <button class="selection-forward-button" id="selectionForward" type="button"><svg><use href="#icon-layers"/></svg><span>Forward</span></button>
+      </div>
     </div>
     <div class="messages-scroll" id="messagesScroll"></div>
     <div class="send-bar">
@@ -98,6 +109,7 @@ try {
       <input class="file-input" type="file" id="fileInput">
       <div class="composer-tools">
         <button class="icon-button attach-button" id="attachButton" type="button" aria-label="Attach file" data-tooltip="Attach file"><svg><use href="#icon-paperclip"/></svg></button>
+        <button class="icon-button custom-forward-button" id="customForwardButton" type="button" aria-label="Create combined forward" data-tooltip="Combined forward"><svg><use href="#icon-layers"/></svg></button>
         <button class="icon-button emoji-button" id="emojiButton" type="button" aria-label="Choose emoji" data-tooltip="Emoji"><svg><use href="#icon-smile"/></svg></button>
       </div>
       <div class="composer-input">
@@ -123,6 +135,7 @@ try {
   <button type="button" id="msgMenuRevoke">Revoke</button>
   <button type="button" id="msgMenuTempChat">Temp Chat</button>
   <button type="button" id="msgMenuFaceReply">Face Reply</button>
+  <button type="button" id="msgMenuSelect">Select</button>
 </div>
 
 <script>
@@ -137,6 +150,9 @@ let lastLoadTime = 0;
 let messageIndex = new Map();
 let loadedMessages = [];
 let selectedMenuMessage = null;
+let selectingMessages = false;
+let selectedMessageIds = new Set();
+let forwardComposerOverlay = null;
 let pendingReply = null;
 let longPressTimer = null;
 let longPressStart = null;
@@ -717,6 +733,8 @@ function showMessagesError(text) {
 }
 
 async function selectChat(chatId, name) {
+  cancelMessageSelection();
+  closeForwardComposer();
   const token = ++chatLoadToken;
   currentChat = chatId;
   loadingChatId = chatId;
@@ -780,6 +798,8 @@ function markCurrentChatRead(chatId) {
 }
 
 function showChatList() {
+  cancelMessageSelection();
+  closeForwardComposer();
   document.body.classList.remove('chat-open');
   hideAtDropdown();
   hideMessageMenu();
@@ -859,7 +879,7 @@ async function loadMessages(chatId, before = null, token = chatLoadToken) {
     const oldHeight = scroll.scrollHeight;
     if (!prepend) scroll.replaceChildren();
     for (const m of msgs) {
-      appendMessage(m, prepend);
+      appendMessage(m, prepend, false);
     }
     if (before) {
       scroll.scrollTop = scroll.scrollHeight - oldHeight;
@@ -1199,6 +1219,7 @@ function applyMessageUpdate(data) {
   const target = findMessageElement({message_id: message.message_id, local_id: data.local_id || message.local_id});
   if (target) {
     renderMessageElement(target, message);
+    syncMessageSelectionUI();
   } else if (message.chat_id === currentChat) {
     appendMessage(message);
   }
@@ -1638,16 +1659,24 @@ function copyUid(uid) {
 }
 
 function bindMessageMenu(el, message) {
+  el._webqqMessage = message;
+  if (el.dataset.messageMenuBound === 'true') return;
+  el.dataset.messageMenuBound = 'true';
   el.addEventListener('contextmenu', e => {
     e.preventDefault();
-    showMessageMenu(message, e.clientX, e.clientY);
+    const currentMessage = el._webqqMessage;
+    if (selectingMessages) {
+      toggleMessageSelection(currentMessage);
+      return;
+    }
+    showMessageMenu(currentMessage, e.clientX, e.clientY);
   });
   el.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' || e.button !== 0) return;
     longPressStart = {x: e.clientX, y: e.clientY};
     clearTimeout(longPressTimer);
     longPressTimer = setTimeout(() => {
-      showMessageMenu(message, e.clientX, e.clientY);
+      showMessageMenu(el._webqqMessage, e.clientX, e.clientY);
       longPressTimer = null;
     }, 550);
   });
@@ -1674,6 +1703,7 @@ function showMessageMenu(message, x, y) {
   $('msgMenuPoke').style.display = canPokeMessage(message) ? 'block' : 'none';
   $('msgMenuTempChat').style.display = canStartTempChat(message) ? 'block' : 'none';
   $('msgMenuRevoke').style.display = canRevokeMessage(message) ? 'block' : 'none';
+  $('msgMenuSelect').style.display = canSelectMessage(message) ? 'block' : 'none';
   menu.classList.add('show');
   menu.style.left = '0px';
   menu.style.top = '0px';
@@ -1682,6 +1712,91 @@ function showMessageMenu(message, x, y) {
   const top = Math.max(8, Math.min(y, window.innerHeight - rect.height - 8));
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+}
+
+function canSelectMessage(message) {
+  const id = normalizeMessageId(message && message.message_id);
+  return !!message
+    && /^\d+$/.test(id)
+    && Number(id) > 0
+    && !message.system
+    && !message.recalled
+    && !message.pending
+    && !message.send_error;
+}
+
+function startMessageSelection(message) {
+  if (!canSelectMessage(message)) return;
+  const id = normalizeMessageId(message.message_id);
+  hideMessageMenu();
+  selectingMessages = true;
+  selectedMessageIds.add(id);
+  syncMessageSelectionUI();
+}
+
+function selectMessageFromMenu() {
+  const message = selectedMenuMessage;
+  if (message) startMessageSelection(message);
+}
+
+function toggleMessageSelection(message) {
+  if (!canSelectMessage(message)) return;
+  const id = normalizeMessageId(message.message_id);
+  if (selectedMessageIds.has(id)) selectedMessageIds.delete(id);
+  else selectedMessageIds.add(id);
+  if (!selectedMessageIds.size) {
+    cancelMessageSelection();
+    return;
+  }
+  syncMessageSelectionUI();
+}
+
+function cancelMessageSelection() {
+  selectingMessages = false;
+  selectedMessageIds.clear();
+  syncMessageSelectionUI();
+}
+
+function selectedMessagesInOrder() {
+  return Array.from($('messagesScroll').querySelectorAll('.msg')).map(div => {
+    const id = normalizeMessageId(div.dataset.messageId);
+    return selectedMessageIds.has(id) ? messageIndex.get(id) : null;
+  }).filter(canSelectMessage);
+}
+
+function syncMessageSelectionUI() {
+  const header = document.querySelector('.messages-header');
+  const scroll = $('messagesScroll');
+  if (!header || !scroll) return;
+  header.classList.toggle('selecting', selectingMessages);
+  scroll.classList.toggle('selecting', selectingMessages);
+  for (const div of scroll.querySelectorAll('.msg')) {
+    const id = normalizeMessageId(div.dataset.messageId);
+    const message = id ? messageIndex.get(id) : null;
+    const eligible = canSelectMessage(message);
+    if (!eligible) selectedMessageIds.delete(id);
+    div.classList.toggle('selected', selectingMessages && selectedMessageIds.has(id));
+    div.classList.toggle('selection-disabled', selectingMessages && !eligible);
+    let toggle = div.querySelector(':scope > .msg-select-toggle');
+    if (selectingMessages && eligible) {
+      if (!toggle) {
+        toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'msg-select-toggle';
+        toggle.innerHTML = '<svg><use href="#icon-check"/></svg>';
+        div.appendChild(toggle);
+      }
+      const selected = selectedMessageIds.has(id);
+      toggle.classList.toggle('checked', selected);
+      toggle.setAttribute('aria-label', selected ? 'Deselect message' : 'Select message');
+      toggle.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    } else if (toggle) {
+      toggle.remove();
+    }
+  }
+  const count = selectedMessageIds.size;
+  $('selectionCount').textContent = `${count} selected`;
+  $('selectionForward').disabled = count === 0;
 }
 
 function canRevokeMessage(message) {
@@ -2172,7 +2287,7 @@ function renderMessageElement(div, m) {
   }
 }
 
-function appendMessage(m, prepend = false) {
+function appendMessage(m, prepend = false, followBottom = true) {
   const scroll = $('messagesScroll');
   const div = document.createElement('div');
   renderMessageElement(div, m);
@@ -2180,10 +2295,11 @@ function appendMessage(m, prepend = false) {
     scroll.prepend(div);
   } else {
     scroll.appendChild(div);
-    if (scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150) {
+    if (followBottom && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 150) {
       scroll.scrollTop = scroll.scrollHeight;
     }
   }
+  if (selectingMessages) syncMessageSelectionUI();
 }
 
 async function doSend() {
@@ -2228,6 +2344,293 @@ async function doSendFile(file) {
   } catch (e) {
     showModal('File send failed: ' + e);
   }
+}
+
+function closeForwardComposer() {
+  if (forwardComposerOverlay) forwardComposerOverlay.remove();
+  forwardComposerOverlay = null;
+}
+
+function openSelectedMessagesForward() {
+  const messages = selectedMessagesInOrder();
+  if (!messages.length) {
+    cancelMessageSelection();
+    showToast('No forwardable messages selected');
+    return;
+  }
+  openForwardComposer({
+    mode: 'selected',
+    nodes: messages.map(message => ({message_id: normalizeMessageId(message.message_id)})),
+  });
+}
+
+function openCustomForwardComposer() {
+  if (!currentChat) return;
+  const senderId = normalizeMessageId(selfUser && selfUser.user_id);
+  const senderName = String((selfUser && selfUser.name) || 'You');
+  openForwardComposer({
+    mode: 'custom',
+    nodes: [{sender_id: senderId, sender_name: senderName, content: ''}],
+  });
+}
+
+function openForwardComposer({mode, nodes}) {
+  closeForwardComposer();
+  const draftNodes = nodes.map(node => ({...node}));
+  let destination = currentChat || '';
+  let sending = false;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay forward-compose-overlay';
+  const box = document.createElement('div');
+  box.className = 'modal-box forward-compose-modal';
+  box.innerHTML = `
+    <div class="forward-compose-head">
+      <div><h2>${mode === 'selected' ? 'Forward messages' : 'New combined forward'}</h2><span>${mode === 'selected' ? `${nodes.length} selected messages` : 'Custom nodes'}</span></div>
+      <button class="icon-button forward-compose-close" type="button" aria-label="Close"><svg><use href="#icon-x"/></svg></button>
+    </div>
+    <section class="forward-destination">
+      <label for="forwardChatSearch">Destination</label>
+      <div class="forward-chat-search"><svg><use href="#icon-search"/></svg><input id="forwardChatSearch" type="search" placeholder="Search conversations" autocomplete="off"></div>
+      <div class="forward-chat-list" id="forwardChatList"></div>
+    </section>
+    <section class="forward-node-section" id="forwardNodeSection"></section>
+    <div class="forward-compose-error" id="forwardComposeError" role="alert"></div>
+    <div class="forward-compose-actions">
+      <button class="forward-secondary-button" id="forwardCancel" type="button">Cancel</button>
+      <button class="forward-primary-button" id="forwardSend" type="button"><svg><use href="#icon-send"/></svg><span>Send</span></button>
+    </div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  forwardComposerOverlay = overlay;
+
+  const chatSearch = box.querySelector('#forwardChatSearch');
+  const chatList = box.querySelector('#forwardChatList');
+  const nodeSection = box.querySelector('#forwardNodeSection');
+  const error = box.querySelector('#forwardComposeError');
+  const send = box.querySelector('#forwardSend');
+
+  function setError(text = '') {
+    error.textContent = text;
+    error.classList.toggle('show', !!text);
+  }
+
+  function destinationChats() {
+    const chats = Array.isArray(allChats) ? allChats.slice() : [];
+    if (currentChat && !chats.some(chat => chat.chat_id === currentChat)) {
+      chats.unshift({chat_id: currentChat, name: $('chatTitle').textContent || currentChat});
+    }
+    return chats;
+  }
+
+  function renderDestinations() {
+    const query = chatSearch.value.trim().toLocaleLowerCase();
+    const chats = destinationChats().filter(chat => !query || [chat.name, chat.chat_id, chat.last_text]
+      .some(value => String(value || '').toLocaleLowerCase().includes(query))).slice(0, 100);
+    chatList.replaceChildren();
+    if (!chats.length) {
+      const empty = document.createElement('div');
+      empty.className = 'forward-chat-empty';
+      empty.textContent = 'No matching conversations';
+      chatList.appendChild(empty);
+      return;
+    }
+    for (const chat of chats) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'forward-chat-option' + (chat.chat_id === destination ? ' active' : '');
+      button.appendChild(createAvatar('forward-chat-avatar', chat.avatar_url || avatarUrlForChat(chat.chat_id), chat.name || chat.chat_id));
+      const text = document.createElement('span');
+      text.className = 'forward-chat-copy';
+      const name = document.createElement('strong');
+      name.textContent = chat.name || chat.chat_id;
+      const id = document.createElement('small');
+      id.textContent = chat.chat_id;
+      text.append(name, id);
+      const check = document.createElement('svg');
+      check.className = 'forward-chat-check';
+      check.innerHTML = '<use href="#icon-check"/>';
+      button.append(text, check);
+      button.addEventListener('click', () => {
+        destination = chat.chat_id;
+        setError();
+        renderDestinations();
+      });
+      chatList.appendChild(button);
+    }
+  }
+
+  function nodeTool(icon, label, onClick, disabled = false) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'icon-button forward-node-tool';
+    button.setAttribute('aria-label', label);
+    button.dataset.tooltip = label;
+    button.disabled = disabled;
+    button.innerHTML = `<svg><use href="#icon-${icon}"/></svg>`;
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  function renderNodeEditors() {
+    nodeSection.replaceChildren();
+    if (mode !== 'custom') {
+      nodeSection.classList.add('selected-forward-summary');
+      const summary = document.createElement('div');
+      summary.className = 'selected-forward-count';
+      summary.innerHTML = '<svg><use href="#icon-layers"/></svg>';
+      const text = document.createElement('span');
+      text.textContent = `${draftNodes.length} selected messages`;
+      summary.appendChild(text);
+      nodeSection.appendChild(summary);
+      return;
+    }
+    nodeSection.classList.remove('selected-forward-summary');
+    const heading = document.createElement('div');
+    heading.className = 'forward-node-heading';
+    const title = document.createElement('strong');
+    title.textContent = `Nodes (${draftNodes.length})`;
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'forward-add-node';
+    add.disabled = draftNodes.length >= 100;
+    add.innerHTML = '<svg><use href="#icon-plus"/></svg><span>Add node</span>';
+    add.addEventListener('click', () => {
+      const previous = draftNodes[draftNodes.length - 1] || {};
+      draftNodes.push({
+        sender_id: previous.sender_id || '',
+        sender_name: previous.sender_name || '',
+        content: '',
+      });
+      renderNodeEditors();
+      nodeSection.querySelector('.forward-node-editor:last-of-type textarea')?.focus();
+    });
+    heading.append(title, add);
+    nodeSection.appendChild(heading);
+
+    draftNodes.forEach((node, index) => {
+      const row = document.createElement('div');
+      row.className = 'forward-node-editor';
+      const rowHead = document.createElement('div');
+      rowHead.className = 'forward-node-editor-head';
+      const number = document.createElement('strong');
+      number.textContent = `Node ${index + 1}`;
+      const tools = document.createElement('div');
+      tools.className = 'forward-node-tools';
+      tools.append(
+        nodeTool('chevron-up', 'Move up', () => {
+          [draftNodes[index - 1], draftNodes[index]] = [draftNodes[index], draftNodes[index - 1]];
+          renderNodeEditors();
+        }, index === 0),
+        nodeTool('chevron-down', 'Move down', () => {
+          [draftNodes[index], draftNodes[index + 1]] = [draftNodes[index + 1], draftNodes[index]];
+          renderNodeEditors();
+        }, index === draftNodes.length - 1),
+        nodeTool('trash', 'Remove node', () => {
+          draftNodes.splice(index, 1);
+          renderNodeEditors();
+        }, draftNodes.length === 1),
+      );
+      rowHead.append(number, tools);
+
+      const identity = document.createElement('div');
+      identity.className = 'forward-node-identity';
+      const idLabel = document.createElement('label');
+      idLabel.textContent = 'QQ ID';
+      const idInput = document.createElement('input');
+      idInput.type = 'text';
+      idInput.inputMode = 'numeric';
+      idInput.maxLength = 15;
+      idInput.value = node.sender_id;
+      idInput.addEventListener('input', () => { node.sender_id = idInput.value; setError(); });
+      idLabel.appendChild(idInput);
+      const nameLabel = document.createElement('label');
+      nameLabel.textContent = 'Sender name';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.maxLength = 100;
+      nameInput.value = node.sender_name;
+      nameInput.addEventListener('input', () => { node.sender_name = nameInput.value; setError(); });
+      nameLabel.appendChild(nameInput);
+      identity.append(idLabel, nameLabel);
+
+      const contentLabel = document.createElement('label');
+      contentLabel.className = 'forward-node-content-label';
+      contentLabel.textContent = 'Content';
+      const content = document.createElement('textarea');
+      content.maxLength = 20000;
+      content.rows = 4;
+      content.value = node.content;
+      content.addEventListener('input', () => { node.content = content.value; setError(); });
+      contentLabel.appendChild(content);
+      row.append(rowHead, identity, contentLabel);
+      nodeSection.appendChild(row);
+    });
+  }
+
+  function validatedNodes() {
+    if (!destination) throw new Error('Choose a destination.');
+    if (mode !== 'custom') return draftNodes;
+    let total = 0;
+    return draftNodes.map((node, index) => {
+      const senderId = String(node.sender_id || '').trim();
+      const senderName = String(node.sender_name || '').trim();
+      const content = String(node.content || '');
+      if (!/^\d{1,15}$/.test(senderId) || Number(senderId) <= 0) throw new Error(`Node ${index + 1}: enter a valid QQ ID.`);
+      if (!senderName || senderName.length > 100) throw new Error(`Node ${index + 1}: enter a sender name.`);
+      if (!content.trim()) throw new Error(`Node ${index + 1}: enter content.`);
+      total += content.length;
+      if (total > 100000) throw new Error('Combined content exceeds 100,000 characters.');
+      return {sender_id: senderId, sender_name: senderName, content};
+    });
+  }
+
+  async function submitForward() {
+    if (sending) return;
+    let payloadNodes;
+    try {
+      payloadNodes = validatedNodes();
+    } catch (validationError) {
+      setError(validationError.message);
+      return;
+    }
+    sending = true;
+    send.disabled = true;
+    send.classList.add('sending');
+    send.querySelector('span').textContent = 'Sending';
+    setError();
+    try {
+      const response = await api('/api/send-forward', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({chat_id: destination, nodes: payloadNodes}),
+      });
+      const result = await readJsonResponse(response);
+      if (!response.ok || !result.ok) throw new Error(result.error || 'Forward send failed');
+      closeForwardComposer();
+      if (mode === 'selected') cancelMessageSelection();
+      showToast('Combined forward sent');
+      loadChats();
+    } catch (sendError) {
+      setError(sendError.message || String(sendError));
+      sending = false;
+      send.disabled = false;
+      send.classList.remove('sending');
+      send.querySelector('span').textContent = 'Send';
+    }
+  }
+
+  chatSearch.addEventListener('input', renderDestinations);
+  box.querySelector('.forward-compose-close').addEventListener('click', closeForwardComposer);
+  box.querySelector('#forwardCancel').addEventListener('click', closeForwardComposer);
+  send.addEventListener('click', submitForward);
+  overlay.addEventListener('pointerdown', event => {
+    if (event.target === overlay) closeForwardComposer();
+  });
+  renderDestinations();
+  renderNodeEditors();
+  if (mode === 'custom') nodeSection.querySelector('textarea')?.focus();
+  else chatSearch.focus();
 }
 
 // @ autocomplete
@@ -2449,6 +2852,10 @@ $('msgMenuPoke').addEventListener('click', pokeSelectedMessage);
 $('msgMenuRevoke').addEventListener('click', revokeSelectedMessage);
 $('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage);
 $('msgMenuFaceReply').addEventListener('click', showFaceReplyPicker);
+$('msgMenuSelect').addEventListener('click', selectMessageFromMenu);
+$('selectionCancel').addEventListener('click', cancelMessageSelection);
+$('selectionForward').addEventListener('click', openSelectedMessagesForward);
+$('customForwardButton').addEventListener('click', openCustomForwardComposer);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
 $('memberListButton').addEventListener('click', showMemberList);
 $('portalSelect').addEventListener('change', e => {
@@ -2489,6 +2896,14 @@ document.addEventListener('touchmove', () => {
 }, {passive: true});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    if (forwardComposerOverlay) {
+      closeForwardComposer();
+      return;
+    }
+    if (selectingMessages) {
+      cancelMessageSelection();
+      return;
+    }
     hideMessageMenu();
     clearReplyDraft();
     hideEmojiDropdown();
@@ -2518,6 +2933,7 @@ $('pluginsButton').addEventListener('click', showPluginsPanel);
 
 function updateComposerState() {
   $('sendButton').disabled = !currentChat || !$('sendInput').value.trim();
+  $('customForwardButton').disabled = !currentChat;
 }
 
 function syncThemeControl() {
@@ -2561,6 +2977,17 @@ function esc(s) {
 }
 
 // Scroll up to load more
+$('messagesScroll').addEventListener('click', function(e) {
+  if (!selectingMessages) return;
+  const messageElement = e.target.closest('.msg');
+  if (!messageElement || !this.contains(messageElement)) return;
+  const message = messageIndex.get(normalizeMessageId(messageElement.dataset.messageId));
+  if (!canSelectMessage(message)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  toggleMessageSelection(message);
+}, true);
+
 $('messagesScroll').addEventListener('scroll', function() {
   if (userScrollActive) hideMessageMenu();
   userScrollActive = false;

@@ -15,6 +15,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Auto-approves friend requests and group invitations for the logged-in account
 - Group lifecycle notices and recall tags are shown in chat history
 - Images, files, video, voice, merged forwards, JSON cards, music, contacts, locations, and other structured messages render in web and terminal clients
+- The web client and plugins can combine existing messages or authored text nodes into merged forwards
 
 ## Requirements
 
@@ -81,6 +82,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | GET    | `/api/messages?chat_id=X&limit=50` | Get messages (paginated) |
 | GET    | `/api/forward?id=X`                | Load a merged forward    |
 | POST   | `/api/send`                        | Send a message           |
+| POST   | `/api/send-forward`                | Send a merged forward    |
 | POST   | `/api/poke`                        | Poke a chat participant  |
 | POST   | `/api/message/emoji-like`          | React to a message       |
 | POST   | `/api/message/revoke`              | Revoke a recent self message |
@@ -99,7 +101,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 
 ## TODO
 
-- Rich sending for images, video, voice, JSON/Markdown cards, music, contacts, locations, dice/RPS, and merged forwards.
+- Rich sending for images, video, voice, JSON/Markdown cards, music, contacts, locations, and dice/RPS.
 - Request-management UI for reviewing and manually approving or rejecting pending requests.
 - Group file management: folders, delete/move/rename/transfer, file-system info, and root/folder listings.
 - Group notice and essence-message management.

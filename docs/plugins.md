@@ -212,11 +212,30 @@ Messaging and actions:
 
 ```python
 await ctx.send_message(chat_id, text, reply_to=None)
+await ctx.send_forward(chat_id, nodes)
 await ctx.upload_file(chat_id, path, name=None)
 await ctx.set_msg_emoji_like(message_id, emoji_id, enabled=True)
 await ctx.mark_chat_read(chat_id)
 await ctx.fetch_history(chat_id, before_message_id=None, count=50)
 ```
+
+`send_forward` accepts 1 to 100 existing-message references, custom text nodes, or a mixture of both:
+
+```python
+await ctx.send_forward("group_123456", [
+    {"message_id": "123456789"},
+    {
+        "sender_id": "10001",
+        "sender_name": "Alice",
+        "content": "Custom text with @[10002] and [face:14]",
+    },
+])
+```
+
+Reference nodes preserve the original QQ message and its media. Custom nodes support the same mention and face tokens as
+`send_message`; each node may contain up to 20,000 characters, with 100,000 characters across the whole forward. Arbitrary
+custom sender identities require NapCat's packet backend. WebQQ raises an error instead of silently replacing them with the
+logged-in account when that backend is unavailable.
 
 Local reads:
 
