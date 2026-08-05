@@ -46,7 +46,13 @@ async def handle_event(event, ctx):
         await ctx.send_message(message["chat_id"], "pong")
 ```
 
-The bundled `plugins/echo/` plugin is a complete example. Its config is:
+The bundled official plugins are:
+
+- `echo`: replies with text following a configurable command prefix.
+- `llm`: connects configured chats to an OpenAI-compatible model.
+- `td`: replies `td` to incoming group messages containing `@[all]` (`@全体成员`).
+
+The `plugins/echo/` plugin is a complete configurable example. Its config is:
 
 ```json
 {

@@ -1,0 +1,8 @@
+{
+  "id": "td",
+  "name": "TD",
+  "version": "1.0.0",
+  "description": "Replies td to group messages that mention all members.",
+  "entry": "main.py",
+  "enabled_by_default": true
+}

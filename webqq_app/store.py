@@ -403,6 +403,16 @@ class MessageStore:
         pending.remove(match)
         local_id = match.get("local_id")
         merged = {**match, **simplified}
+        if self._is_combined_forward_echo(match, simplified):
+            # NapCat emits sent combined forwards as JSON chat-history cards.
+            # Keep the locally constructed forward nodes while taking the
+            # confirmed message ID, timestamp, and sender metadata from QQ.
+            for key in (
+                "content", "mentions", "images", "forwards", "files",
+                "videos", "records", "extra_segments", "source",
+            ):
+                if key in match:
+                    merged[key] = match[key]
         merged.pop("pending", None)
         if local_id:
             merged["local_id"] = local_id
@@ -446,6 +456,8 @@ class MessageStore:
                 return False
         except (TypeError, ValueError):
             pass
+        if self._is_combined_forward_echo(pending, incoming):
+            return True
         if pending.get("content") != incoming.get("content"):
             return False
         pending_files = pending.get("files") or []
@@ -455,6 +467,16 @@ class MessageStore:
             incoming_names = [str(f.get("name") or f.get("file") or "") for f in incoming_files if isinstance(f, dict)]
             return bool(set(pending_names) & set(incoming_names)) or pending.get("content") == incoming.get("content")
         return True
+
+    @staticmethod
+    def _is_combined_forward_echo(pending, incoming):
+        if not pending.get("forwards"):
+            return False
+        extras = incoming.get("extra_segments") or []
+        return incoming.get("content") == "[json card]" and any(
+            isinstance(segment, dict) and segment.get("type") == "json"
+            for segment in extras
+        )
 
     def _update_chat_meta_from_message(self, chat_id, simplified):
         chat_id = canonical_chat_id(chat_id)

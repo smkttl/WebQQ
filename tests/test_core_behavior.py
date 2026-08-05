@@ -577,6 +577,56 @@ class SendRegistrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(store.get_messages("group_1")), 1)
             self.assertEqual(broadcasts, [])
 
+    async def test_forward_json_echo_replaces_local_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            local = {
+                "chat_id": "group_1",
+                "message_id": None,
+                "time": int(time.time()),
+                "sender_id": "self",
+                "sender_name": "You",
+                "content": "[forward]",
+                "forwards": [{
+                    "id": "forward-1",
+                    "title": "Forwarded messages",
+                    "summary": "1 messages",
+                    "status": "ok",
+                    "nodes": [{"sender_name": "Alice", "content": "hello"}],
+                }],
+                "extra_segments": [],
+                "self": True,
+                "source": "user",
+            }
+            store.register_pending_local_message("group_1", local)
+            incoming = {
+                "chat_id": "group_1",
+                "message_id": 123,
+                "time": local["time"],
+                "sender_id": 10001,
+                "sender_name": "Me",
+                "content": "[json card]",
+                "forwards": [],
+                "extra_segments": [{
+                    "type": "json",
+                    "label": "[json card]",
+                    "description": "[\u804a\u5929\u8bb0\u5f55]",
+                    "source": "\u7fa4\u804a\u7684\u804a\u5929\u8bb0\u5f55",
+                }],
+                "self": True,
+            }
+
+            reconciled = store.reconcile_self_message(incoming)
+
+            self.assertTrue(reconciled["replaced"])
+            self.assertEqual(len(store.get_messages("group_1")), 1)
+            message = store.get_messages("group_1")[0]
+            self.assertEqual(message["message_id"], 123)
+            self.assertEqual(message["content"], "[forward]")
+            self.assertEqual(message["forwards"], local["forwards"])
+            self.assertEqual(message["extra_segments"], [])
+            self.assertNotIn("pending", message)
+
     async def test_plugin_context_sends_forward_with_plugin_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = MessageStore(maxlen=10, data_dir=tmp)

@@ -7,5 +7,6 @@ __pycache__/
 plugins/*/
 !plugins/echo/
 !plugins/llm/
+!plugins/td/
 plugins/*/config.json
 !plugins/*/config.json.example
