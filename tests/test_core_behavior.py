@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -79,6 +80,29 @@ class NapCatParsingTests(unittest.TestCase):
 
 
 class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_image_builds_group_private_and_temp_requests(self):
+        calls = []
+        store = SimpleNamespace(private_send_context=lambda user_id: {"group_id": 8})
+        connection = NapCatConnection("", "", store)
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        image_path = Path("/tmp/webqq image.png")
+        image = [{"type": "image", "data": {"file": image_path.resolve().as_uri()}}]
+        await connection.send_image("group_7", image_path)
+        await connection.send_image("private_9", image_path)
+        await connection.send_image("temp_10_11", image_path)
+
+        self.assertEqual(calls, [
+            ("send_group_msg", {"group_id": 7, "message": image}, 10),
+            ("send_private_msg", {"user_id": 9, "message": image, "group_id": 8}, 10),
+            ("send_private_msg", {"user_id": 11, "group_id": 10, "message": image}, 10),
+        ])
+
     async def test_private_messages_keep_mentions_as_plain_text(self):
         calls = []
         store = SimpleNamespace(private_send_context=lambda user_id: {})
@@ -232,6 +256,71 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             await connection.send_forward("group_9", [
                 {"sender_id": "10001", "sender_name": "Alice", "content": "hello"},
             ])
+
+
+class ImageSendHandlerTests(unittest.IsolatedAsyncioTestCase):
+    class Part:
+        def __init__(self, name, value):
+            self.name = name
+            self.value = value
+            self.sent = False
+
+        async def text(self):
+            return str(self.value)
+
+        async def read_chunk(self, size=0):
+            if self.sent:
+                return b""
+            self.sent = True
+            return self.value
+
+        async def release(self):
+            return None
+
+    class Reader:
+        def __init__(self, parts):
+            self.parts = list(parts)
+
+        async def next(self):
+            return self.parts.pop(0) if self.parts else None
+
+    async def test_send_image_passes_temporary_file_to_napcat_and_cleans_it(self):
+        captured = {}
+
+        async def send_image(chat_id, path):
+            captured.update(chat_id=chat_id, path=path, body=Path(path).read_bytes())
+            return {"status": "ok", "data": {"message_id": 12}}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(send_image=send_image)},
+            query={}, cookies={}, headers={}, remote="",
+        )
+        request.multipart = lambda: self._multipart([
+            self.Part("chat_id", "private_42"),
+            self.Part("file", b"image bytes"),
+        ])
+        response = await api.handle_send_image(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(captured["chat_id"], "private_42")
+        self.assertEqual(captured["body"], b"image bytes")
+        self.assertFalse(Path(captured["path"]).exists())
+
+    async def test_send_image_rejects_invalid_chat(self):
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace()},
+            query={}, cookies={}, headers={}, remote="",
+        )
+        request.multipart = lambda: self._multipart([
+            self.Part("chat_id", "invalid"),
+            self.Part("file", b"image bytes"),
+        ])
+        response = await api.handle_send_image(request)
+        self.assertEqual(response.status, 400)
+        self.assertIn("invalid chat_id", response.text)
+
+    async def _multipart(self, parts):
+        return self.Reader(parts)
 
 
 class ForwardNodeValidationTests(unittest.TestCase):

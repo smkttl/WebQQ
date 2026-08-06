@@ -165,7 +165,8 @@ svg {
 .icon-button,
 .header-icon-button,
 .back-button,
-.send-bar .attach-button {
+.send-bar .attach-button,
+.send-bar .image-button {
   position: relative;
   width: 36px;
   height: 36px;
@@ -185,7 +186,8 @@ svg {
 .icon-button:hover,
 .header-icon-button:hover,
 .back-button:hover,
-.send-bar .attach-button:hover {
+.send-bar .attach-button:hover,
+.send-bar .image-button:hover {
   border-color: var(--line);
   background: var(--surface-hover);
   color: var(--text);
@@ -549,6 +551,7 @@ svg {
 
 .composer-tools { display: flex; gap: 2px; padding-bottom: 1px; }
 .send-bar .attach-button,
+.send-bar .image-button,
 .send-bar .emoji-button,
 .send-bar .custom-forward-button { margin: 0; padding: 0; border-color: var(--line); background: var(--surface-subtle); color: var(--text-soft); }
 .send-bar .custom-forward-button:disabled { opacity: .45; cursor: default; }
@@ -770,6 +773,7 @@ svg {
   .composer-tools { gap: 0; }
   .emoji-button { display: none; }
   .send-bar .attach-button { width: 38px; height: 40px; flex-basis: 38px; }
+  .send-bar .image-button { width: 38px; height: 40px; flex-basis: 38px; }
   .send-bar .custom-forward-button { width: 38px; height: 40px; flex-basis: 38px; }
   .composer-input { min-width: 0; }
   .send-bar input#sendInput { height: 40px; padding-inline: 10px; }

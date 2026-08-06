@@ -17,6 +17,7 @@ class FakeClient:
         self.reactions = []
         self.forward_ids = []
         self.read = []
+        self.images = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -48,6 +49,10 @@ class FakeClient:
 
     async def send_message(self, chat_id, text, reply_to=""):
         self.sent.append((chat_id, text, reply_to))
+        return {"ok": True}
+
+    async def send_image(self, chat_id, path):
+        self.images.append((chat_id, path))
         return {"ok": True}
 
     async def poke(self, chat_id, user_id):
@@ -282,6 +287,28 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             app.action_poke()
             await pilot.pause(0.05)
             self.assertEqual(client.poked, [("group_1", "2")])
+
+    async def test_ctrl_i_sends_image_and_escape_closes_prompt_in_narrow_layout(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            await pilot.press("ctrl+i")
+            image_prompt = app.query_one("#image_path", Input)
+            self.assertEqual(image_prompt.styles.display, "block")
+            self.assertIs(app.focused, image_prompt)
+            await pilot.press("escape")
+            self.assertEqual(image_prompt.styles.display, "none")
+            self.assertIs(app.focused, app.query_one("#composer", Composer))
+
+            await pilot.press("ctrl+i")
+            image_prompt.value = "/tmp/photo.png"
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            self.assertEqual(client.images, [("group_1", Path("/tmp/photo.png"))])
 
     async def test_face_reply_picker_filters_sends_and_escapes_on_small_terminal(self):
         client = FakeClient()

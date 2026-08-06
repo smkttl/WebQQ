@@ -284,6 +284,60 @@ async def handle_send_file(request):
                 pass
 
 
+async def handle_send_image(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    chat_id = ""
+    temp_path = None
+    size = 0
+    too_large = False
+    try:
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "chat_id":
+                chat_id = (await part.text()).strip()
+            elif part.name == "file":
+                fd, temp_path = tempfile.mkstemp(prefix="webqq-image-")
+                with os.fdopen(fd, "wb") as image_file:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_FILE_UPLOAD:
+                            too_large = True
+                        else:
+                            image_file.write(chunk)
+            else:
+                await part.release()
+        if not chat_id:
+            return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+        if not parse_chat_id(chat_id):
+            return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+        if not temp_path:
+            return web.json_response({"ok": False, "error": "image is required"}, status=400)
+        if too_large:
+            return web.json_response({"ok": False, "error": "image is larger than 100 MB"}, status=413)
+        if size <= 0:
+            return web.json_response({"ok": False, "error": "image is empty"}, status=400)
+        result = await request.app["napcat"].send_image(chat_id, temp_path)
+        if not result or result.get("status") != "ok":
+            err = result.get("wording", result.get("message", "image send failed")) if result else "not connected"
+            return web.json_response({"ok": False, "error": err}, status=500)
+        return web.json_response({"ok": True, "data": result})
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
 async def handle_message_emoji_like(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)

@@ -331,19 +331,20 @@ class WebQQTui(App):
         Binding("e", "face_reply", show=False),
         Binding("d", "download", show=False),
         Binding("ctrl+o", "send_file", show=False),
+        Binding("ctrl+i", "send_image", show=False),
     ]
     CSS = """
     Screen { background: #111418; color: #e8eaed; }
     #workspace { height: 1fr; }
     #sidebar { width: 34; min-width: 24; border-right: solid #3c4043; background: #171a1f; }
     #sidebar_title, #chat_header { height: 2; padding: 0 1; content-align: left middle; text-style: bold; background: #20242a; }
-    #chat_filter, #message_search, #file_path { margin: 0; border: none; }
+    #chat_filter, #message_search, #file_path, #image_path { margin: 0; border: none; }
     #chat_list, #message_list { height: 1fr; background: transparent; }
     #chat_list > ListItem { height: 3; padding: 0 1; }
     #message_list > ListItem { height: auto; min-height: 3; padding: 0 1 1 1; }
     ListView > ListItem.--highlight { background: #2b3138; }
     #conversation { width: 1fr; }
-    #message_search, #file_path { display: none; }
+    #message_search, #file_path, #image_path { display: none; }
     #reply_bar { display: none; height: 1; padding: 0 1; color: #fbbc04; background: #20242a; }
     #composer { height: 4; border: tall #3c4043; background: #171a1f; }
     #composer:focus { border: tall #45a3c7; }
@@ -400,6 +401,7 @@ class WebQQTui(App):
                 yield MessageListView(id="message_list")
                 yield Static("", id="reply_bar")
                 yield Input(placeholder="Path to file; Enter uploads", id="file_path")
+                yield Input(placeholder="Path to image; Enter sends", id="image_path")
                 yield Composer("", id="composer", soft_wrap=True, show_line_numbers=False)
         yield Static(self._base_status, id="status_bar")
         yield Static("Terminal is too small. Resize to at least 32x10.", id="too_small")
@@ -713,6 +715,14 @@ class WebQQTui(App):
             self.query_one("#composer", Composer).styles.display = "block"
             if value:
                 self._spawn(self._upload_file(Path(value)))
+        elif event.input.id == "image_path":
+            value = event.value.strip()
+            event.input.value = ""
+            event.input.styles.display = "none"
+            self.query_one("#composer", Composer).styles.display = "block"
+            self.query_one("#composer", Composer).focus()
+            if value:
+                self._spawn(self._upload_image(Path(value)))
         elif event.input.id == "message_search":
             self.action_next_match()
             self.query_one("#message_list", ListView).focus()
@@ -850,6 +860,16 @@ class WebQQTui(App):
         except Exception as exc:
             self._set_notice("Upload failed: {}".format(exc))
 
+    async def _upload_image(self, path: Path) -> None:
+        if not self.current_chat:
+            return
+        self._set_notice("Sending image {}...".format(path.name), seconds=120)
+        try:
+            await self.client.send_image(self.current_chat.chat_id, path)
+            self._set_notice("Sent image {}".format(path.name))
+        except Exception as exc:
+            self._set_notice("Image send failed: {}".format(exc))
+
     def _mention_selected(self, member: Optional[Mapping[str, Any]]) -> None:
         self._mention_open = False
         composer = self.query_one("#composer", Composer)
@@ -968,6 +988,18 @@ class WebQQTui(App):
             return
         composer = self.query_one("#composer", Composer)
         prompt = self.query_one("#file_path", Input)
+        self.query_one("#image_path", Input).styles.display = "none"
+        composer.styles.display = "none"
+        prompt.styles.display = "block"
+        prompt.focus()
+
+    def action_send_image(self) -> None:
+        if not self.current_chat:
+            self._set_notice("Select a chat first")
+            return
+        composer = self.query_one("#composer", Composer)
+        prompt = self.query_one("#image_path", Input)
+        self.query_one("#file_path", Input).styles.display = "none"
         composer.styles.display = "none"
         prompt.styles.display = "block"
         prompt.focus()
@@ -1003,6 +1035,12 @@ class WebQQTui(App):
         self._set_notice("Match {}/{}".format(self._match_position + 1, len(self._match_indexes)), seconds=2)
 
     def action_back(self) -> None:
+        image_prompt = self.query_one("#image_path", Input)
+        if image_prompt.styles.display != "none":
+            image_prompt.styles.display = "none"
+            self.query_one("#composer", Composer).styles.display = "block"
+            self.query_one("#composer", Composer).focus()
+            return
         file_prompt = self.query_one("#file_path", Input)
         if file_prompt.styles.display != "none":
             file_prompt.styles.display = "none"
@@ -1075,7 +1113,7 @@ class WebQQTui(App):
         if self._account_status:
             parts.append(self._account_status)
         if not self.short:
-            parts.append("Ctrl+F find  Ctrl+O file")
+            parts.append("Ctrl+F find  Ctrl+I image  Ctrl+O file")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 

@@ -20,6 +20,7 @@ try {
   <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
   <symbol id="icon-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
   <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+  <symbol id="icon-image" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></symbol>
   <symbol id="icon-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
   <symbol id="icon-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/></symbol>
   <symbol id="icon-puzzle" viewBox="0 0 24 24"><path d="M19.44 7.85A2.5 2.5 0 0 0 17 4h-3a2 2 0 0 0-2-2H9.5a2.5 2.5 0 0 0-1.35 4.6L6 9H2v5h2.08A2.5 2.5 0 1 1 6 18.44V22h6v-3.5a2.5 2.5 0 1 1 4 0V22h6v-6a2 2 0 0 0-2-2h-2.5a2.5 2.5 0 0 1 1.94-6.15Z"/></symbol>
@@ -107,8 +108,10 @@ try {
         <button class="icon-button" id="replyDraftCancel" type="button" aria-label="Cancel reply" data-tooltip="Cancel reply"><svg><use href="#icon-x"/></svg></button>
       </div>
       <input class="file-input" type="file" id="fileInput">
+      <input class="file-input" type="file" id="imageInput" accept="image/*">
       <div class="composer-tools">
         <button class="icon-button attach-button" id="attachButton" type="button" aria-label="Attach file" data-tooltip="Attach file"><svg><use href="#icon-paperclip"/></svg></button>
+        <button class="icon-button image-button" id="imageButton" type="button" aria-label="Send image" data-tooltip="Send image"><svg><use href="#icon-image"/></svg></button>
         <button class="icon-button custom-forward-button" id="customForwardButton" type="button" aria-label="Create combined forward" data-tooltip="Combined forward"><svg><use href="#icon-layers"/></svg></button>
         <button class="icon-button emoji-button" id="emojiButton" type="button" aria-label="Choose emoji" data-tooltip="Emoji"><svg><use href="#icon-smile"/></svg></button>
       </div>
@@ -2376,6 +2379,24 @@ async function doSendFile(file) {
   }
 }
 
+async function doSendImage(file) {
+  if (!currentChat || !file) return;
+  if (file.size > 100 * 1024 * 1024) {
+    showModal('Image is larger than 100 MB.');
+    return;
+  }
+  const form = new FormData();
+  form.append('chat_id', currentChat);
+  form.append('file', file);
+  try {
+    const r = await api('/api/send-image', {method: 'POST', body: form});
+    const d = await readJsonResponse(r);
+    if (!d.ok) showModal(d.error || 'Image send failed');
+  } catch (e) {
+    showModal('Image send failed: ' + e);
+  }
+}
+
 function closeForwardComposer() {
   if (forwardComposerOverlay) forwardComposerOverlay.remove();
   forwardComposerOverlay = null;
@@ -2956,10 +2977,21 @@ $('attachButton').addEventListener('click', () => {
   $('fileInput').click();
 });
 
+$('imageButton').addEventListener('click', () => {
+  if (!currentChat) return;
+  $('imageInput').click();
+});
+
 $('fileInput').addEventListener('change', e => {
   const file = e.target.files && e.target.files[0];
   e.target.value = '';
   if (file) doSendFile(file);
+});
+
+$('imageInput').addEventListener('change', e => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (file) doSendImage(file);
 });
 
 $('backButton').addEventListener('click', showChatList);

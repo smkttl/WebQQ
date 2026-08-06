@@ -129,14 +129,20 @@ class WebQQClient:
         self._require_ok(payload, "mark read failed")
 
     async def send_file(self, chat_id: str, path: Path) -> Mapping[str, Any]:
+        return await self._send_upload(chat_id, path, "/api/send-file", "file")
+
+    async def send_image(self, chat_id: str, path: Path) -> Mapping[str, Any]:
+        return await self._send_upload(chat_id, path, "/api/send-image", "image")
+
+    async def _send_upload(self, chat_id: str, path: Path, endpoint: str, kind: str) -> Mapping[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():
-            raise WebQQClientError("file does not exist: {}".format(path))
+            raise WebQQClientError("{} does not exist: {}".format(kind, path))
         size = path.stat().st_size
         if size <= 0:
-            raise WebQQClientError("file is empty")
+            raise WebQQClientError("{} is empty".format(kind))
         if size > MAX_UPLOAD_SIZE:
-            raise WebQQClientError("file is larger than 100 MB")
+            raise WebQQClientError("{} is larger than 100 MB".format(kind))
         session = self._session()
         form = aiohttp.FormData()
         form.add_field("chat_id", chat_id)
@@ -144,11 +150,11 @@ class WebQQClient:
         with path.open("rb") as body:
             form.add_field("file", body, filename=path.name, content_type=content_type)
             try:
-                async with session.post(self.endpoint("/api/send-file"), data=form) as response:
+                async with session.post(self.endpoint(endpoint), data=form) as response:
                     payload = await self._read_json(response)
             except (aiohttp.ClientError, OSError) as exc:
-                raise WebQQClientError("file upload failed: {}".format(exc)) from exc
-        self._require_ok(payload, "file upload failed")
+                raise WebQQClientError("{} upload failed: {}".format(kind, exc)) from exc
+        self._require_ok(payload, "{} upload failed".format(kind))
         return payload
 
     async def websocket(self) -> aiohttp.ClientWebSocketResponse:
