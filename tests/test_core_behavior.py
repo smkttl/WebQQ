@@ -444,6 +444,43 @@ class FaceManifestTests(unittest.TestCase):
 
 
 class MessageStoreTests(unittest.TestCase):
+    def test_incoming_poke_uses_window_vibration_preview_and_structured_segment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            simplified = store.add({
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": 42,
+                "message_id": 99,
+                "time": 100,
+                "message": [{"type": "poke", "data": {"type": "0", "id": "0"}}],
+                "sender": {"user_id": 42, "nickname": "Alice"},
+            })
+
+            self.assertEqual(simplified["content"], "Window vibration")
+            self.assertEqual(simplified["extra_segments"][0]["type"], "poke")
+            self.assertEqual(simplified["extra_segments"][0]["label"], "Window vibration")
+            self.assertEqual(store.get_chats()[0]["last_text"], "Window vibration")
+
+    def test_legacy_poke_history_is_normalized_on_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "private_42.json").write_text(json.dumps([{
+                "chat_id": "private_42",
+                "type": "private",
+                "user_id": 42,
+                "message_id": 99,
+                "time": 100,
+                "content": "[poke]",
+                "extra_segments": [{"type": "poke", "label": "[poke]"}],
+            }]), encoding="utf-8")
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.load_all()
+
+            message = store.get_messages("private_42")[0]
+            self.assertEqual(message["content"], "Window vibration")
+            self.assertEqual(message["extra_segments"][0]["label"], "Window vibration")
+            self.assertEqual(store.get_chats()[0]["last_text"], "Window vibration")
+
     def test_structured_segments_preserve_card_and_media_details(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = MessageStore(maxlen=10, data_dir=tmp)

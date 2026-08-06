@@ -57,6 +57,20 @@ class TuiConfigTests(unittest.TestCase):
 
 
 class TuiModelTests(unittest.TestCase):
+    def test_incoming_poke_has_dedicated_rendering_preview_and_search_text(self):
+        message = Message.from_json({
+            "chat_id": "private_42",
+            "sender_name": "Alice",
+            "content": "Window vibration",
+            "extra_segments": [{"type": "poke", "label": "Window vibration"}],
+        })
+
+        self.assertEqual(display_content(message), "")
+        rendered = format_message(message, compact=True).plain
+        self.assertIn("[Window vibration]", rendered)
+        self.assertNotIn("[poke]", rendered)
+        self.assertTrue(message_matches(message, "window vibration"))
+
     def test_rich_message_normalization_and_summary(self):
         message = Message.from_json({
             "chat_id": "group_1",

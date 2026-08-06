@@ -213,6 +213,8 @@ def display_content(message: Message) -> str:
 
 
 def extra_segment_summary(segment: Mapping[str, Any], compact: bool = False) -> str:
+    if str(segment.get("type") or "") == "poke":
+        return "[Window vibration]"
     label = str(segment.get("label") or "[{}]".format(segment.get("type") or "unknown"))
     title = str(segment.get("title") or "").strip()
     description = str(segment.get("description") or segment.get("text") or "").strip()
@@ -324,7 +326,8 @@ def format_message(message: Message, compact: bool = False, search: str = "") ->
             if len(nodes) > 3:
                 text.append("\n  ... {} more".format(len(nodes) - 3), style="dim")
     for segment in message.extra_segments:
-        text.append("\n" + extra_segment_summary(segment, compact=compact), style="magenta")
+        style = "bold yellow" if str(segment.get("type") or "") == "poke" else "magenta"
+        text.append("\n" + extra_segment_summary(segment, compact=compact), style=style)
 
     if message.reactions:
         labels = []

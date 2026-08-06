@@ -496,6 +496,8 @@ svg {
 .media-card video,
 .media-card audio { width: 100%; max-height: 280px; display: block; background: #101010; }
 .extra-segment { width: min(390px, 100%); min-width: 0; display: flex; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-subtle); color: var(--text-soft); font-size: 11px; line-height: 1.45; }
+.extra-poke { width: fit-content; align-items: center; gap: 8px; padding: 8px 10px; border-color: color-mix(in srgb, var(--amber) 35%, var(--line)); background: var(--amber-soft); color: var(--amber); font-size: 12px; font-weight: 680; }
+.extra-poke svg { width: 18px; height: 18px; flex: 0 0 18px; }
 .extra-preview { width: 104px; min-height: 104px; flex: 0 0 104px; display: block; object-fit: cover; background: var(--canvas); }
 .extra-body { min-width: 0; flex: 1; padding: 9px 10px; }
 .extra-eyebrow { margin-bottom: 3px; overflow: hidden; color: var(--text-muted); font-size: 9px; font-weight: 680; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }

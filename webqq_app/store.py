@@ -6,7 +6,7 @@ EXTRA_SEGMENT_LABELS = {
     "markdown": "[markdown]",
     "music": "[music]",
     "xml": "[xml]",
-    "poke": "[poke]",
+    "poke": "Window vibration",
     "dice": "[dice]",
     "rps": "[rps]",
     "miniapp": "[mini app]",
@@ -114,6 +114,17 @@ class MessageStore:
 
     def _normalize_loaded_message(self, source_chat_id, msg):
         normalized = dict(msg)
+        extras = normalized.get("extra_segments")
+        if isinstance(extras, list) and any(
+            isinstance(segment, dict) and segment.get("type") == "poke" for segment in extras
+        ):
+            normalized["extra_segments"] = [
+                {**segment, "label": "Window vibration"}
+                if isinstance(segment, dict) and segment.get("type") == "poke" else segment
+                for segment in extras
+            ]
+            if str(normalized.get("content") or "").strip() in ("[poke]", "Window vibration"):
+                normalized["content"] = "Window vibration"
         source_parsed = parse_chat_id(source_chat_id)
         original_chat_id = normalized.get("chat_id") or source_chat_id
         parsed = parse_chat_id(original_chat_id) or source_parsed
