@@ -57,6 +57,7 @@ Configuration is stored in `config.json` (gitignored). A template is provided in
 | `napcat_token`   | *(empty)*                                              | Token for authenticating with the NapCat WebSocket server                    |
 | `web_port`       | `8080`                                                 | Port for the web UI server                        |
 | `web_token`      | *(empty)*                                              | Password for browser login. Empty = no auth required |
+| `web_background_image` | *(empty)*                                         | WebUI conversation background; HTTP(S) URL or server-local path |
 | `flush_interval` | `15`                                                   | Seconds between message-to-disk flushes           |
 | `plugins.enabled` | `{}`                                                  | Per-plugin enable/disable overrides                |
 

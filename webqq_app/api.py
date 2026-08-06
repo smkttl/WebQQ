@@ -449,6 +449,7 @@ async def handle_status(request):
         "napcat_connected": napcat.ws is not None,
         "chats_count": len(request.app["store"]._data),
         "self_user": dict(request.app["store"]._self_user),
+        "web_background_image": bool(str(request.app["config"].get("web_background_image") or "").strip()),
     })
 
 
@@ -744,6 +745,34 @@ async def handle_image_full(request):
     if not urls:
         return web.json_response({"error": "invalid image url"}, status=400)
     return await fetch_first_image(urls)
+
+
+async def handle_background_image(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    source = str(request.app["config"].get("web_background_image") or "").strip()
+    if not source:
+        return web.json_response({"error": "background image is not configured"}, status=404)
+    parsed = urlparse(source)
+    if parsed.scheme in ("http", "https"):
+        response = await fetch_first_image([source])
+        response.headers["Cache-Control"] = "private, no-cache"
+        return response
+    if parsed.scheme:
+        return web.json_response({"error": "unsupported background image source"}, status=400)
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    path = path.resolve()
+    if not path.is_file():
+        return web.json_response({"error": "background image not found"}, status=404)
+    content_type = mimetypes.guess_type(path.name)[0] or ""
+    if not content_type.startswith("image/"):
+        return web.json_response({"error": "background file is not an image"}, status=400)
+    return web.FileResponse(path, headers={
+        "Cache-Control": "private, no-cache",
+        "Content-Type": content_type,
+    })
 
 
 async def handle_ws_browser(request):

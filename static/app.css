@@ -403,6 +403,21 @@ svg {
   scrollbar-gutter: stable;
 }
 
+:root.custom-chat-background .messages-scroll {
+  background-image:
+    linear-gradient(rgba(238, 241, 240, .48), rgba(238, 241, 240, .48)),
+    url("/api/background-image");
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+:root[data-theme="dark"].custom-chat-background .messages-scroll {
+  background-image:
+    linear-gradient(rgba(22, 26, 24, .58), rgba(22, 26, 24, .58)),
+    url("/api/background-image");
+}
+
 .messages-loading,
 .inline-error {
   height: 100%;

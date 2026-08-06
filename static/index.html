@@ -11,7 +11,7 @@ try {
   document.documentElement.dataset.theme = savedTheme || preferredTheme;
 } catch {}
 </script>
-<link rel="stylesheet" href="/app.css?v=20260804-2">
+<link rel="stylesheet" href="/app.css?v=20260806-1">
 </head>
 <body>
 
@@ -612,6 +612,7 @@ async function updateStatus() {
     const r = await api('/api/status');
     const d = await r.json();
     if (d.self_user) selfUser = d.self_user;
+    document.documentElement.classList.toggle('custom-chat-background', Boolean(d.web_background_image));
     $('statusDot').className = 'dot ' + (d.napcat_connected ? 'ok' : 'err');
     $('statusText').textContent = d.napcat_connected
       ? `Connected · ${d.chats_count} chats`

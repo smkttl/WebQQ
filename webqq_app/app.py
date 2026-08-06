@@ -84,6 +84,7 @@ async def main():
     app.router.add_get("/api/avatar", handle_avatar)
     app.router.add_get("/api/image", handle_image_proxy)
     app.router.add_get("/api/image/full", handle_image_full)
+    app.router.add_get("/api/background-image", handle_background_image)
     app.router.add_get("/api/file", handle_file_proxy)
     app.router.add_get("/ws", handle_ws_browser)
     app.router.add_get("/", lambda r: web.FileResponse(STATIC_DIR / "index.html"))

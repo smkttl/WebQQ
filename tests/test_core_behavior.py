@@ -405,6 +405,67 @@ class ConfiguredWebPortTests(unittest.TestCase):
                 configured_web_port({"web_port": 14232})
 
 
+class WebBackgroundTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def request(source=""):
+        return SimpleNamespace(
+            app={
+                "config": {"web_token": "", "web_background_image": source},
+                "napcat": SimpleNamespace(ws=None),
+                "store": SimpleNamespace(_data={}, _self_user={"user_id": "self", "name": "You"}),
+            },
+            query={}, cookies={}, headers={}, remote="",
+        )
+
+    async def test_status_exposes_background_availability_without_source(self):
+        response = await api.handle_status(self.request("https://example.test/private-image.png"))
+        payload = json.loads(response.text)
+        self.assertTrue(payload["web_background_image"])
+        self.assertNotIn("example.test", response.text)
+
+    async def test_local_background_resolves_relative_to_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp, "background.png")
+            image.write_bytes(b"png body")
+            with patch.object(api, "ROOT_DIR", Path(tmp)):
+                response = await api.handle_background_image(self.request("background.png"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response._path, image)
+            self.assertEqual(response.headers["Content-Type"], "image/png")
+            self.assertEqual(response.headers["Cache-Control"], "private, no-cache")
+
+    async def test_remote_background_uses_backend_image_fetcher(self):
+        calls = []
+
+        async def fetch(urls):
+            calls.append(urls)
+            return api.web.Response(body=b"image", content_type="image/jpeg")
+
+        source = "https://example.test/background.jpg"
+        with patch.object(api, "fetch_first_image", fetch):
+            response = await api.handle_background_image(self.request(source))
+        self.assertEqual(calls, [[source]])
+        self.assertEqual(response.body, b"image")
+        self.assertEqual(response.headers["Cache-Control"], "private, no-cache")
+
+    async def test_missing_and_non_image_backgrounds_fail_cleanly(self):
+        missing = await api.handle_background_image(self.request(""))
+        self.assertEqual(missing.status, 404)
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "background.txt").write_text("not an image", encoding="utf-8")
+            with patch.object(api, "ROOT_DIR", Path(tmp)):
+                invalid = await api.handle_background_image(self.request("background.txt"))
+        self.assertEqual(invalid.status, 400)
+
+    def test_web_assets_apply_backend_background_to_conversation(self):
+        html = Path("static/index.html").read_text(encoding="utf-8")
+        css = Path("static/app.css").read_text(encoding="utf-8")
+        self.assertIn("custom-chat-background", html)
+        self.assertIn("Boolean(d.web_background_image)", html)
+        self.assertIn(":root.custom-chat-background .messages-scroll", css)
+        self.assertIn('url("/api/background-image")', css)
+
+
 class ApiExtractionTests(unittest.TestCase):
     def test_json_body_helper_is_available_to_api_handlers(self):
         self.assertTrue(callable(api.read_json_body))
