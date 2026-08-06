@@ -370,10 +370,14 @@ class NapCatConnection:
     async def send_message(self, chat_id, text, reply_to=None):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")
-        message = self._parse_message(text, reply_to=reply_to)
         parsed = parse_chat_id(chat_id)
         if not parsed:
             raise ValueError(f"unknown chat_id: {chat_id}")
+        message = self._parse_message(
+            text,
+            reply_to=reply_to,
+            allow_mentions=parsed["type"] == "group",
+        )
         if parsed["type"] == "group":
             return await self._request("send_group_msg", {"group_id": parsed["group_id"], "message": message})
         if parsed["type"] == "private":
@@ -573,7 +577,7 @@ class NapCatConnection:
         return await self._request("mark_private_msg_as_read", {"user_id": str(parsed["private_id"])}, timeout=5)
 
     @staticmethod
-    def _parse_message(text, reply_to=None):
+    def _parse_message(text, reply_to=None, allow_mentions=True):
         import re
         prefix = []
         if reply_to:
@@ -589,7 +593,10 @@ class NapCatConnection:
             if match.start() > pos:
                 result.append({"type": "text", "data": {"text": text[pos:match.start()]}})
             if match.group(1) is not None:
-                result.append({"type": "at", "data": {"qq": match.group(1)}})
+                if allow_mentions:
+                    result.append({"type": "at", "data": {"qq": match.group(1)}})
+                else:
+                    result.append({"type": "text", "data": {"text": match.group(0)}})
             else:
                 result.append({"type": "face", "data": {"id": match.group(3)}})
             pos = match.end()

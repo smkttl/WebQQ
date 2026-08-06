@@ -750,6 +750,7 @@ async function selectChat(chatId, name) {
   loadedMessages = [];
   messageReactions = new Map();
   clearReplyDraft();
+  hideAtDropdown();
   hideMessageMenu();
   showMessagesLoading();
   loadChats();
@@ -2225,6 +2226,7 @@ function normalizeGroupMember(raw) {
 }
 
 function prependReplyMention(message) {
+  if (!currentChat || !currentChat.startsWith('group_')) return;
   const uid = normalizeMessageId(message && message.sender_id);
   if (!uid || uid === 'self') return;
   const mention = `@[${uid}] `;
@@ -2827,6 +2829,10 @@ function insertFaceToken(faceId) {
 }
 
 function insertAt(uid) {
+  if (!currentChat || !currentChat.startsWith('group_')) {
+    hideAtDropdown();
+    return;
+  }
   const input = $('sendInput');
   const val = input.value;
   const atIdx = val.lastIndexOf('@');

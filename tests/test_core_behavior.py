@@ -79,6 +79,49 @@ class NapCatParsingTests(unittest.TestCase):
 
 
 class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_messages_keep_mentions_as_plain_text(self):
+        calls = []
+        store = SimpleNamespace(private_send_context=lambda user_id: {})
+        connection = NapCatConnection("", "", store)
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_message(
+            "private_7", "Hi @[42](Alice) [face:14]", reply_to="9",
+        )
+
+        self.assertEqual(calls[0][0], "send_private_msg")
+        message = calls[0][1]["message"]
+        self.assertFalse(any(segment.get("type") == "at" for segment in message))
+        self.assertEqual(message[0], {"type": "reply", "data": {"id": "9"}})
+        self.assertTrue(any(
+            segment.get("type") == "text" and segment.get("data", {}).get("text") == "@[42](Alice)"
+            for segment in message
+        ))
+        self.assertTrue(any(segment.get("type") == "face" for segment in message))
+
+    async def test_group_messages_still_send_mentions(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_message("group_7", "Hi @[42](Alice)")
+
+        self.assertEqual(calls[0][0], "send_group_msg")
+        self.assertTrue(any(
+            segment.get("type") == "at" and segment.get("data", {}).get("qq") == "42"
+            for segment in calls[0][1]["message"]
+        ))
+
     async def test_send_poke_builds_private_and_group_requests(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace())
