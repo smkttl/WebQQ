@@ -393,6 +393,24 @@ class MessageStoreTests(unittest.TestCase):
             self.assertEqual(len(messages), 1)
             self.assertEqual(messages[0]["message_id"], 10)
 
+    def test_add_ignores_duplicate_live_message_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            message = {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 1,
+                "user_id": 2,
+                "message_id": 10,
+                "time": int(time.time()),
+                "message": "hello",
+                "sender": {"user_id": 2, "nickname": "A"},
+            }
+
+            self.assertIsNotNone(store.add(message))
+            self.assertIsNone(store.add(dict(message)))
+            self.assertEqual(len(store.get_messages("group_1", limit=10)), 1)
+
     def test_group_role_lookup_supports_admin_revoke(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = MessageStore(maxlen=10, data_dir=tmp)
@@ -518,6 +536,27 @@ class SendRegistrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(sent["message"], confirmed)
             self.assertEqual(len(store.get_messages("group_1")), 1)
             self.assertEqual(broadcasts, [])
+
+    async def test_confirmation_matches_assigned_id_when_mention_text_differs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            local = {
+                "chat_id": "group_1", "message_id": 123, "time": int(time.time()),
+                "sender_id": "self", "sender_name": "You",
+                "content": "hello @[10001](Alice)", "self": True,
+            }
+            store.register_pending_local_message("group_1", local)
+            incoming = {
+                "chat_id": "group_1", "message_id": 123, "time": local["time"],
+                "sender_id": 999, "sender_name": "Me",
+                "content": "hello @[10001]", "self": True,
+            }
+
+            reconciled = store.reconcile_self_message(incoming)
+
+            self.assertTrue(reconciled["replaced"])
+            self.assertEqual(len(store.get_messages("group_1")), 1)
+            self.assertEqual(store.get_messages("group_1")[0]["message_id"], 123)
 
     async def test_forward_send_registers_renderable_local_message(self):
         with tempfile.TemporaryDirectory() as tmp:

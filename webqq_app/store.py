@@ -334,7 +334,9 @@ class MessageStore:
         if not key:
             return
         simplified = self._simplify(msg)
-        self.append_simplified(key, simplified)
+        if not self._append_dedup(key, simplified):
+            return
+        self._reindex_chat(key)
         if key not in self._chat_meta:
             self._chat_meta[key] = {
                 "chat_id": key,
@@ -392,10 +394,22 @@ class MessageStore:
         pending = self._pending_local_messages.get(chat_id, [])
         match = None
         for item in list(pending):
-            if self._pending_matches(item, simplified):
+            pending_id = item.get("message_id")
+            incoming_id = simplified.get("message_id")
+            if (
+                pending_id is not None
+                and incoming_id is not None
+                and str(pending_id) == str(incoming_id)
+            ) or self._pending_matches(item, simplified):
                 match = item
                 break
         if not match:
+            message_id = simplified.get("message_id")
+            if message_id is not None and any(
+                str(item.get("message_id")) == str(message_id)
+                for item in self._data.get(chat_id, [])
+            ):
+                return {"message": simplified, "replaced": False, "ignored": True}
             self.append_simplified(chat_id, simplified)
             self._update_chat_meta_from_message(chat_id, simplified)
             self._dirty.add(chat_id)

@@ -142,6 +142,7 @@ try {
 let currentChat = null;
 let ws = null;
 let authed = false;
+let initialized = false;
 let nicknames = {};
 let atSearch = null;
 let loadingOlder = false;
@@ -530,10 +531,6 @@ async function doLogin() {
   }
 }
 
-$('tokenInput').addEventListener('keydown', e => {
-  if (e.key === 'Enter') doLogin();
-});
-
 async function checkAuth() {
   const r = await api('/api/chats');
   if (r.status === 401) return false;
@@ -553,6 +550,8 @@ function updateHeaderActions() {
 }
 
 async function init() {
+  if (initialized) return;
+  initialized = true;
   await loadFaceManifest();
   await loadNicknames();
   loadPlugins();
@@ -864,21 +863,28 @@ async function loadMessages(chatId, before = null, token = chatLoadToken) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     if (token !== chatLoadToken || currentChat !== chatId) return;
-    const msgs = d.messages || [];
-    if (before !== null && msgs.length < 50) noMoreMessages = true;
+    const receivedMessages = Array.isArray(d.messages) ? d.messages : [];
+    let msgs = deduplicateMessages(receivedMessages);
+    if (before !== null && receivedMessages.length < 50) noMoreMessages = true;
     const prepend = before !== null;
-    if (prepend) msgs.reverse();
-    indexMessages(msgs);
     if (prepend) {
+      const loadedIdentities = new Set(loadedMessages.map(messageIdentity).filter(Boolean));
+      msgs = msgs.filter(message => {
+        const identity = messageIdentity(message);
+        return !identity || !loadedIdentities.has(identity);
+      });
       loadedMessages = msgs.concat(loadedMessages);
     } else {
-      loadedMessages = loadedMessages.concat(msgs);
+      loadedMessages = deduplicateMessages(loadedMessages.concat(msgs));
+      msgs = loadedMessages;
     }
+    indexMessages(msgs);
     const scroll = $('messagesScroll');
     const wasAtBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 50;
     const oldHeight = scroll.scrollHeight;
     if (!prepend) scroll.replaceChildren();
-    for (const m of msgs) {
+    const renderedMessages = prepend ? [...msgs].reverse() : msgs;
+    for (const m of renderedMessages) {
       appendMessage(m, prepend, false);
     }
     if (before) {
@@ -1053,6 +1059,28 @@ function indexMessages(messages) {
 function normalizeMessageId(id) {
   if (id === undefined || id === null) return '';
   return String(id).trim();
+}
+
+function messageIdentity(message) {
+  const messageId = normalizeMessageId(message && message.message_id);
+  if (messageId) return `message:${messageId}`;
+  const localId = normalizeMessageId(message && message.local_id);
+  return localId ? `local:${localId}` : '';
+}
+
+function deduplicateMessages(messages) {
+  const result = [];
+  const positions = new Map();
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const identity = messageIdentity(message);
+    if (!identity || !positions.has(identity)) {
+      if (identity) positions.set(identity, result.length);
+      result.push(message);
+    } else {
+      result[positions.get(identity)] = message;
+    }
+  }
+  return result;
 }
 
 function appendReplies(bubble, replyIds) {
@@ -2954,9 +2982,14 @@ function connectWS() {
       const d = JSON.parse(e.data);
       if (d.type === 'new_message' && d.data) {
         if (d.data.chat_id === currentChat) {
-          loadedMessages.push(d.data);
-          indexMessages([d.data]);
-          appendMessage(d.data);
+          const existing = findMessageElement(d.data);
+          upsertLoadedMessage(d.data);
+          if (existing) {
+            renderMessageElement(existing, d.data);
+            syncMessageSelectionUI();
+          } else {
+            appendMessage(d.data);
+          }
         }
         loadChats();
       } else if (d.type === 'emoji_like' && d.data) {
