@@ -176,6 +176,23 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_action["rename_group_file"][0]["current_parent_directory"], "folder-1")
         self.assertEqual(by_action["move_group_file"][0]["target_parent_directory"], "/")
 
+    async def test_contact_refresh_prefers_friend_remark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            connection = NapCatConnection("", "", store)
+
+            async def request(action, params, timeout=10):
+                if action == "get_friend_list":
+                    return {"status": "ok", "data": [{"user_id": 42, "nickname": "Alice", "remark": "Work Alice"}]}
+                return {"status": "ok", "data": []}
+
+            connection._request = request
+            await connection._fetch_contacts()
+            chat = next(item for item in store.get_chats() if item["chat_id"] == "private_42")
+            self.assertEqual(chat["name"], "Work Alice")
+            self.assertEqual(chat["nickname"], "Alice")
+            self.assertEqual(chat["remark"], "Work Alice")
+
     async def test_group_messages_still_send_mentions(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace())
@@ -560,6 +577,59 @@ class GroupFileHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["folder_id"], "folder")
         self.assertEqual(captured["body"], b"body")
         self.assertFalse(Path(captured["path"]).exists())
+
+
+class FriendRemarkHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_update_uses_confirmed_friend_name_and_updates_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.ensure_chat("private_42", "Alice", "private", user_id=42)
+            calls = []
+
+            async def set_remark(user_id, remark):
+                calls.append((user_id, remark))
+                return {"status": "ok", "data": None}
+
+            async def get_friend(user_id):
+                return {"user_id": 42, "nickname": "Alice", "remark": "Colleague"}
+
+            async def request_json():
+                return {"remark": "Colleague"}
+
+            request = SimpleNamespace(
+                app={
+                    "config": {"web_token": ""}, "store": store,
+                    "napcat": SimpleNamespace(set_friend_remark=set_remark, get_friend=get_friend),
+                },
+                match_info={"user_id": "42"}, query={}, cookies={}, headers={}, remote="", json=request_json,
+            )
+            response = await api.handle_friend_remark(request)
+            body = json.loads(response.text)
+            self.assertEqual(response.status, 200)
+            self.assertEqual(calls, [("42", "Colleague")])
+            self.assertEqual(body["name"], "Colleague")
+            self.assertEqual(store.get_chats()[0]["name"], "Colleague")
+
+    async def test_clearing_remark_falls_back_to_nickname(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+
+            async def ok(*args):
+                return {"status": "ok"}
+
+            async def friend(user_id):
+                return {"user_id": 42, "nickname": "Alice", "remark": ""}
+
+            async def request_json():
+                return {"remark": ""}
+
+            request = SimpleNamespace(
+                app={"config": {"web_token": ""}, "store": store, "napcat": SimpleNamespace(set_friend_remark=ok, get_friend=friend)},
+                match_info={"user_id": "42"}, query={}, cookies={}, headers={}, remote="", json=request_json,
+            )
+            body = json.loads((await api.handle_friend_remark(request)).text)
+            self.assertEqual(body["name"], "Alice")
+            self.assertEqual(body["remark"], "")
 
 
 class QzoneHandlerTests(unittest.IsolatedAsyncioTestCase):

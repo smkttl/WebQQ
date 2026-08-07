@@ -78,6 +78,7 @@ async def main():
     app.router.add_delete("/api/group-files/folders", handle_group_file_folder_delete)
     app.router.add_post("/api/group-files/files/rename", handle_group_file_rename)
     app.router.add_post("/api/group-files/files/move", handle_group_file_move)
+    app.router.add_put("/api/friends/{user_id}/remark", handle_friend_remark)
     app.router.add_post("/api/qzone/posts", handle_qzone_post)
     app.router.add_delete("/api/qzone/posts/{tid}", handle_delete_qzone_post)
     app.router.add_post("/api/message/revoke", handle_message_revoke)

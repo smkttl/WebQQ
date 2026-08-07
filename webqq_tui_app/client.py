@@ -230,6 +230,13 @@ class WebQQClient:
         attachment = Attachment("file", name, int(file.get("file_size") or file.get("size") or 0), dict(file))
         return await self.download_attachment(chat_id, attachment, progress=progress)
 
+    async def update_friend_remark(self, user_id: str, remark: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "PUT", "/api/friends/{}/remark".format(user_id), json_body={"remark": remark},
+        )
+        self._require_ok(payload, "friend remark update failed")
+        return payload
+
     async def _send_upload(self, chat_id: str, path: Path, endpoint: str, kind: str) -> Mapping[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():

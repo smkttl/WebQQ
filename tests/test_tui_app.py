@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView, Static
 
-from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, GroupFileManager, MemberPicker, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, MemberPicker, RichMediaDialog, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -21,6 +21,7 @@ class FakeClient:
         self.rich_media = []
         self.transcriptions = []
         self.group_file_calls = []
+        self.remarks = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -92,6 +93,10 @@ class FakeClient:
     async def download_group_file(self, chat_id, file, progress=None):
         self.group_file_calls.append(("download", chat_id, file["file_id"]))
         return Path("/tmp/readme.txt")
+
+    async def update_friend_remark(self, user_id, remark):
+        self.remarks.append((user_id, remark))
+        return {"ok": True, "name": remark or "Alice", "remark": remark, "nickname": "Alice"}
 
     async def poke(self, chat_id, user_id):
         self.poked.append((chat_id, user_id))
@@ -403,6 +408,29 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.group_file_calls[0], ("list", "group_1", ""))
             await pilot.press("escape")
             self.assertNotIsInstance(app.screen, GroupFileManager)
+
+    async def test_f2_updates_and_clears_private_friend_remark(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("down", "enter")
+            await pilot.pause(0.1)
+            await pilot.press("f2")
+            self.assertIsInstance(app.screen, FriendRemarkDialog)
+            field = app.screen.query_one("#friend_remark", Input)
+            field.value = "Best friend"
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            self.assertEqual(client.remarks, [("2", "Best friend")])
+            self.assertEqual(app.current_chat.name, "Best friend")
+            await pilot.press("f2")
+            field = app.screen.query_one("#friend_remark", Input)
+            field.value = ""
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            self.assertEqual(client.remarks[-1], ("2", ""))
+            self.assertEqual(app.current_chat.name, "Alice")
 
     async def test_face_reply_picker_filters_sends_and_escapes_on_small_terminal(self):
         client = FakeClient()

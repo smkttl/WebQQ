@@ -45,6 +45,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_delete("/api/group-files/folders", self.group_file_mutation)
         app.router.add_post("/api/group-files/files/rename", self.group_file_mutation)
         app.router.add_post("/api/group-files/files/move", self.group_file_mutation)
+        app.router.add_put("/api/friends/{user_id}/remark", self.friend_remark)
         app.router.add_get("/api/file", self.download)
         app.router.add_get("/ws", self.websocket)
         self.runner = web.AppRunner(app)
@@ -187,6 +188,13 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.group_file_requests.append((request.method, request.path, body))
         return web.json_response({"ok": True})
 
+    async def friend_remark(self, request):
+        body = await request.json()
+        return web.json_response({
+            "ok": True, "user_id": request.match_info["user_id"], "remark": body.get("remark", ""),
+            "nickname": "Alice", "name": body.get("remark") or "Alice",
+        })
+
     async def download(self, request):
         return web.Response(body=b"attachment body")
 
@@ -256,6 +264,12 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.group_file_requests[0][2]["folder_id"], "dir")
         self.assertEqual(self.group_file_requests[1][2]["file"], b"group file")
         self.assertEqual(self.group_file_requests[-1][2]["target_id"], "/")
+
+    async def test_friend_remark_update(self):
+        await self.client.login()
+        result = await self.client.update_friend_remark("42", "Work")
+        self.assertEqual(result["user_id"], "42")
+        self.assertEqual(result["name"], "Work")
 
     async def test_upload_download_and_websocket(self):
         await self.client.login()

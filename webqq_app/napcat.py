@@ -57,9 +57,14 @@ class NapCatConnection:
                 for f in (friends.get("data") or []):
                     uid = f.get("user_id")
                     if uid:
-                        name = f.get("nickname", "") or f.get("remark", "") or str(uid)
+                        remark = str(f.get("remark") or "")
+                        nickname = str(f.get("nickname") or f.get("nick_name") or "")
+                        name = remark or nickname or str(uid)
                         self.store.remember_private_user(uid)
-                        self.store.ensure_chat(f"private_{uid}", name, "private")
+                        self.store.ensure_chat(
+                            f"private_{uid}", name, "private", user_id=uid,
+                            nickname=nickname, remark=remark,
+                        )
                         self.store._nicknames[str(uid)] = name
         except Exception:
             pass
@@ -433,6 +438,23 @@ class NapCatConnection:
             self._request("nc_get_packet_status", {}, timeout=10),
         )
         return listing, info, bool(packet and packet.get("status") == "ok")
+
+    async def set_friend_remark(self, user_id, remark):
+        if not self.ws:
+            raise RuntimeError("not connected to NapCat")
+        return await self._request("set_friend_remark", {
+            "user_id": str(user_id), "remark": str(remark),
+        }, timeout=30)
+
+    async def get_friend(self, user_id):
+        response = await self._request("get_friend_list", {}, timeout=30)
+        if not response or response.get("status") != "ok":
+            return None
+        key = str(user_id)
+        for friend in response.get("data") or []:
+            if isinstance(friend, dict) and str(friend.get("user_id") or friend.get("uin") or "") == key:
+                return friend
+        return None
 
     async def upload_group_file(self, group_id, path, name, folder_id=""):
         params = {"group_id": str(group_id), "file": str(path), "name": str(name)}

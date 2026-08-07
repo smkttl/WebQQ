@@ -852,6 +852,38 @@ async def _handle_group_file_relocate(request, rename):
     return web.json_response({"ok": True, "data": result.get("data")})
 
 
+async def handle_friend_remark(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    user_id = str(request.match_info.get("user_id", "")).strip()
+    if not user_id.isdigit():
+        return web.json_response({"ok": False, "error": "user_id must be numeric"}, status=400)
+    body = await read_json_body(request)
+    remark = str(body.get("remark", "")).strip()
+    if len(remark) > 128:
+        return web.json_response({"ok": False, "error": "remark must be at most 128 characters"}, status=400)
+    napcat = request.app["napcat"]
+    try:
+        result = await napcat.set_friend_remark(user_id, remark)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        err = result.get("wording", result.get("message", "friend remark update failed")) if result else "not connected"
+        return web.json_response({"ok": False, "error": err}, status=500)
+    friend = await napcat.get_friend(user_id)
+    friend = friend if isinstance(friend, dict) else {}
+    nickname = str(friend.get("nickname") or friend.get("nick_name") or "")
+    confirmed_remark = str(friend.get("remark") if "remark" in friend else remark or "")
+    name = confirmed_remark or nickname or user_id
+    chat = request.app["store"].set_private_display_name(
+        user_id, name, nickname=nickname, remark=confirmed_remark,
+    )
+    return web.json_response({
+        "ok": True, "user_id": user_id, "remark": confirmed_remark,
+        "nickname": nickname, "name": name, "chat": chat,
+    })
+
+
 async def handle_message_emoji_like(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)

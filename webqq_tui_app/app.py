@@ -583,6 +583,37 @@ class GroupFileManager(ModalScreen):
             self.dismiss(None)
 
 
+class FriendRemarkDialog(ModalScreen):
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+    CSS = """
+    FriendRemarkDialog { align: center middle; background: $background 70%; }
+    FriendRemarkDialog > Container { width: 60; max-width: 96%; height: 7; min-height: 6; border: solid $accent; background: $surface; padding: 1; }
+    FriendRemarkDialog #friend_remark { margin: 0; border: none; }
+    FriendRemarkDialog .hint { height: 1; color: $text-muted; }
+    """
+
+    def __init__(self, remark: str = ""):
+        super().__init__()
+        self.remark = remark
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Friend remark", classes="dialog-title")
+            yield Input(value=self.remark, placeholder="Empty clears the remark", id="friend_remark")
+            yield Static("Enter save  Esc return", classes="hint")
+
+    def on_mount(self) -> None:
+        field = self.query_one("#friend_remark", Input)
+        field.focus()
+        field.action_end()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class WebQQTui(App):
     TITLE = "WebQQ"
     SUB_TITLE = "Terminal client"
@@ -602,6 +633,7 @@ class WebQQTui(App):
         Binding("f3", "send_media", show=False),
         Binding("t", "transcribe", show=False),
         Binding("f4", "group_files", show=False),
+        Binding("f2", "friend_remark", show=False),
     ]
     CSS = """
     Screen { background: #111418; color: #e8eaed; }
@@ -1332,6 +1364,34 @@ class WebQQTui(App):
             return
         self.push_screen(GroupFileManager(self.client, self.current_chat.chat_id))
 
+    def action_friend_remark(self) -> None:
+        if not self.current_chat or self.current_chat.chat_type != "private":
+            self._set_notice("Friend remarks are only available in private chats")
+            return
+        remark = str(self.current_chat.raw.get("remark") or "")
+        self.push_screen(FriendRemarkDialog(remark), self._friend_remark_selected)
+
+    def _friend_remark_selected(self, remark: Optional[str]) -> None:
+        if remark is not None and self.current_chat:
+            self._spawn(self._update_friend_remark(self.current_chat, remark))
+
+    async def _update_friend_remark(self, chat: Chat, remark: str) -> None:
+        user_id = chat.chat_id.split("_", 1)[1]
+        self._set_notice("Updating friend remark...", seconds=120)
+        try:
+            payload = await self.client.update_friend_remark(user_id, remark)
+            name = str(payload.get("name") or user_id)
+            raw = {**dict(chat.raw), "remark": payload.get("remark", remark), "nickname": payload.get("nickname", "")}
+            updated = Chat(chat.chat_id, name, chat.chat_type, chat.last_time, chat.last_text, raw)
+            self.chats = [updated if item.chat_id == chat.chat_id else item for item in self.chats]
+            if self.current_chat and self.current_chat.chat_id == chat.chat_id:
+                self.current_chat = updated
+                self.query_one("#chat_header", Static).update(self._chat_header_text())
+            await self._render_chats()
+            self._set_notice("Friend remark updated")
+        except Exception as exc:
+            self._set_notice("Remark update failed: {}".format(exc))
+
     def action_find(self) -> None:
         if self.narrow and not self.conversation_visible:
             self.query_one("#chat_filter", Input).focus()
@@ -1441,7 +1501,7 @@ class WebQQTui(App):
         if self._account_status:
             parts.append(self._account_status)
         if not self.short:
-            parts.append("Ctrl+F find  F3 media  F4 group files  t transcribe  Ctrl+I image  Ctrl+O file")
+            parts.append("Ctrl+F find  F2 remark  F3 media  F4 group files  t transcribe  Ctrl+I image  Ctrl+O file")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 

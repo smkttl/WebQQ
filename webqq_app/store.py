@@ -587,6 +587,25 @@ class MessageStore:
         self._dirty.add(found["chat_id"])
         return found
 
+    def set_private_display_name(self, user_id, name, nickname="", remark=""):
+        user_id = str(user_id)
+        chat_id = "private_{}".format(user_id)
+        display_name = str(name or user_id)
+        self.remember_private_user(user_id)
+        self.ensure_chat(
+            chat_id, display_name, "private", user_id=int(user_id),
+            nickname=str(nickname or ""), remark=str(remark or ""),
+        )
+        self._nicknames[user_id] = display_name
+        changed = False
+        for message in self._data.get(chat_id, []):
+            if message.get("chat_name") != display_name:
+                message["chat_name"] = display_name
+                changed = True
+        if changed:
+            self._dirty.add(chat_id)
+        return self._chat_meta[chat_id]
+
     def remember_forward(self, forward_id, forward):
         forward_id = str(forward_id or "")
         if not forward_id or not isinstance(forward, dict):
