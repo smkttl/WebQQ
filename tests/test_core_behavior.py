@@ -163,6 +163,32 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             ("send_poke", {"user_id": 10003, "group_id": 123}, 10),
         ])
 
+    async def test_qzone_actions_use_native_actions(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            if action == "send_qzone_msg":
+                return {"status": "ok", "data": {"tid": "abc123"}}
+            return {"status": "ok"}
+
+        connection._request = request
+        result = await connection.send_qzone_post("hello", ["file:///tmp/a.png"], 16, [123, "456"])
+        await connection.delete_qzone_post("abc123")
+
+        self.assertEqual(result["data"]["tid"], "abc123")
+        self.assertEqual(calls, [
+            ("send_qzone_msg", {
+                "content": "hello",
+                "images": ["file:///tmp/a.png"],
+                "ugc_right": 16,
+                "target_uins": ["123", "456"],
+            }, 180),
+            ("delete_qzone_msg", {"tid": "abc123"}, 30),
+        ])
+
     async def test_fetch_forward_retries_napcat_parameter_alias(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace())
@@ -323,6 +349,91 @@ class ImageSendHandlerTests(unittest.IsolatedAsyncioTestCase):
         return self.Reader(parts)
 
 
+class QzoneHandlerTests(unittest.IsolatedAsyncioTestCase):
+    class Part(ImageSendHandlerTests.Part):
+        pass
+
+    class Reader(ImageSendHandlerTests.Reader):
+        pass
+
+    async def _multipart(self, parts):
+        return self.Reader(parts)
+
+    async def test_json_post_validates_and_returns_tid(self):
+        captured = {}
+
+        async def send_qzone_post(content, images, ugc_right, target_uins):
+            captured.update(content=content, images=images, ugc_right=ugc_right, target_uins=target_uins)
+            return {"status": "ok", "data": {"tid": "tid-1"}}
+
+        async def request_json():
+            return {"content": "hello", "ugc_right": 16, "target_uins": [123, "456"]}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(send_qzone_post=send_qzone_post)},
+            query={}, cookies={}, headers={}, remote="", content_type="application/json", json=request_json,
+        )
+        response = await api.handle_qzone_post(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.text), {"ok": True, "tid": "tid-1"})
+        self.assertEqual(captured, {"content": "hello", "images": [], "ugc_right": 16, "target_uins": ["123", "456"]})
+
+    async def test_multipart_images_are_cleaned_after_send(self):
+        captured = {}
+
+        async def send_qzone_post(content, images, ugc_right, target_uins):
+            captured.update(content=content, images=images, ugc_right=ugc_right, target_uins=target_uins)
+            captured["exists_during_call"] = all(Path(path.removeprefix("file://")).exists() for path in images)
+            return {"status": "ok", "data": {"tid": "tid-2"}}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(send_qzone_post=send_qzone_post)},
+            query={}, cookies={}, headers={}, remote="", content_type="multipart/form-data",
+        )
+        request.multipart = lambda: self._multipart([
+            self.Part("content", "with images"),
+            self.Part("target_uins", "123"),
+            self.Part("target_uins", "456"),
+            self.Part("images", b"one"),
+            self.Part("images", b"two"),
+        ])
+        response = await api.handle_qzone_post(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(captured["exists_during_call"])
+        self.assertEqual(captured["target_uins"], ["123", "456"])
+        self.assertTrue(all(not Path(path.removeprefix("file://")).exists() for path in captured["images"]))
+
+    async def test_post_rejects_missing_targets_for_selected_visibility(self):
+        async def request_json():
+            return {"content": "hello", "ugc_right": 128}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace()},
+            query={}, cookies={}, headers={}, remote="", content_type="application/json", json=request_json,
+        )
+        response = await api.handle_qzone_post(request)
+        self.assertEqual(response.status, 400)
+        self.assertIn("target_uins is required", response.text)
+
+    async def test_delete_post_calls_napcat(self):
+        captured = {}
+
+        async def delete_qzone_post(tid):
+            captured["tid"] = tid
+            return {"status": "ok"}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(delete_qzone_post=delete_qzone_post)},
+            query={}, cookies={}, headers={}, remote="", match_info={"tid": "tid-3"},
+        )
+        response = await api.handle_delete_qzone_post(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.text), {"ok": True})
+        self.assertEqual(captured["tid"], "tid-3")
+
+
 class ForwardNodeValidationTests(unittest.TestCase):
     def test_normalizes_reference_and_custom_nodes(self):
         self.assertEqual(normalize_forward_nodes([
@@ -457,13 +568,72 @@ class WebBackgroundTests(unittest.IsolatedAsyncioTestCase):
                 invalid = await api.handle_background_image(self.request("background.txt"))
         self.assertEqual(invalid.status, 400)
 
+    class Part:
+        def __init__(self, name, value, filename="background.png"):
+            self.name = name
+            self.value = value
+            self.filename = filename
+            self.sent = False
+
+        async def read_chunk(self, size=0):
+            if self.sent:
+                return b""
+            self.sent = True
+            return self.value
+
+        async def release(self):
+            return None
+
+    class Reader:
+        def __init__(self, parts):
+            self.parts = list(parts)
+
+        async def next(self):
+            return self.parts.pop(0) if self.parts else None
+
+    async def test_upload_and_clear_managed_background(self):
+        png = b"\x89PNG\r\n\x1a\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request = self.request("")
+            request.content_type = "multipart/form-data"
+            async def multipart():
+                return self.Reader([self.Part("file", png)])
+            request.multipart = multipart
+            request.app["config"] = {"web_token": "", "web_background_image": ""}
+            with patch.object(api, "ROOT_DIR", root), patch.object(api, "save_config"):
+                response = await api.handle_background_image_upload(request)
+                self.assertEqual(response.status, 200)
+                source = request.app["config"]["web_background_image"]
+                self.assertTrue(source.startswith("data/web_background_image."))
+                self.assertTrue((root / source).is_file())
+                status = await api.handle_status(request)
+                status_payload = json.loads(status.text)
+                self.assertTrue(status_payload["web_background_image"])
+                self.assertTrue(status_payload["web_background_revision"])
+                cleared = await api.handle_background_image_clear(request)
+                self.assertEqual(cleared.status, 200)
+                self.assertEqual(json.loads(cleared.text)["web_background_revision"], "")
+                self.assertFalse(list((root / "data").glob("web_background_image.*")))
+
+    async def test_upload_rejects_non_image(self):
+        request = self.request("")
+        request.content_type = "multipart/form-data"
+        async def multipart():
+            return self.Reader([self.Part("file", b"not an image", "bad.txt")])
+        request.multipart = multipart
+        with tempfile.TemporaryDirectory() as tmp, patch.object(api, "ROOT_DIR", Path(tmp)):
+            response = await api.handle_background_image_upload(request)
+        self.assertEqual(response.status, 400)
+
     def test_web_assets_apply_backend_background_to_conversation(self):
         html = Path("static/index.html").read_text(encoding="utf-8")
         css = Path("static/app.css").read_text(encoding="utf-8")
         self.assertIn("custom-chat-background", html)
         self.assertIn("Boolean(d.web_background_image)", html)
         self.assertIn(":root.custom-chat-background .messages-scroll", css)
-        self.assertIn('url("/api/background-image")', css)
+        self.assertIn("var(--web-background-image)", css)
+        self.assertIn("backgroundButton", html)
 
 
 class ApiExtractionTests(unittest.TestCase):

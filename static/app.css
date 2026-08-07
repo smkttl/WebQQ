@@ -406,7 +406,7 @@ svg {
 :root.custom-chat-background .messages-scroll {
   background-image:
     linear-gradient(rgba(238, 241, 240, .48), rgba(238, 241, 240, .48)),
-    url("/api/background-image");
+    var(--web-background-image);
   background-position: center;
   background-size: cover;
   background-repeat: no-repeat;
@@ -415,7 +415,7 @@ svg {
 :root[data-theme="dark"].custom-chat-background .messages-scroll {
   background-image:
     linear-gradient(rgba(22, 26, 24, .58), rgba(22, 26, 24, .58)),
-    url("/api/background-image");
+    var(--web-background-image);
 }
 
 .messages-loading,
@@ -746,6 +746,13 @@ svg {
 .reaction-user .uid { color: var(--text-muted); font-size: 10px; }
 
 .toast { position: fixed; left: 50%; bottom: 24px; z-index: 900; max-width: min(420px, calc(100vw - 32px)); padding: 9px 13px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--text); box-shadow: var(--shadow-md); color: var(--surface); font-size: 11px; text-align: center; transform: translateX(-50%); animation: toastIn .18s ease, toastOut .25s ease 1.65s forwards; }
+.background-modal { width: min(92vw, 440px); text-align: left; }
+.background-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.background-head h2 { margin: 0; font-size: 17px; }
+.background-head p { margin: 6px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.4; }
+.background-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+.background-actions button { min-height: 36px; }
+.background-help { margin-top: 12px; color: var(--text-muted); font-size: 10px; }
 @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 @keyframes toastOut { to { opacity: 0; transform: translate(-50%, 8px); } }
 

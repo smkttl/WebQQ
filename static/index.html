@@ -63,6 +63,9 @@ try {
         <svg class="theme-icon theme-icon-light"><use href="#icon-moon"/></svg>
         <svg class="theme-icon theme-icon-dark"><use href="#icon-sun"/></svg>
       </button>
+      <button class="icon-button" id="backgroundButton" type="button" aria-label="Customize background" data-tooltip="Background">
+        <svg><use href="#icon-image"/></svg>
+      </button>
     </header>
     <div class="sidebar-tools">
       <label class="search-box" for="chatSearch">
@@ -174,6 +177,7 @@ let selectedPluginId = '';
 let pluginConfigText = '';
 let selectedPortalPluginId = '';
 let selfUser = {user_id: '', name: ''};
+let backgroundRevision = '';
 let allChats = [];
 const loadedGroupMembersByChat = new Map();
 const faceManifestUrl = 'https://koishi.js.org/QFace/assets/qq_emoji/_index.json';
@@ -279,6 +283,96 @@ function showPluginsPanel() {
     $('pluginToggle').addEventListener('click', toggleSelectedPlugin);
   }
   loadPlugins();
+}
+
+function applyBackgroundState(enabled, revision = '') {
+  const root = document.documentElement;
+  root.classList.toggle('custom-chat-background', Boolean(enabled));
+  backgroundRevision = revision || '';
+  if (enabled) {
+    const cacheKey = encodeURIComponent(backgroundRevision || Date.now());
+    root.style.setProperty('--web-background-image', `url("/api/background-image?v=${cacheKey}")`);
+  } else {
+    root.style.removeProperty('--web-background-image');
+  }
+}
+
+function showBackgroundPanel() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box background-modal">
+      <div class="background-head">
+        <div>
+          <h2>Conversation background</h2>
+          <p id="backgroundState">Loading current background...</p>
+        </div>
+        <button type="button" class="icon-button" id="backgroundClose" aria-label="Close" data-tooltip="Close"><svg><use href="#icon-x"/></svg></button>
+      </div>
+      <input class="file-input" type="file" id="backgroundInput" accept="image/*">
+      <div class="background-actions">
+        <button type="button" class="forward-primary-button" id="backgroundUpload"><svg><use href="#icon-image"/></svg><span>Upload image</span></button>
+        <button type="button" class="forward-secondary-button" id="backgroundClear"><svg><use href="#icon-trash"/></svg><span>Clear background</span></button>
+      </div>
+      <div class="background-help">Maximum size: 100 MB</div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const state = overlay.querySelector('#backgroundState');
+  const input = overlay.querySelector('#backgroundInput');
+  const upload = overlay.querySelector('#backgroundUpload');
+  const clear = overlay.querySelector('#backgroundClear');
+  const close = () => overlay.remove();
+  overlay.querySelector('#backgroundClose').addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  state.textContent = document.documentElement.classList.contains('custom-chat-background')
+    ? 'A custom background is active.'
+    : 'Using the default background.';
+  upload.addEventListener('click', () => input.click());
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    if (file.size > 100 * 1024 * 1024) {
+      showModal('Background image is larger than 100 MB.');
+      return;
+    }
+    upload.disabled = true;
+    clear.disabled = true;
+    state.textContent = 'Uploading...';
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const response = await api('/api/background-image', {method: 'POST', body: form});
+      const data = await readJsonResponse(response);
+      if (!data.ok) throw new Error(data.error || 'Background upload failed');
+      applyBackgroundState(true, data.web_background_revision);
+      showToast('Background updated');
+      close();
+    } catch (error) {
+      upload.disabled = false;
+      clear.disabled = false;
+      state.textContent = error.message || 'Upload failed';
+    }
+  });
+  clear.addEventListener('click', async () => {
+    if (!document.documentElement.classList.contains('custom-chat-background')) return;
+    if (!window.confirm('Clear the conversation background?')) return;
+    upload.disabled = true;
+    clear.disabled = true;
+    state.textContent = 'Clearing...';
+    try {
+      const response = await api('/api/background-image', {method: 'DELETE'});
+      const data = await readJsonResponse(response);
+      if (!data.ok) throw new Error(data.error || 'Background clear failed');
+      applyBackgroundState(false);
+      showToast('Background cleared');
+      close();
+    } catch (error) {
+      upload.disabled = false;
+      clear.disabled = false;
+      state.textContent = error.message || 'Clear failed';
+    }
+  });
 }
 
 async function loadPlugins() {
@@ -612,7 +706,7 @@ async function updateStatus() {
     const r = await api('/api/status');
     const d = await r.json();
     if (d.self_user) selfUser = d.self_user;
-    document.documentElement.classList.toggle('custom-chat-background', Boolean(d.web_background_image));
+    applyBackgroundState(Boolean(d.web_background_image), d.web_background_revision);
     $('statusDot').className = 'dot ' + (d.napcat_connected ? 'ok' : 'err');
     $('statusText').textContent = d.napcat_connected
       ? `Connected · ${d.chats_count} chats`
@@ -2938,6 +3032,7 @@ $('themeButton').addEventListener('click', () => {
   syncThemeControl();
   try { localStorage.setItem('webqq-theme', nextTheme); } catch {}
 });
+$('backgroundButton').addEventListener('click', showBackgroundPanel);
 $('emojiButton').addEventListener('click', e => {
   e.stopPropagation();
   const dropdown = $('emojiDropdown');

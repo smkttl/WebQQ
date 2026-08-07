@@ -1,6 +1,174 @@
 from .common import *
+import hashlib
+import imghdr
+import shutil
 from .auth import check_auth, record_auth_failure, client_ip, read_json_body
 from .messaging import send_forward_and_register, send_text_and_register
+
+QZONE_UGC_RIGHTS = {1, 4, 16, 64, 128}
+QZONE_MAX_IMAGES = 9
+BACKGROUND_UPLOAD_PREFIX = "web_background_image"
+BACKGROUND_UPLOAD_LIMIT = 100 * 1024 * 1024
+BACKGROUND_IMAGE_EXTENSIONS = {
+    "jpeg": ".jpg",
+    "png": ".png",
+    "gif": ".gif",
+    "webp": ".webp",
+    "bmp": ".bmp",
+}
+
+
+def _qzone_error(result, fallback):
+    if not result:
+        return "not connected"
+    if not isinstance(result, dict):
+        return str(result)
+    return result.get("wording", result.get("message", fallback))
+
+
+def _parse_qzone_right(value):
+    try:
+        right = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("ugc_right must be one of 1, 4, 16, 64, or 128")
+    if right not in QZONE_UGC_RIGHTS:
+        raise ValueError("ugc_right must be one of 1, 4, 16, 64, or 128")
+    return right
+
+
+def _parse_qzone_targets(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            raise ValueError("target_uins must be a JSON array")
+    if not isinstance(value, list):
+        raise ValueError("target_uins must be an array")
+    targets = []
+    for uid in value:
+        if isinstance(uid, str) and uid.lstrip().startswith("["):
+            try:
+                nested = json.loads(uid)
+            except (TypeError, ValueError):
+                raise ValueError("target_uins must be a JSON array")
+            if not isinstance(nested, list):
+                raise ValueError("target_uins must be an array")
+            targets.extend(_parse_qzone_targets(nested))
+            continue
+        text = str(uid).strip()
+        if not text or not text.isdigit():
+            raise ValueError("target_uins must contain numeric QQ ids")
+        targets.append(text)
+    return targets
+
+
+def _validate_qzone_post(content, images, ugc_right, target_uins):
+    if not isinstance(content, str):
+        raise ValueError("content must be a string")
+    if not content.strip() and not images:
+        raise ValueError("content or at least one image is required")
+    if len(images) > QZONE_MAX_IMAGES:
+        raise ValueError("a maximum of 9 images is allowed")
+    if ugc_right in (16, 128) and not target_uins:
+        raise ValueError("target_uins is required for this ugc_right")
+
+
+async def handle_qzone_post(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    temp_paths = []
+    images = []
+    try:
+        content = ""
+        raw_right = 1
+        targets_value = []
+        if getattr(request, "content_type", "") == "multipart/form-data":
+            reader = await request.multipart()
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "content":
+                    content = await part.text()
+                elif part.name == "ugc_right":
+                    raw_right = await part.text()
+                elif part.name == "target_uins":
+                    targets_value.append(await part.text())
+                elif part.name == "images":
+                    if len(images) >= QZONE_MAX_IMAGES:
+                        await part.release()
+                        return web.json_response({"ok": False, "error": "a maximum of 9 images is allowed"}, status=400)
+                    fd, path = tempfile.mkstemp(prefix="webqq-qzone-")
+                    size = 0
+                    try:
+                        with os.fdopen(fd, "wb") as image_file:
+                            while True:
+                                chunk = await part.read_chunk(size=1024 * 1024)
+                                if not chunk:
+                                    break
+                                size += len(chunk)
+                                if size > MAX_FILE_UPLOAD:
+                                    continue
+                                image_file.write(chunk)
+                    finally:
+                        temp_paths.append(path)
+                    if size > MAX_FILE_UPLOAD:
+                        return web.json_response({"ok": False, "error": "image is larger than 100 MB"}, status=413)
+                    if size <= 0:
+                        return web.json_response({"ok": False, "error": "image is empty"}, status=400)
+                    images.append(Path(path).resolve().as_uri())
+                else:
+                    await part.release()
+            if len(targets_value) == 1:
+                targets_value = targets_value[0]
+        else:
+            body = await read_json_body(request)
+            content = body.get("content", "")
+            raw_right = body.get("ugc_right", 1)
+            targets_value = body.get("target_uins", [])
+            supplied_images = body.get("images", [])
+            if supplied_images:
+                if not isinstance(supplied_images, list):
+                    raise ValueError("images must be an array")
+                images = [str(image).strip() for image in supplied_images if str(image).strip()]
+        right = _parse_qzone_right(raw_right)
+        targets = _parse_qzone_targets(targets_value)
+        _validate_qzone_post(content, images, right, targets)
+        result = await request.app["napcat"].send_qzone_post(content, images, right, targets)
+        if not result or result.get("status") != "ok":
+            return web.json_response({"ok": False, "error": _qzone_error(result, "Qzone post failed")}, status=500)
+        data = result.get("data")
+        tid = data.get("tid") if isinstance(data, dict) else result.get("tid")
+        if not tid:
+            return web.json_response({"ok": False, "error": "Qzone response did not include tid"}, status=500)
+        return web.json_response({"ok": True, "tid": str(tid)})
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        for path in temp_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+async def handle_delete_qzone_post(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    tid = str(request.match_info.get("tid", "")).strip()
+    if not tid:
+        return web.json_response({"ok": False, "error": "tid is required"}, status=400)
+    try:
+        result = await request.app["napcat"].delete_qzone_post(tid)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _qzone_error(result, "Qzone deletion failed")}, status=500)
+    return web.json_response({"ok": True})
 
 async def handle_login(request):
     cfg = request.app["config"]
@@ -445,11 +613,13 @@ async def handle_message_emoji_likes(request):
     return web.json_response({"message_id": message_id, "reactions": reactions, "fetched_emoji_ids": fetched_emoji_ids})
 async def handle_status(request):
     napcat = request.app["napcat"]
+    source = str(request.app["config"].get("web_background_image") or "").strip()
     return web.json_response({
         "napcat_connected": napcat.ws is not None,
         "chats_count": len(request.app["store"]._data),
         "self_user": dict(request.app["store"]._self_user),
-        "web_background_image": bool(str(request.app["config"].get("web_background_image") or "").strip()),
+        "web_background_image": bool(source),
+        "web_background_revision": _background_revision(source),
     })
 
 
@@ -745,6 +915,155 @@ async def handle_image_full(request):
     if not urls:
         return web.json_response({"error": "invalid image url"}, status=400)
     return await fetch_first_image(urls)
+
+
+def _background_data_dir():
+    directory = ROOT_DIR / "data"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory.resolve()
+
+
+def _managed_background_files():
+    directory = _background_data_dir()
+    return [path for path in directory.glob(f"{BACKGROUND_UPLOAD_PREFIX}.*") if path.is_file()]
+
+
+def _managed_background_source(source):
+    if not source:
+        return None
+    parsed = urlparse(str(source))
+    if parsed.scheme:
+        return None
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    path = path.resolve()
+    directory = _background_data_dir()
+    if path.parent == directory and path.name.startswith(BACKGROUND_UPLOAD_PREFIX + "."):
+        return path
+    return None
+
+
+def _background_revision(source):
+    path = _managed_background_source(source)
+    if path:
+        try:
+            return str(path.stat().st_mtime_ns)
+        except OSError:
+            return "missing"
+    if source:
+        return hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:16]
+    return ""
+
+
+async def handle_background_image_upload(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    temp_path = None
+    try:
+        if getattr(request, "content_type", "") != "multipart/form-data":
+            return web.json_response({"ok": False, "error": "multipart/form-data is required"}, status=400)
+        reader = await request.multipart()
+        file_seen = False
+        size = 0
+        data_dir = _background_data_dir()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name != "file":
+                await part.release()
+                continue
+            if file_seen:
+                await part.release()
+                continue
+            file_seen = True
+            fd, temp_path = tempfile.mkstemp(prefix="webqq-background-", dir=str(data_dir))
+            with os.fdopen(fd, "wb") as image_file:
+                while True:
+                    chunk = await part.read_chunk(size=1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size <= BACKGROUND_UPLOAD_LIMIT:
+                        image_file.write(chunk)
+            if size > BACKGROUND_UPLOAD_LIMIT:
+                return web.json_response({"ok": False, "error": "background image is larger than 100 MB"}, status=413)
+            break
+        if not file_seen or not temp_path:
+            return web.json_response({"ok": False, "error": "file is required"}, status=400)
+        if size <= 0:
+            return web.json_response({"ok": False, "error": "background image is empty"}, status=400)
+        image_type = imghdr.what(temp_path)
+        extension = BACKGROUND_IMAGE_EXTENSIONS.get(image_type)
+        if not extension:
+            return web.json_response({"ok": False, "error": "file is not a supported image"}, status=400)
+
+        target = data_dir / f"{BACKGROUND_UPLOAD_PREFIX}{extension}"
+        backup = None
+        if target.exists():
+            backup = data_dir / f".{BACKGROUND_UPLOAD_PREFIX}-backup-{uuid.uuid4().hex}"
+            shutil.copy2(target, backup)
+        config = request.app["config"]
+        previous_source = config.get("web_background_image", "")
+        try:
+            os.replace(temp_path, target)
+            temp_path = None
+            config["web_background_image"] = str(target.relative_to(ROOT_DIR))
+            save_config(config)
+        except Exception:
+            if target.exists() and backup:
+                target.unlink()
+            if backup:
+                os.replace(backup, target)
+            elif target.exists():
+                target.unlink()
+            config["web_background_image"] = previous_source
+            raise
+        finally:
+            if backup:
+                try:
+                    backup.unlink()
+                except OSError:
+                    pass
+        for old_path in _managed_background_files():
+            if old_path != target:
+                try:
+                    old_path.unlink()
+                except OSError:
+                    pass
+        return web.json_response({
+            "ok": True,
+            "web_background_image": True,
+            "web_background_revision": _background_revision(config["web_background_image"]),
+        })
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+async def handle_background_image_clear(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    config = request.app["config"]
+    previous_source = config.get("web_background_image", "")
+    try:
+        config["web_background_image"] = ""
+        save_config(config)
+    except Exception as error:
+        config["web_background_image"] = previous_source
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    for path in _managed_background_files():
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return web.json_response({"ok": True, "web_background_image": False, "web_background_revision": ""})
 
 
 async def handle_background_image(request):

@@ -416,6 +416,24 @@ class NapCatConnection:
             "message": message,
         })
 
+    async def send_qzone_post(self, content, images=None, ugc_right=1, target_uins=None):
+        """Publish a personal Qzone post through NapCat's native action."""
+        if not self.ws:
+            raise RuntimeError("not connected to NapCat")
+        params = {
+            "content": content,
+            "images": list(images or []),
+            "ugc_right": int(ugc_right),
+            "target_uins": [str(uid) for uid in (target_uins or [])],
+        }
+        return await self._request("send_qzone_msg", params, timeout=180)
+
+    async def delete_qzone_post(self, tid):
+        """Delete a personal Qzone post by its transaction id."""
+        if not self.ws:
+            raise RuntimeError("not connected to NapCat")
+        return await self._request("delete_qzone_msg", {"tid": str(tid)}, timeout=30)
+
     async def send_forward(self, chat_id, nodes):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")
