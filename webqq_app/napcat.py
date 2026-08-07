@@ -416,6 +416,11 @@ class NapCatConnection:
     async def send_music(self, chat_id, music):
         return await self.send_segments(chat_id, [{"type": "music", "data": dict(music)}], timeout=30)
 
+    async def fetch_ptt_text(self, message_id):
+        if not self.ws:
+            raise RuntimeError("not connected to NapCat")
+        return await self._request("fetch_ptt_text", {"message_id": str(message_id)}, timeout=30)
+
     async def send_segments(self, chat_id, message, timeout=10):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")

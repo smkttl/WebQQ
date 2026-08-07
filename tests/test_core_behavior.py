@@ -422,6 +422,59 @@ class RichMediaHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[1][2]["title"], "Song")
 
 
+class VoiceTranscriptionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transcription_is_cached_persisted_and_broadcast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.append_simplified("group_2", {
+                "chat_id": "group_2", "message_id": 55, "time": 1, "content": "[voice]",
+                "records": [{"file": "voice.amr"}],
+            })
+            calls = []
+            broadcasts = []
+
+            async def fetch_ptt_text(message_id):
+                calls.append(message_id)
+                return {"status": "ok", "data": {"text": "hello there"}}
+
+            async def broadcast(payload):
+                broadcasts.append(payload)
+
+            napcat = SimpleNamespace(fetch_ptt_text=fetch_ptt_text, _broadcast=broadcast)
+
+            async def request_json():
+                return {"chat_id": "group_2", "message_id": "55"}
+
+            request = SimpleNamespace(
+                app={"config": {"web_token": ""}, "store": store, "napcat": napcat},
+                query={}, cookies={}, headers={}, remote="", json=request_json,
+            )
+            first = await api.handle_message_transcribe(request)
+            second = await api.handle_message_transcribe(request)
+            self.assertEqual(first.status, 200)
+            self.assertEqual(second.status, 200)
+            self.assertEqual(calls, ["55"])
+            self.assertEqual(store.get_messages("group_2")[0]["records"][0]["transcript"], "hello there")
+            self.assertEqual(broadcasts[0]["type"], "message_update")
+            persisted = json.loads(Path(tmp, "group_2.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted[0]["records"][0]["transcript"], "hello there")
+
+    async def test_non_voice_message_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.append_simplified("private_2", {"chat_id": "private_2", "message_id": 5, "records": []})
+
+            async def request_json():
+                return {"chat_id": "private_2", "message_id": "5"}
+
+            request = SimpleNamespace(
+                app={"config": {"web_token": ""}, "store": store},
+                query={}, cookies={}, headers={}, remote="", json=request_json,
+            )
+            response = await api.handle_message_transcribe(request)
+            self.assertEqual(response.status, 400)
+
+
 class QzoneHandlerTests(unittest.IsolatedAsyncioTestCase):
     class Part(ImageSendHandlerTests.Part):
         pass

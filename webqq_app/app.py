@@ -70,6 +70,7 @@ async def main():
     app.router.add_post("/api/send-voice", handle_send_voice)
     app.router.add_post("/api/send-music", handle_send_music)
     app.router.add_post("/api/send-contact", handle_send_contact)
+    app.router.add_post("/api/message/transcribe", handle_message_transcribe)
     app.router.add_post("/api/qzone/posts", handle_qzone_post)
     app.router.add_delete("/api/qzone/posts/{tid}", handle_delete_qzone_post)
     app.router.add_post("/api/message/revoke", handle_message_revoke)

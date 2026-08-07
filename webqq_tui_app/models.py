@@ -311,6 +311,9 @@ def format_message(message: Message, compact: bool = False, search: str = "") ->
             " ({})".format(suffix) if suffix and not compact else "",
         )
         text.append("\n" + label, style="magenta")
+        transcript = str(attachment.data.get("transcript") or "").strip()
+        if attachment.kind == "voice" and transcript:
+            text.append("\n  " + transcript, style="dim italic")
     for forward in message.forwards:
         nodes = forward_nodes(forward)
         title = str(forward.get("title") or "Forwarded messages")

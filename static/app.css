@@ -510,6 +510,10 @@ svg {
 .media-card { max-width: 340px; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--canvas); }
 .media-card video,
 .media-card audio { width: 100%; max-height: 280px; display: block; background: #101010; }
+.voice-transcript { padding: 8px 10px; border-top: 1px solid var(--line); color: var(--text-soft); font-size: 11px; line-height: 1.45; white-space: pre-wrap; }
+.voice-transcribe { width: 100%; min-height: 32px; padding: 0 10px; border: 0; border-top: 1px solid var(--line); background: var(--surface-subtle); color: var(--accent-strong); font-size: 11px; font-weight: 650; cursor: pointer; }
+.voice-transcribe:hover { background: var(--surface-hover); }
+.voice-transcribe:disabled { color: var(--text-muted); cursor: wait; }
 .extra-segment { width: min(390px, 100%); min-width: 0; display: flex; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-subtle); color: var(--text-soft); font-size: 11px; line-height: 1.45; }
 .extra-poke { width: fit-content; align-items: center; gap: 8px; padding: 8px 10px; border-color: color-mix(in srgb, var(--amber) 35%, var(--line)); background: var(--amber-soft); color: var(--amber); font-size: 12px; font-weight: 680; }
 .extra-poke svg { width: 18px; height: 18px; flex: 0 0 18px; }

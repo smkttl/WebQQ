@@ -158,6 +158,15 @@ class WebQQClient:
         self._require_ok(payload, "music send failed")
         return payload
 
+    async def transcribe_message(self, chat_id: str, message_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST",
+            "/api/message/transcribe",
+            json_body={"chat_id": chat_id, "message_id": message_id},
+        )
+        self._require_ok(payload, "voice transcription failed")
+        return payload
+
     async def _send_upload(self, chat_id: str, path: Path, endpoint: str, kind: str) -> Mapping[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():

@@ -405,6 +405,7 @@ class WebQQTui(App):
         Binding("ctrl+o", "send_file", show=False),
         Binding("ctrl+i", "send_image", show=False),
         Binding("f3", "send_media", show=False),
+        Binding("t", "transcribe", show=False),
     ]
     CSS = """
     Screen { background: #111418; color: #e8eaed; }
@@ -1105,6 +1106,30 @@ class WebQQTui(App):
         except Exception as exc:
             self._set_notice("{} send failed: {}".format(kind.capitalize(), exc))
 
+    def action_transcribe(self) -> None:
+        if isinstance(self.focused, (Composer, Input)):
+            return
+        message = self._selected_message()
+        if not message or not message.message_id or not any(item.kind == "voice" for item in message.attachments):
+            self._set_notice("Select a server-confirmed voice message")
+            return
+        if not self.current_chat:
+            return
+        self._spawn(self._transcribe(self.current_chat.chat_id, message))
+
+    async def _transcribe(self, chat_id: str, message: Message) -> None:
+        self._set_notice("Transcribing voice...", seconds=120)
+        try:
+            payload = await self.client.transcribe_message(chat_id, message.message_id)
+            full = payload.get("message")
+            if isinstance(full, dict):
+                await self._apply_message_update({
+                    "chat_id": chat_id, "message_id": message.message_id, "message": full,
+                })
+            self._set_notice("Voice transcribed")
+        except Exception as exc:
+            self._set_notice("Transcription failed: {}".format(exc))
+
     def action_find(self) -> None:
         if self.narrow and not self.conversation_visible:
             self.query_one("#chat_filter", Input).focus()
@@ -1214,7 +1239,7 @@ class WebQQTui(App):
         if self._account_status:
             parts.append(self._account_status)
         if not self.short:
-            parts.append("Ctrl+F find  F3 media  Ctrl+I image  Ctrl+O file")
+            parts.append("Ctrl+F find  F3 media  t transcribe  Ctrl+I image  Ctrl+O file")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 

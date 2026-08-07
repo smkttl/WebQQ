@@ -36,6 +36,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post("/api/send-voice", self.send_media_upload)
         app.router.add_post("/api/send-contact", self.send_rich_media)
         app.router.add_post("/api/send-music", self.send_rich_media)
+        app.router.add_post("/api/message/transcribe", self.transcribe)
         app.router.add_get("/api/file", self.download)
         app.router.add_get("/ws", self.websocket)
         self.runner = web.AppRunner(app)
@@ -154,6 +155,10 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.rich_media.append((request.path, body))
         return web.json_response({"ok": True})
 
+    async def transcribe(self, request):
+        body = await request.json()
+        return web.json_response({"ok": True, "transcript": "hello", "message": body})
+
     async def download(self, request):
         return web.Response(body=b"attachment body")
 
@@ -202,6 +207,12 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.media_uploads["/api/send-voice"]["chat_id"], "group_1")
         self.assertEqual(self.rich_media[0][1]["id"], "42")
         self.assertEqual(self.rich_media[1][1]["type"], "qq")
+
+    async def test_voice_transcription_request(self):
+        await self.client.login()
+        result = await self.client.transcribe_message("group_1", "7")
+        self.assertEqual(result["transcript"], "hello")
+        self.assertEqual(result["message"], {"chat_id": "group_1", "message_id": "7"})
 
     async def test_upload_download_and_websocket(self):
         await self.client.login()

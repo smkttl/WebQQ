@@ -1657,11 +1657,35 @@ function appendVideos(bubble, videos) {
   bubble.appendChild(wrap);
 }
 
-function appendRecords(bubble, records) {
+async function transcribeVoiceMessage(message, button) {
+  if (!message || !normalizeMessageId(message.message_id)) return;
+  button.disabled = true;
+  button.textContent = 'Transcribing...';
+  try {
+    const response = await api('/api/message/transcribe', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_id: message.chat_id || currentChat, message_id: message.message_id}),
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Voice transcription failed');
+    if (data.message) applyMessageUpdate({
+      chat_id: data.chat_id || message.chat_id,
+      message_id: message.message_id,
+      message: data.message,
+    });
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Transcribe';
+    showModal(error.message || String(error));
+  }
+}
+
+function appendRecords(bubble, records, message) {
   if (!Array.isArray(records) || !records.length) return;
   const wrap = document.createElement('div');
   wrap.className = 'msg-media';
-  for (const record of records) {
+  records.forEach((record, index) => {
     const card = document.createElement('div');
     card.className = 'media-card';
     const url = mediaProxyUrl(record);
@@ -1677,8 +1701,25 @@ function appendRecords(bubble, records) {
       fallback.textContent = '[voice unavailable]';
       card.appendChild(fallback);
     }
+    const transcript = String(record.transcript || '').trim();
+    if (transcript) {
+      const text = document.createElement('div');
+      text.className = 'voice-transcript';
+      text.textContent = transcript;
+      card.appendChild(text);
+    } else if (index === 0 && /^-?\d+$/.test(normalizeMessageId(message && message.message_id))) {
+      const action = document.createElement('button');
+      action.type = 'button';
+      action.className = 'voice-transcribe';
+      action.textContent = 'Transcribe';
+      action.addEventListener('click', event => {
+        event.stopPropagation();
+        transcribeVoiceMessage(message, action);
+      });
+      card.appendChild(action);
+    }
     wrap.appendChild(card);
-  }
+  });
   bubble.appendChild(wrap);
 }
 
@@ -2502,7 +2543,7 @@ function renderMessageElement(div, m) {
   }
   appendImages(bubble, m.images);
   appendVideos(bubble, m.videos);
-  appendRecords(bubble, m.records);
+  appendRecords(bubble, m.records, m);
   appendFiles(bubble, m.files);
   appendForwards(bubble, m.forwards);
   appendExtraSegments(bubble, m.extra_segments);

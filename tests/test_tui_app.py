@@ -19,6 +19,7 @@ class FakeClient:
         self.read = []
         self.images = []
         self.rich_media = []
+        self.transcriptions = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -71,6 +72,13 @@ class FakeClient:
     async def send_music(self, chat_id, music):
         self.rich_media.append(("music", chat_id, music))
         return {"ok": True}
+
+    async def transcribe_message(self, chat_id, message_id):
+        self.transcriptions.append((chat_id, message_id))
+        return {"ok": True, "message": {
+            "chat_id": chat_id, "message_id": message_id, "time": 1, "sender_name": "Alice",
+            "content": "[voice]", "records": [{"file": "voice.amr", "transcript": "spoken words"}],
+        }}
 
     async def poke(self, chat_id, user_id):
         self.poked.append((chat_id, user_id))
@@ -350,6 +358,23 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             await pilot.pause(0.05)
             self.assertEqual(client.rich_media, [("contact", "group_1", "qq", "123")])
+
+    async def test_t_transcribes_selected_voice(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            app.messages = [Message.from_json({
+                "chat_id": "group_1", "message_id": 7, "time": 1, "sender_name": "Alice",
+                "content": "[voice]", "records": [{"file": "voice.amr"}],
+            })]
+            await app._render_messages(select_last=True)
+            await pilot.press("t")
+            await pilot.pause(0.05)
+            self.assertEqual(client.transcriptions, [("group_1", "7")])
+            self.assertEqual(app.messages[0].attachments[0].data["transcript"], "spoken words")
 
     async def test_face_reply_picker_filters_sends_and_escapes_on_small_terminal(self):
         client = FakeClient()

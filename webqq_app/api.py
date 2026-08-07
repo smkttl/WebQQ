@@ -627,6 +627,48 @@ async def handle_send_music(request):
     return web.json_response({"ok": True, "data": result.get("data")})
 
 
+async def handle_message_transcribe(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    message_id = str(body.get("message_id", "")).strip()
+    chat_id = canonical_chat_id(str(body.get("chat_id", "")).strip())
+    if not is_int_string(message_id):
+        return web.json_response({"ok": False, "error": "message_id is required"}, status=400)
+    store = request.app["store"]
+    found = store.find_message(message_id, chat_id=chat_id if parse_chat_id(chat_id) else None)
+    if not found:
+        return web.json_response({"ok": False, "error": "message is not in local history"}, status=404)
+    records = found["message"].get("records")
+    if not isinstance(records, list) or not records or not isinstance(records[0], dict):
+        return web.json_response({"ok": False, "error": "message does not contain voice"}, status=400)
+    transcript = str(records[0].get("transcript") or "").strip()
+    if not transcript:
+        try:
+            result = await request.app["napcat"].fetch_ptt_text(message_id)
+        except Exception as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=500)
+        if not result or result.get("status") != "ok":
+            err = result.get("wording", result.get("message", "voice transcription failed")) if result else "not connected"
+            return web.json_response({"ok": False, "error": err}, status=500)
+        data = result.get("data")
+        transcript = str(data.get("text") if isinstance(data, dict) else data or "").strip()
+        if not transcript:
+            return web.json_response({"ok": False, "error": "voice transcription returned no text"}, status=500)
+        found = store.set_voice_transcript(message_id, transcript, chat_id=found["chat_id"])
+        store.flush(found["chat_id"])
+        payload = {
+            "chat_id": found["chat_id"],
+            "message_id": message_id,
+            "message": found["message"],
+            "patch": {"records": found["message"]["records"]},
+        }
+        await request.app["napcat"]._broadcast({"type": "message_update", "data": payload})
+    else:
+        payload = {"chat_id": found["chat_id"], "message_id": message_id, "message": found["message"]}
+    return web.json_response({"ok": True, "transcript": transcript, **payload})
+
+
 async def handle_message_emoji_like(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)

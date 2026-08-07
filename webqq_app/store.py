@@ -576,6 +576,17 @@ class MessageStore:
                 return {"chat_id": known_chat_id, "message": msg, "already_recalled": already_recalled}
         return None
 
+    def set_voice_transcript(self, message_id, transcript, chat_id=None):
+        found = self.find_message(message_id, chat_id=chat_id)
+        if not found:
+            return None
+        records = found["message"].get("records")
+        if not isinstance(records, list) or not records or not isinstance(records[0], dict):
+            return None
+        records[0] = {**records[0], "transcript": str(transcript)}
+        self._dirty.add(found["chat_id"])
+        return found
+
     def remember_forward(self, forward_id, forward):
         forward_id = str(forward_id or "")
         if not forward_id or not isinstance(forward, dict):
@@ -955,6 +966,7 @@ class MessageStore:
             "url": data.get("url"),
             "size": data.get("size") or data.get("file_size") or data.get("fileSize"),
             "thumb": data.get("thumb") or data.get("thumbnail"),
+            "transcript": data.get("transcript") or data.get("text"),
         }
         return {k: v for k, v in item.items() if v is not None and v != ""}
 
