@@ -1,5 +1,6 @@
 import asyncio
 import json
+import shlex
 import time
 from pathlib import Path
 from typing import Any, Coroutine, List, Mapping, Optional, Set
@@ -316,6 +317,77 @@ class ForwardViewer(ModalScreen):
         self.dismiss(None)
 
 
+class RichMediaDialog(ModalScreen):
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+    CSS = """
+    RichMediaDialog { align: center middle; background: $background 70%; }
+    RichMediaDialog > Container { width: 76; max-width: 96%; height: 8; min-height: 6; border: solid $accent; background: $surface; padding: 1; }
+    RichMediaDialog #media_command { margin: 0; border: none; }
+    RichMediaDialog #media_error { height: 1; color: $error; }
+    RichMediaDialog .hint { height: 2; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Send rich media", classes="dialog-title")
+            yield Input(placeholder="video PATH | voice PATH | contact qq ID | music qq ID", id="media_command")
+            yield Static("", id="media_error")
+            yield Static("Custom music: music custom {JSON}   Esc return", classes="hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#media_command", Input).focus()
+
+    @staticmethod
+    def parse_command(value: str) -> Mapping[str, Any]:
+        try:
+            parts = shlex.split(value)
+        except ValueError as exc:
+            raise ValueError("Invalid quoting: {}".format(exc))
+        if not parts:
+            raise ValueError("Enter a media command")
+        kind = parts[0].lower()
+        if kind in {"video", "voice"}:
+            if len(parts) != 2:
+                raise ValueError("{} requires one file path".format(kind))
+            return {"kind": kind, "path": parts[1]}
+        if kind == "contact":
+            if len(parts) != 3 or parts[1].lower() not in {"qq", "group"} or not parts[2].isdigit():
+                raise ValueError("Use: contact qq|group ID")
+            return {"kind": kind, "type": parts[1].lower(), "id": parts[2]}
+        if kind == "music":
+            if len(parts) < 3:
+                raise ValueError("Use: music PLATFORM ID")
+            music_type = parts[1].lower()
+            if music_type in {"qq", "163", "kugou", "migu", "kuwo"}:
+                if len(parts) != 3:
+                    raise ValueError("Platform music requires one ID")
+                return {"kind": kind, "music": {"type": music_type, "id": parts[2]}}
+            if music_type == "custom":
+                raw_json = value[value.lower().find("custom") + len("custom"):].strip()
+                try:
+                    music = json.loads(raw_json)
+                except (TypeError, ValueError):
+                    raise ValueError("Custom music must be a JSON object")
+                if not isinstance(music, dict):
+                    raise ValueError("Custom music must be a JSON object")
+                music["type"] = "custom"
+                if not all(str(music.get(key) or "").strip() for key in ("url", "audio", "title")):
+                    raise ValueError("Custom music requires url, audio, and title")
+                return {"kind": kind, "music": music}
+        raise ValueError("Unknown media command")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        try:
+            command = self.parse_command(event.value.strip())
+        except ValueError as exc:
+            self.query_one("#media_error", Static).update(str(exc))
+            return
+        self.dismiss(command)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class WebQQTui(App):
     TITLE = "WebQQ"
     SUB_TITLE = "Terminal client"
@@ -332,6 +404,7 @@ class WebQQTui(App):
         Binding("d", "download", show=False),
         Binding("ctrl+o", "send_file", show=False),
         Binding("ctrl+i", "send_image", show=False),
+        Binding("f3", "send_media", show=False),
     ]
     CSS = """
     Screen { background: #111418; color: #e8eaed; }
@@ -1004,6 +1077,34 @@ class WebQQTui(App):
         prompt.styles.display = "block"
         prompt.focus()
 
+    def action_send_media(self) -> None:
+        if not self.current_chat:
+            self._set_notice("Select a chat first")
+            return
+        self.push_screen(RichMediaDialog(), self._rich_media_selected)
+
+    def _rich_media_selected(self, command: Optional[Mapping[str, Any]]) -> None:
+        if command and self.current_chat:
+            self._spawn(self._send_rich_media(self.current_chat.chat_id, command))
+
+    async def _send_rich_media(self, chat_id: str, command: Mapping[str, Any]) -> None:
+        kind = str(command.get("kind") or "media")
+        self._set_notice("Sending {}...".format(kind), seconds=120)
+        try:
+            if kind == "video":
+                await self.client.send_video(chat_id, Path(str(command["path"])))
+            elif kind == "voice":
+                await self.client.send_voice(chat_id, Path(str(command["path"])))
+            elif kind == "contact":
+                await self.client.send_contact(chat_id, str(command["type"]), str(command["id"]))
+            elif kind == "music":
+                await self.client.send_music(chat_id, command["music"])
+            else:
+                raise ValueError("unsupported media type")
+            self._set_notice("Sent {}".format(kind))
+        except Exception as exc:
+            self._set_notice("{} send failed: {}".format(kind.capitalize(), exc))
+
     def action_find(self) -> None:
         if self.narrow and not self.conversation_visible:
             self.query_one("#chat_filter", Input).focus()
@@ -1113,7 +1214,7 @@ class WebQQTui(App):
         if self._account_status:
             parts.append(self._account_status)
         if not self.short:
-            parts.append("Ctrl+F find  Ctrl+I image  Ctrl+O file")
+            parts.append("Ctrl+F find  F3 media  Ctrl+I image  Ctrl+O file")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 

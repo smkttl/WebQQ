@@ -393,28 +393,51 @@ class NapCatConnection:
         })
 
     async def send_image(self, chat_id, file_path):
+        return await self.send_segments(chat_id, [
+            {"type": "image", "data": {"file": Path(file_path).resolve().as_uri()}},
+        ])
+
+    async def send_video(self, chat_id, file_path):
+        return await self.send_segments(chat_id, [
+            {"type": "video", "data": {"file": Path(file_path).resolve().as_uri()}},
+        ], timeout=60)
+
+    async def send_voice(self, chat_id, file_path):
+        return await self.send_segments(chat_id, [
+            {"type": "record", "data": {"file": Path(file_path).resolve().as_uri()}},
+        ], timeout=60)
+
+    async def send_contact(self, chat_id, contact_type, contact_id):
+        return await self.send_segments(chat_id, [{
+            "type": "contact",
+            "data": {"type": str(contact_type), "id": str(contact_id)},
+        }])
+
+    async def send_music(self, chat_id, music):
+        return await self.send_segments(chat_id, [{"type": "music", "data": dict(music)}], timeout=30)
+
+    async def send_segments(self, chat_id, message, timeout=10):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")
         parsed = parse_chat_id(chat_id)
         if not parsed:
             raise ValueError(f"unknown chat_id: {chat_id}")
-        message = [{"type": "image", "data": {"file": Path(file_path).resolve().as_uri()}}]
         if parsed["type"] == "group":
             return await self._request("send_group_msg", {
                 "group_id": parsed["group_id"],
                 "message": message,
-            })
+            }, timeout=timeout)
         if parsed["type"] == "private":
             params = {"user_id": parsed["private_id"], "message": message}
             context = self.store.private_send_context(parsed["private_id"])
             if context.get("group_id"):
                 params["group_id"] = context["group_id"]
-            return await self._request("send_private_msg", params)
+            return await self._request("send_private_msg", params, timeout=timeout)
         return await self._request("send_private_msg", {
             "user_id": parsed["user_id"],
             "group_id": parsed["group_id"],
             "message": message,
-        })
+        }, timeout=timeout)
 
     async def send_qzone_post(self, content, images=None, ugc_right=1, target_uins=None):
         """Publish a personal Qzone post through NapCat's native action."""

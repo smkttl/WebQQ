@@ -134,6 +134,30 @@ class WebQQClient:
     async def send_image(self, chat_id: str, path: Path) -> Mapping[str, Any]:
         return await self._send_upload(chat_id, path, "/api/send-image", "image")
 
+    async def send_video(self, chat_id: str, path: Path) -> Mapping[str, Any]:
+        return await self._send_upload(chat_id, path, "/api/send-video", "video")
+
+    async def send_voice(self, chat_id: str, path: Path) -> Mapping[str, Any]:
+        return await self._send_upload(chat_id, path, "/api/send-voice", "voice")
+
+    async def send_contact(self, chat_id: str, contact_type: str, contact_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST",
+            "/api/send-contact",
+            json_body={"chat_id": chat_id, "type": contact_type, "id": contact_id},
+        )
+        self._require_ok(payload, "contact send failed")
+        return payload
+
+    async def send_music(self, chat_id: str, music: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST",
+            "/api/send-music",
+            json_body={"chat_id": chat_id, **dict(music)},
+        )
+        self._require_ok(payload, "music send failed")
+        return payload
+
     async def _send_upload(self, chat_id: str, path: Path, endpoint: str, kind: str) -> Mapping[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():

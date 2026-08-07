@@ -14,6 +14,8 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.upload = {}
         self.image_upload = {}
+        self.media_uploads = {}
+        self.rich_media = []
         self.pokes = []
         self.reactions = []
         self.forward_ids = []
@@ -30,6 +32,10 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post("/api/mark-read", self.mark_read)
         app.router.add_post("/api/send-file", self.send_file)
         app.router.add_post("/api/send-image", self.send_image)
+        app.router.add_post("/api/send-video", self.send_media_upload)
+        app.router.add_post("/api/send-voice", self.send_media_upload)
+        app.router.add_post("/api/send-contact", self.send_rich_media)
+        app.router.add_post("/api/send-music", self.send_rich_media)
         app.router.add_get("/api/file", self.download)
         app.router.add_get("/ws", self.websocket)
         self.runner = web.AppRunner(app)
@@ -132,6 +138,22 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.image_upload = fields
         return web.json_response({"ok": True})
 
+    async def send_media_upload(self, request):
+        reader = await request.multipart()
+        fields = {}
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            fields[part.name] = await part.read() if part.name == "file" else await part.text()
+        self.media_uploads[request.path] = fields
+        return web.json_response({"ok": True})
+
+    async def send_rich_media(self, request):
+        body = await request.json()
+        self.rich_media.append((request.path, body))
+        return web.json_response({"ok": True})
+
     async def download(self, request):
         return web.Response(body=b"attachment body")
 
@@ -167,6 +189,19 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_login_is_reported(self):
         with self.assertRaises(AuthenticationError):
             await self.client.login("wrong")
+
+    async def test_rich_media_requests(self):
+        await self.client.login()
+        source = Path(self.tmp.name) / "clip.mp4"
+        source.write_bytes(b"video")
+        await self.client.send_video("group_1", source)
+        await self.client.send_voice("group_1", source)
+        await self.client.send_contact("group_1", "qq", "42")
+        await self.client.send_music("group_1", {"type": "qq", "id": "7"})
+        self.assertEqual(self.media_uploads["/api/send-video"]["file"], b"video")
+        self.assertEqual(self.media_uploads["/api/send-voice"]["chat_id"], "group_1")
+        self.assertEqual(self.rich_media[0][1]["id"], "42")
+        self.assertEqual(self.rich_media[1][1]["type"], "qq")
 
     async def test_upload_download_and_websocket(self):
         await self.client.login()

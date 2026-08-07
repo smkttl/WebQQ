@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView, Static
 
-from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, MemberPicker, WebQQTui
+from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, MemberPicker, RichMediaDialog, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -18,6 +18,7 @@ class FakeClient:
         self.forward_ids = []
         self.read = []
         self.images = []
+        self.rich_media = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -53,6 +54,22 @@ class FakeClient:
 
     async def send_image(self, chat_id, path):
         self.images.append((chat_id, path))
+        return {"ok": True}
+
+    async def send_video(self, chat_id, path):
+        self.rich_media.append(("video", chat_id, path))
+        return {"ok": True}
+
+    async def send_voice(self, chat_id, path):
+        self.rich_media.append(("voice", chat_id, path))
+        return {"ok": True}
+
+    async def send_contact(self, chat_id, contact_type, contact_id):
+        self.rich_media.append(("contact", chat_id, contact_type, contact_id))
+        return {"ok": True}
+
+    async def send_music(self, chat_id, music):
+        self.rich_media.append(("music", chat_id, music))
         return {"ok": True}
 
     async def poke(self, chat_id, user_id):
@@ -105,6 +122,12 @@ class SlowHistoryClient(FakeClient):
 
 
 class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
+    def test_rich_media_command_parser(self):
+        self.assertEqual(RichMediaDialog.parse_command('video "/tmp/a b.mp4"'), {"kind": "video", "path": "/tmp/a b.mp4"})
+        self.assertEqual(RichMediaDialog.parse_command("contact group 123"), {"kind": "contact", "type": "group", "id": "123"})
+        custom = RichMediaDialog.parse_command('music custom {"url":"https://p","audio":"https://a","title":"T"}')
+        self.assertEqual(custom["music"]["type"], "custom")
+
     def test_internal_text_selection_is_disabled_for_stable_mouse_events(self):
         self.assertFalse(WebQQTui.ALLOW_SELECT)
 
@@ -309,6 +332,24 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             await pilot.pause(0.05)
             self.assertEqual(client.images, [("group_1", Path("/tmp/photo.png"))])
+
+    async def test_f3_media_dialog_sends_contact_and_escapes(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("f3")
+            self.assertIsInstance(app.screen, RichMediaDialog)
+            await pilot.press("escape")
+            self.assertNotIsInstance(app.screen, RichMediaDialog)
+            await pilot.press("f3")
+            command = app.screen.query_one("#media_command", Input)
+            command.value = "contact qq 123"
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            self.assertEqual(client.rich_media, [("contact", "group_1", "qq", "123")])
 
     async def test_face_reply_picker_filters_sends_and_escapes_on_small_terminal(self):
         client = FakeClient()

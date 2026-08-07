@@ -16,6 +16,7 @@ BACKGROUND_IMAGE_EXTENSIONS = {
     "webp": ".webp",
     "bmp": ".bmp",
 }
+MUSIC_PLATFORMS = {"qq", "163", "kugou", "migu", "kuwo"}
 
 
 def _qzone_error(result, fallback):
@@ -504,6 +505,126 @@ async def handle_send_image(request):
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+async def _handle_send_media_upload(request, kind):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    chat_id = ""
+    temp_path = None
+    size = 0
+    too_large = False
+    try:
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "chat_id":
+                chat_id = (await part.text()).strip()
+            elif part.name == "file":
+                fd, temp_path = tempfile.mkstemp(prefix="webqq-{}-".format(kind))
+                with os.fdopen(fd, "wb") as media_file:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_FILE_UPLOAD:
+                            too_large = True
+                        else:
+                            media_file.write(chunk)
+            else:
+                await part.release()
+        if not chat_id:
+            return web.json_response({"ok": False, "error": "chat_id is required"}, status=400)
+        if not parse_chat_id(chat_id):
+            return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+        if not temp_path:
+            return web.json_response({"ok": False, "error": "{} is required".format(kind)}, status=400)
+        if too_large:
+            return web.json_response({"ok": False, "error": "{} is larger than 100 MB".format(kind)}, status=413)
+        if size <= 0:
+            return web.json_response({"ok": False, "error": "{} is empty".format(kind)}, status=400)
+        sender = getattr(request.app["napcat"], "send_{}".format(kind))
+        result = await sender(chat_id, temp_path)
+        if not result or result.get("status") != "ok":
+            err = result.get("wording", result.get("message", "{} send failed".format(kind))) if result else "not connected"
+            return web.json_response({"ok": False, "error": err}, status=500)
+        return web.json_response({"ok": True, "data": result.get("data")})
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+async def handle_send_video(request):
+    return await _handle_send_media_upload(request, "video")
+
+
+async def handle_send_voice(request):
+    return await _handle_send_media_upload(request, "voice")
+
+
+async def handle_send_contact(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = str(body.get("chat_id", "")).strip()
+    contact_type = str(body.get("type", "")).strip().lower()
+    contact_id = str(body.get("id", "")).strip()
+    if not parse_chat_id(chat_id):
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    if contact_type not in {"qq", "group"}:
+        return web.json_response({"ok": False, "error": "contact type must be qq or group"}, status=400)
+    if not contact_id.isdigit():
+        return web.json_response({"ok": False, "error": "contact id must be numeric"}, status=400)
+    try:
+        result = await request.app["napcat"].send_contact(chat_id, contact_type, contact_id)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _qzone_error(result, "contact send failed")}, status=500)
+    return web.json_response({"ok": True, "data": result.get("data")})
+
+
+async def handle_send_music(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = str(body.get("chat_id", "")).strip()
+    music_type = str(body.get("type", "")).strip().lower()
+    if not parse_chat_id(chat_id):
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    if music_type in MUSIC_PLATFORMS:
+        music_id = str(body.get("id", "")).strip()
+        if not music_id:
+            return web.json_response({"ok": False, "error": "music id is required"}, status=400)
+        music = {"type": music_type, "id": music_id}
+    elif music_type == "custom":
+        music = {
+            "type": "custom",
+            "url": str(body.get("url", "")).strip(),
+            "audio": str(body.get("audio", "")).strip(),
+            "title": str(body.get("title", "")).strip(),
+            "image": str(body.get("image", "")).strip(),
+            "content": str(body.get("content", "")).strip(),
+        }
+        if not music["url"] or not music["audio"] or not music["title"]:
+            return web.json_response({"ok": False, "error": "custom music requires url, audio, and title"}, status=400)
+    else:
+        return web.json_response({"ok": False, "error": "unsupported music type"}, status=400)
+    try:
+        result = await request.app["napcat"].send_music(chat_id, music)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _qzone_error(result, "music send failed")}, status=500)
+    return web.json_response({"ok": True, "data": result.get("data")})
 
 
 async def handle_message_emoji_like(request):

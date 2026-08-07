@@ -103,6 +103,29 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             ("send_private_msg", {"user_id": 11, "group_id": 10, "message": image}, 10),
         ])
 
+    async def test_rich_media_segments_use_4182_onebot_schema(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_video("group_7", Path("/tmp/movie clip.mp4"))
+        await connection.send_voice("private_8", Path("/tmp/note.ogg"))
+        await connection.send_contact("group_7", "qq", "123")
+        await connection.send_music("group_7", {"type": "163", "id": "456"})
+
+        self.assertEqual(calls[0], ("send_group_msg", {
+            "group_id": 7,
+            "message": [{"type": "video", "data": {"file": Path("/tmp/movie clip.mp4").resolve().as_uri()}}],
+        }, 60))
+        self.assertEqual(calls[1][1]["message"][0]["type"], "record")
+        self.assertEqual(calls[2][1]["message"], [{"type": "contact", "data": {"type": "qq", "id": "123"}}])
+        self.assertEqual(calls[3][1]["message"], [{"type": "music", "data": {"type": "163", "id": "456"}}])
+
     async def test_private_messages_keep_mentions_as_plain_text(self):
         calls = []
         store = SimpleNamespace(private_send_context=lambda user_id: {})
@@ -347,6 +370,56 @@ class ImageSendHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def _multipart(self, parts):
         return self.Reader(parts)
+
+    async def test_send_video_upload_is_bounded_and_cleaned_up(self):
+        captured = {}
+
+        async def send_video(chat_id, path):
+            captured.update(chat_id=chat_id, path=path, body=Path(path).read_bytes())
+            return {"status": "ok", "data": {"message_id": 14}}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(send_video=send_video)},
+            query={}, cookies={}, headers={}, remote="",
+        )
+        request.multipart = lambda: self._multipart([
+            self.Part("chat_id", "group_42"), self.Part("file", b"video bytes"),
+        ])
+        response = await api.handle_send_video(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(captured["body"], b"video bytes")
+        self.assertFalse(Path(captured["path"]).exists())
+
+
+class RichMediaHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_contact_and_custom_music_are_validated_and_sent(self):
+        sent = []
+
+        async def send_contact(chat_id, contact_type, contact_id):
+            sent.append(("contact", chat_id, contact_type, contact_id))
+            return {"status": "ok", "data": {}}
+
+        async def send_music(chat_id, music):
+            sent.append(("music", chat_id, music))
+            return {"status": "ok", "data": {}}
+
+        async def contact_json():
+            return {"chat_id": "private_1", "type": "group", "id": "123"}
+
+        async def music_json():
+            return {
+                "chat_id": "group_2", "type": "custom", "url": "https://page",
+                "audio": "https://audio", "title": "Song", "image": "https://cover", "content": "Artist",
+            }
+
+        base = {"config": {"web_token": ""}, "napcat": SimpleNamespace(send_contact=send_contact, send_music=send_music)}
+        contact_request = SimpleNamespace(app=base, query={}, cookies={}, headers={}, remote="", json=contact_json)
+        music_request = SimpleNamespace(app=base, query={}, cookies={}, headers={}, remote="", json=music_json)
+        self.assertEqual((await api.handle_send_contact(contact_request)).status, 200)
+        self.assertEqual((await api.handle_send_music(music_request)).status, 200)
+        self.assertEqual(sent[0], ("contact", "private_1", "group", "123"))
+        self.assertEqual(sent[1][2]["type"], "custom")
+        self.assertEqual(sent[1][2]["title"], "Song")
 
 
 class QzoneHandlerTests(unittest.IsolatedAsyncioTestCase):

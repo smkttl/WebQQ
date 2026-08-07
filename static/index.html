@@ -116,6 +116,7 @@ try {
       <div class="composer-tools">
         <button class="icon-button attach-button" id="attachButton" type="button" aria-label="Attach file" data-tooltip="Attach file"><svg><use href="#icon-paperclip"/></svg></button>
         <button class="icon-button image-button" id="imageButton" type="button" aria-label="Send image" data-tooltip="Send image"><svg><use href="#icon-image"/></svg></button>
+        <button class="icon-button media-button" id="mediaButton" type="button" aria-label="Send rich media" data-tooltip="More media"><svg><use href="#icon-plus"/></svg></button>
         <button class="icon-button custom-forward-button" id="customForwardButton" type="button" aria-label="Create combined forward" data-tooltip="Combined forward"><svg><use href="#icon-layers"/></svg></button>
         <button class="icon-button emoji-button" id="emojiButton" type="button" aria-label="Choose emoji" data-tooltip="Emoji"><svg><use href="#icon-smile"/></svg></button>
       </div>
@@ -245,6 +246,96 @@ function showModal(msg) {
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `<div class="modal-box"><p>${esc(msg)}</p><button onclick="this.closest('.modal-overlay').remove()">OK</button></div>`;
   document.body.appendChild(overlay);
+}
+
+function showRichMediaPanel() {
+  if (!currentChat) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <form class="modal-box rich-media-modal" id="richMediaForm">
+      <div class="rich-media-head">
+        <h2>Send media</h2>
+        <button class="icon-button" type="button" id="richMediaClose" aria-label="Close"><svg><use href="#icon-x"/></svg></button>
+      </div>
+      <label>Type<select id="richMediaKind">
+        <option value="file">File</option><option value="image">Image</option>
+        <option value="video">Video</option><option value="voice">Voice</option>
+        <option value="contact">Contact</option><option value="music">Music</option>
+      </select></label>
+      <div id="richMediaFields"></div>
+      <div class="rich-media-error" id="richMediaError"></div>
+      <button class="rich-media-send" type="submit">Send</button>
+    </form>`;
+  document.body.appendChild(overlay);
+  const form = overlay.querySelector('#richMediaForm');
+  const kind = overlay.querySelector('#richMediaKind');
+  const fields = overlay.querySelector('#richMediaFields');
+  const error = overlay.querySelector('#richMediaError');
+  const close = () => overlay.remove();
+
+  function renderFields() {
+    error.textContent = '';
+    if (['file', 'image', 'video', 'voice'].includes(kind.value)) {
+      const accept = kind.value === 'image' ? ' accept="image/*"' : kind.value === 'video' ? ' accept="video/*"' : kind.value === 'voice' ? ' accept="audio/*"' : '';
+      fields.innerHTML = `<label>${kind.options[kind.selectedIndex].text}<input id="richMediaFile" type="file"${accept} required></label>`;
+    } else if (kind.value === 'contact') {
+      fields.innerHTML = `<div class="rich-media-row"><label>Contact type<select id="richContactType"><option value="qq">QQ user</option><option value="group">QQ group</option></select></label><label>QQ ID<input id="richContactId" inputmode="numeric" pattern="[0-9]+" required></label></div>`;
+    } else {
+      fields.innerHTML = `<label>Music source<select id="richMusicType"><option value="qq">QQ Music</option><option value="163">NetEase</option><option value="kugou">Kugou</option><option value="migu">Migu</option><option value="kuwo">Kuwo</option><option value="custom">Custom card</option></select></label><div id="richMusicFields"></div>`;
+      const musicType = fields.querySelector('#richMusicType');
+      const musicFields = fields.querySelector('#richMusicFields');
+      const renderMusic = () => {
+        musicFields.innerHTML = musicType.value === 'custom'
+          ? `<label>Page URL<input id="richMusicUrl" type="url" required></label><label>Audio URL<input id="richMusicAudio" type="url" required></label><label>Title<input id="richMusicTitle" required></label><label>Cover URL<input id="richMusicImage" type="url"></label><label>Description<input id="richMusicContent"></label>`
+          : `<label>Song ID<input id="richMusicId" required></label>`;
+      };
+      musicType.addEventListener('change', renderMusic);
+      renderMusic();
+    }
+  }
+
+  kind.addEventListener('change', renderFields);
+  overlay.querySelector('#richMediaClose').addEventListener('click', close);
+  overlay.addEventListener('pointerdown', event => { if (event.target === overlay) close(); });
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    error.textContent = '';
+    const send = form.querySelector('.rich-media-send');
+    send.disabled = true;
+    try {
+      if (['file', 'image', 'video', 'voice'].includes(kind.value)) {
+        const file = fields.querySelector('#richMediaFile').files[0];
+        if (!file) throw new Error('Choose a file');
+        if (file.size > 100 * 1024 * 1024) throw new Error('File is larger than 100 MB');
+        await doSendMediaFile(kind.value, file);
+      } else if (kind.value === 'contact') {
+        await doSendRichJson('/api/send-contact', {
+          type: fields.querySelector('#richContactType').value,
+          id: fields.querySelector('#richContactId').value.trim(),
+        });
+      } else {
+        const musicType = fields.querySelector('#richMusicType').value;
+        const payload = {type: musicType};
+        if (musicType === 'custom') {
+          Object.assign(payload, {
+            url: fields.querySelector('#richMusicUrl').value.trim(),
+            audio: fields.querySelector('#richMusicAudio').value.trim(),
+            title: fields.querySelector('#richMusicTitle').value.trim(),
+            image: fields.querySelector('#richMusicImage').value.trim(),
+            content: fields.querySelector('#richMusicContent').value.trim(),
+          });
+        } else payload.id = fields.querySelector('#richMusicId').value.trim();
+        await doSendRichJson('/api/send-music', payload);
+      }
+      close();
+    } catch (sendError) {
+      error.textContent = sendError.message || String(sendError);
+      send.disabled = false;
+    }
+  });
+  renderFields();
+  kind.focus();
 }
 
 function showPluginsPanel() {
@@ -2499,6 +2590,25 @@ async function doSendImage(file) {
   }
 }
 
+async function doSendMediaFile(kind, file) {
+  const form = new FormData();
+  form.append('chat_id', currentChat);
+  form.append('file', file);
+  const r = await api(`/api/send-${kind}`, {method: 'POST', body: form});
+  const d = await readJsonResponse(r);
+  if (!r.ok || !d.ok) throw new Error(d.error || `${kind} send failed`);
+}
+
+async function doSendRichJson(path, payload) {
+  const r = await api(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({chat_id: currentChat, ...payload}),
+  });
+  const d = await readJsonResponse(r);
+  if (!r.ok || !d.ok) throw new Error(d.error || 'Media send failed');
+}
+
 function closeForwardComposer() {
   if (forwardComposerOverlay) forwardComposerOverlay.remove();
   forwardComposerOverlay = null;
@@ -3084,6 +3194,8 @@ $('imageButton').addEventListener('click', () => {
   if (!currentChat) return;
   $('imageInput').click();
 });
+
+$('mediaButton').addEventListener('click', showRichMediaPanel);
 
 $('fileInput').addEventListener('change', e => {
   const file = e.target.files && e.target.files[0];
