@@ -669,6 +669,189 @@ async def handle_message_transcribe(request):
     return web.json_response({"ok": True, "transcript": transcript, **payload})
 
 
+def _group_file_group_id(chat_id):
+    parsed = parse_chat_id(str(chat_id or "").strip())
+    if not parsed or parsed["type"] != "group":
+        raise ValueError("group chat_id is required")
+    return parsed["group_id"]
+
+
+def _group_file_error(result, fallback):
+    if not result:
+        return "not connected"
+    return str(result.get("wording") or result.get("message") or fallback)
+
+
+async def handle_group_files(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        group_id = _group_file_group_id(request.query.get("chat_id"))
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    folder_id = str(request.query.get("folder_id", "")).strip()
+    if len(folder_id) > 2048:
+        return web.json_response({"ok": False, "error": "folder_id is too long"}, status=400)
+    try:
+        listing, info, packet_available = await request.app["napcat"].group_files(group_id, folder_id)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not listing or listing.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _group_file_error(listing, "group files unavailable")}, status=500)
+    data = listing.get("data") if isinstance(listing.get("data"), dict) else {}
+    info_data = info.get("data") if info and info.get("status") == "ok" and isinstance(info.get("data"), dict) else {}
+    return web.json_response({
+        "ok": True,
+        "folder_id": folder_id,
+        "files": data.get("files") if isinstance(data.get("files"), list) else [],
+        "folders": data.get("folders") if isinstance(data.get("folders"), list) else [],
+        "info": info_data,
+        "packet_available": packet_available,
+    })
+
+
+async def handle_group_file_upload(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    chat_id = ""
+    folder_id = ""
+    filename = "file"
+    temp_path = None
+    size = 0
+    too_large = False
+    try:
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "chat_id":
+                chat_id = (await part.text()).strip()
+            elif part.name == "folder_id":
+                folder_id = (await part.text()).strip()
+            elif part.name == "file":
+                filename = safe_download_name(part.filename or "file")
+                fd, temp_path = tempfile.mkstemp(prefix="webqq-group-file-")
+                with os.fdopen(fd, "wb") as output:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_FILE_UPLOAD:
+                            too_large = True
+                        else:
+                            output.write(chunk)
+            else:
+                await part.release()
+        group_id = _group_file_group_id(chat_id)
+        if not temp_path:
+            return web.json_response({"ok": False, "error": "file is required"}, status=400)
+        if too_large:
+            return web.json_response({"ok": False, "error": "file is larger than 100 MB"}, status=413)
+        if size <= 0:
+            return web.json_response({"ok": False, "error": "file is empty"}, status=400)
+        result = await request.app["napcat"].upload_group_file(group_id, temp_path, filename, folder_id)
+        if not result or result.get("status") != "ok":
+            return web.json_response({"ok": False, "error": _group_file_error(result, "group file upload failed")}, status=500)
+        return web.json_response({"ok": True, "data": result.get("data")})
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+async def _group_file_json(request):
+    body = await read_json_body(request)
+    group_id = _group_file_group_id(body.get("chat_id"))
+    return body, group_id
+
+
+async def handle_group_file_folder_create(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        body, group_id = await _group_file_json(request)
+        name = str(body.get("name", "")).strip()
+        if not name or len(name) > 255:
+            raise ValueError("folder name is required and must be at most 255 characters")
+        result = await request.app["napcat"].create_group_file_folder(group_id, name)
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _group_file_error(result, "folder creation failed")}, status=500)
+    return web.json_response({"ok": True, "data": result.get("data")})
+
+
+async def handle_group_file_delete(request):
+    return await _handle_group_file_mutation(request, "file_id", "delete_group_file", "file deletion failed")
+
+
+async def handle_group_file_folder_delete(request):
+    return await _handle_group_file_mutation(request, "folder_id", "delete_group_file_folder", "folder deletion failed")
+
+
+async def _handle_group_file_mutation(request, id_field, method_name, fallback):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        body, group_id = await _group_file_json(request)
+        item_id = str(body.get(id_field, "")).strip()
+        if not item_id or len(item_id) > 2048:
+            raise ValueError("{} is required".format(id_field))
+        result = await getattr(request.app["napcat"], method_name)(group_id, item_id)
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _group_file_error(result, fallback)}, status=500)
+    return web.json_response({"ok": True, "data": result.get("data")})
+
+
+async def handle_group_file_rename(request):
+    return await _handle_group_file_relocate(request, rename=True)
+
+
+async def handle_group_file_move(request):
+    return await _handle_group_file_relocate(request, rename=False)
+
+
+async def _handle_group_file_relocate(request, rename):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        body, group_id = await _group_file_json(request)
+        file_id = str(body.get("file_id", "")).strip()
+        parent_id = str(body.get("parent_id", "")).strip() or "/"
+        value_field = "new_name" if rename else "target_id"
+        value = str(body.get(value_field, "")).strip()
+        if not file_id or len(file_id) > 2048:
+            raise ValueError("file_id is required")
+        if rename:
+            if not value or len(value) > 255:
+                raise ValueError("new_name is required and must be at most 255 characters")
+            result = await request.app["napcat"].rename_group_file(group_id, file_id, parent_id, value)
+        else:
+            result = await request.app["napcat"].move_group_file(group_id, file_id, parent_id, value or "/")
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        status = 503 if result and "packet" in _group_file_error(result, "").lower() else 500
+        return web.json_response({"ok": False, "error": _group_file_error(result, "file operation failed")}, status=status)
+    return web.json_response({"ok": True, "data": result.get("data")})
+
+
 async def handle_message_emoji_like(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)

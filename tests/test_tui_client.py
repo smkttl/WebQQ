@@ -16,6 +16,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.image_upload = {}
         self.media_uploads = {}
         self.rich_media = []
+        self.group_file_requests = []
         self.pokes = []
         self.reactions = []
         self.forward_ids = []
@@ -37,6 +38,13 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post("/api/send-contact", self.send_rich_media)
         app.router.add_post("/api/send-music", self.send_rich_media)
         app.router.add_post("/api/message/transcribe", self.transcribe)
+        app.router.add_get("/api/group-files", self.group_files)
+        app.router.add_post("/api/group-files/upload", self.group_file_upload)
+        app.router.add_post("/api/group-files/folders", self.group_file_mutation)
+        app.router.add_delete("/api/group-files/files", self.group_file_mutation)
+        app.router.add_delete("/api/group-files/folders", self.group_file_mutation)
+        app.router.add_post("/api/group-files/files/rename", self.group_file_mutation)
+        app.router.add_post("/api/group-files/files/move", self.group_file_mutation)
         app.router.add_get("/api/file", self.download)
         app.router.add_get("/ws", self.websocket)
         self.runner = web.AppRunner(app)
@@ -159,6 +167,26 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         body = await request.json()
         return web.json_response({"ok": True, "transcript": "hello", "message": body})
 
+    async def group_files(self, request):
+        self.group_file_requests.append((request.method, request.path, dict(request.query)))
+        return web.json_response({"ok": True, "files": [], "folders": [], "packet_available": True})
+
+    async def group_file_upload(self, request):
+        reader = await request.multipart()
+        fields = {}
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            fields[part.name] = await part.read() if part.name == "file" else await part.text()
+        self.group_file_requests.append((request.method, request.path, fields))
+        return web.json_response({"ok": True})
+
+    async def group_file_mutation(self, request):
+        body = await request.json()
+        self.group_file_requests.append((request.method, request.path, body))
+        return web.json_response({"ok": True})
+
     async def download(self, request):
         return web.Response(body=b"attachment body")
 
@@ -213,6 +241,21 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         result = await self.client.transcribe_message("group_1", "7")
         self.assertEqual(result["transcript"], "hello")
         self.assertEqual(result["message"], {"chat_id": "group_1", "message_id": "7"})
+
+    async def test_group_file_management_requests(self):
+        await self.client.login()
+        source = Path(self.tmp.name) / "group.txt"
+        source.write_bytes(b"group file")
+        await self.client.group_files("group_1", "dir")
+        await self.client.upload_group_file("group_1", source, "dir")
+        await self.client.create_group_folder("group_1", "Docs")
+        await self.client.delete_group_file("group_1", "file")
+        await self.client.delete_group_folder("group_1", "dir")
+        await self.client.rename_group_file("group_1", "file", "dir", "new.txt")
+        await self.client.move_group_file("group_1", "file", "dir", "/")
+        self.assertEqual(self.group_file_requests[0][2]["folder_id"], "dir")
+        self.assertEqual(self.group_file_requests[1][2]["file"], b"group file")
+        self.assertEqual(self.group_file_requests[-1][2]["target_id"], "/")
 
     async def test_upload_download_and_websocket(self):
         await self.client.login()

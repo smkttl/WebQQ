@@ -97,6 +97,9 @@ try {
       <button class="icon-button header-icon-button" id="memberListButton" type="button" aria-label="View group members" data-tooltip="Members">
         <svg><use href="#icon-users"/></svg>
       </button>
+      <button class="icon-button header-icon-button" id="groupFilesButton" type="button" aria-label="Manage group files" data-tooltip="Group files">
+        <svg><use href="#icon-paperclip"/></svg>
+      </button>
       <div class="selection-toolbar" id="selectionToolbar">
         <button class="icon-button" id="selectionCancel" type="button" aria-label="Cancel selection" data-tooltip="Cancel"><svg><use href="#icon-x"/></svg></button>
         <strong id="selectionCount">0 selected</strong>
@@ -735,7 +738,9 @@ async function loadNicknames() {
 }
 
 function updateHeaderActions() {
-  $('memberListButton').style.display = currentChat && currentChat.startsWith('group_') ? 'flex' : 'none';
+  const isGroup = currentChat && currentChat.startsWith('group_');
+  $('memberListButton').style.display = isGroup ? 'flex' : 'none';
+  $('groupFilesButton').style.display = isGroup ? 'flex' : 'none';
 }
 
 async function init() {
@@ -2438,6 +2443,197 @@ async function showMemberList() {
   }
 }
 
+function showGroupFileManager() {
+  if (!currentChat || !currentChat.startsWith('group_')) return;
+  const chatId = currentChat;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay group-files-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box group-files-modal">
+      <div class="group-files-head">
+        <div><h2>Group files</h2><span id="groupFilesUsage"></span></div>
+        <button class="icon-button" type="button" id="groupFilesClose" aria-label="Close"><svg><use href="#icon-x"/></svg></button>
+      </div>
+      <div class="group-files-toolbar">
+        <button type="button" id="groupFilesBack" disabled><svg><use href="#icon-arrow-left"/></svg><span>Back</span></button>
+        <div class="group-files-path" id="groupFilesPath">/</div>
+        <button type="button" id="groupFilesNew"><svg><use href="#icon-plus"/></svg><span>Folder</span></button>
+        <button type="button" id="groupFilesUpload"><svg><use href="#icon-paperclip"/></svg><span>Upload</span></button>
+        <input type="file" id="groupFilesUploadInput" hidden>
+      </div>
+      <div class="group-files-capability" id="groupFilesCapability"></div>
+      <div class="group-files-list" id="groupFilesList"></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const list = overlay.querySelector('#groupFilesList');
+  const path = overlay.querySelector('#groupFilesPath');
+  const usage = overlay.querySelector('#groupFilesUsage');
+  const capability = overlay.querySelector('#groupFilesCapability');
+  const back = overlay.querySelector('#groupFilesBack');
+  const create = overlay.querySelector('#groupFilesNew');
+  const upload = overlay.querySelector('#groupFilesUpload');
+  const uploadInput = overlay.querySelector('#groupFilesUploadInput');
+  const stack = [{id: '', name: '/'}];
+  let packetAvailable = false;
+  let loading = false;
+  const close = () => overlay.remove();
+
+  async function mutate(url, method, payload) {
+    const response = await api(url, {
+      method,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_id: chatId, ...payload}),
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Group file operation failed');
+    return data;
+  }
+
+  function actionButton(label, action, disabled = false) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'group-file-action';
+    button.textContent = label;
+    button.disabled = disabled;
+    if (!disabled) button.addEventListener('click', action);
+    return button;
+  }
+
+  async function load() {
+    if (loading) return;
+    loading = true;
+    list.innerHTML = '<div class="group-files-state"><div class="loading-spinner"></div><span>Loading files...</span></div>';
+    const folder = stack[stack.length - 1];
+    path.textContent = stack.map(item => item.name).join(' / ').replace(/^\/ \/ /, '/ ');
+    back.disabled = stack.length === 1;
+    create.disabled = stack.length !== 1;
+    try {
+      const response = await api(`/api/group-files?chat_id=${encodeURIComponent(chatId)}&folder_id=${encodeURIComponent(folder.id)}`);
+      const data = await readJsonResponse(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Group files unavailable');
+      packetAvailable = !!data.packet_available;
+      capability.textContent = packetAvailable ? '' : 'Rename and move require the NapCat packet backend.';
+      const info = data.info || {};
+      usage.textContent = info.file_count !== undefined
+        ? `${info.file_count} files${info.total_space ? ` · ${humanFileSize(info.used_space || 0)} / ${humanFileSize(info.total_space)}` : ''}`
+        : '';
+      list.replaceChildren();
+      const folders = Array.isArray(data.folders) ? data.folders : [];
+      const files = Array.isArray(data.files) ? data.files : [];
+      if (!folders.length && !files.length) {
+        const empty = document.createElement('div');
+        empty.className = 'group-files-empty';
+        empty.textContent = 'This folder is empty.';
+        list.appendChild(empty);
+      }
+      for (const folderItem of folders) {
+        const row = document.createElement('div');
+        row.className = 'group-file-row';
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'group-file-main';
+        const name = String(folderItem.folder_name || folderItem.name || folderItem.folder_id || 'Folder');
+        open.innerHTML = `<span class="group-file-kind">DIR</span><span class="group-file-copy"><strong></strong><small></small></span>`;
+        open.querySelector('strong').textContent = name;
+        open.querySelector('small').textContent = `${Number(folderItem.total_file_count || 0)} files`;
+        open.addEventListener('click', () => {
+          stack.push({id: String(folderItem.folder_id || folderItem.folder || ''), name});
+          load();
+        });
+        const actions = document.createElement('div');
+        actions.className = 'group-file-actions';
+        actions.append(actionButton('Delete', async () => {
+          if (!confirm(`Delete folder "${name}"?`)) return;
+          try {
+            await mutate('/api/group-files/folders', 'DELETE', {folder_id: folderItem.folder_id || folderItem.folder});
+            await load();
+          } catch (error) { showModal(error.message); }
+        }));
+        row.append(open, actions);
+        list.appendChild(row);
+      }
+      for (const file of files) {
+        const row = document.createElement('div');
+        row.className = 'group-file-row';
+        const main = document.createElement('a');
+        main.className = 'group-file-main';
+        main.href = fileDownloadUrl(file);
+        const name = String(file.file_name || file.name || file.file_id || 'File');
+        main.innerHTML = `<span class="group-file-kind">FILE</span><span class="group-file-copy"><strong></strong><small></small></span>`;
+        main.querySelector('strong').textContent = name;
+        main.querySelector('small').textContent = humanFileSize(file.file_size || file.size || 0);
+        const actions = document.createElement('div');
+        actions.className = 'group-file-actions';
+        actions.append(
+          actionButton('Rename', async () => {
+            const newName = prompt('New file name', name);
+            if (!newName || newName === name) return;
+            try {
+              await mutate('/api/group-files/files/rename', 'POST', {file_id: file.file_id, parent_id: folder.id || '/', new_name: newName});
+              await load();
+            } catch (error) { showModal(error.message); }
+          }, !packetAvailable),
+          actionButton('Move', async () => {
+            const target = prompt('Target folder ID (/ for root)', '/');
+            if (target === null) return;
+            try {
+              await mutate('/api/group-files/files/move', 'POST', {file_id: file.file_id, parent_id: folder.id || '/', target_id: target || '/'});
+              await load();
+            } catch (error) { showModal(error.message); }
+          }, !packetAvailable),
+          actionButton('Delete', async () => {
+            if (!confirm(`Delete file "${name}"?`)) return;
+            try {
+              await mutate('/api/group-files/files', 'DELETE', {file_id: file.file_id});
+              await load();
+            } catch (error) { showModal(error.message); }
+          }),
+        );
+        row.append(main, actions);
+        list.appendChild(row);
+      }
+    } catch (error) {
+      list.replaceChildren();
+      const state = document.createElement('div');
+      state.className = 'group-files-empty group-files-error';
+      state.textContent = error.message || String(error);
+      list.appendChild(state);
+    } finally {
+      loading = false;
+    }
+  }
+
+  overlay.querySelector('#groupFilesClose').addEventListener('click', close);
+  overlay.addEventListener('pointerdown', event => { if (event.target === overlay) close(); });
+  back.addEventListener('click', () => { if (stack.length > 1) { stack.pop(); load(); } });
+  create.addEventListener('click', async () => {
+    const name = prompt('New folder name');
+    if (!name) return;
+    try { await mutate('/api/group-files/folders', 'POST', {name}); await load(); }
+    catch (error) { showModal(error.message); }
+  });
+  upload.addEventListener('click', () => uploadInput.click());
+  uploadInput.addEventListener('change', async () => {
+    const file = uploadInput.files && uploadInput.files[0];
+    uploadInput.value = '';
+    if (!file) return;
+    if (file.size > 100 * 1024 * 1024) { showModal('File is larger than 100 MB'); return; }
+    upload.disabled = true;
+    try {
+      const form = new FormData();
+      form.append('chat_id', chatId);
+      form.append('folder_id', stack[stack.length - 1].id);
+      form.append('file', file);
+      const response = await api('/api/group-files/upload', {method: 'POST', body: form});
+      const data = await readJsonResponse(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Upload failed');
+      await load();
+    } catch (error) { showModal(error.message); }
+    finally { upload.disabled = false; }
+  });
+  load();
+}
+
 function normalizeGroupMembers(rawMembers) {
   if (!Array.isArray(rawMembers) || !rawMembers.length) {
     return Object.entries(nicknames || {}).map(([uid, name]) => normalizeGroupMember({user_id: uid, display_name: name}));
@@ -3166,6 +3362,7 @@ $('selectionForward').addEventListener('click', openSelectedMessagesForward);
 $('customForwardButton').addEventListener('click', openCustomForwardComposer);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
 $('memberListButton').addEventListener('click', showMemberList);
+$('groupFilesButton').addEventListener('click', showGroupFileManager);
 $('portalSelect').addEventListener('change', e => {
   selectedPortalPluginId = e.target.value;
 });

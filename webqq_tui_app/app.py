@@ -28,6 +28,7 @@ from .models import (
     format_message,
     forward_nodes,
     forward_status_label,
+    human_size,
     message_matches,
 )
 
@@ -388,6 +389,200 @@ class RichMediaDialog(ModalScreen):
         self.dismiss(None)
 
 
+class GroupFileListItem(ListItem):
+    def __init__(self, kind: str, data: Mapping[str, Any]):
+        self.kind = kind
+        self.data = dict(data)
+        if kind == "folder":
+            name = str(data.get("folder_name") or data.get("name") or data.get("folder_id") or "Folder")
+            detail = "{} files".format(data.get("total_file_count") or 0)
+            label = "[DIR] {}  {}".format(name, detail)
+        else:
+            name = str(data.get("file_name") or data.get("name") or data.get("file_id") or "File")
+            size = human_size(int(data.get("file_size") or data.get("size") or 0))
+            label = "[FILE] {}{}".format(name, "  " + size if size else "")
+        super().__init__(Static(label, markup=False))
+
+
+class GroupFileManager(ModalScreen):
+    BINDINGS = [
+        Binding("escape", "cancel", show=False), Binding("backspace", "parent", show=False),
+        Binding("u", "upload", show=False), Binding("n", "new_folder", show=False),
+        Binding("d", "delete", show=False), Binding("r", "rename", show=False),
+        Binding("m", "move", show=False),
+    ]
+    CSS = """
+    GroupFileManager { align: center middle; background: $background 70%; }
+    GroupFileManager > Container { width: 100; max-width: 98%; height: 92%; min-height: 7; border: solid $accent; background: $surface; padding: 1; }
+    GroupFileManager #group_file_title { height: 2; text-style: bold; }
+    GroupFileManager #group_file_path { height: 1; color: $text-muted; }
+    GroupFileManager #group_file_list { height: 1fr; }
+    GroupFileManager #group_file_list > ListItem { height: 2; padding: 0 1; }
+    GroupFileManager #group_file_prompt { display: none; margin: 0; border: none; }
+    GroupFileManager .hint { height: 1; color: $text-muted; }
+    """
+
+    def __init__(self, client: WebQQClient, chat_id: str):
+        super().__init__()
+        self.client = client
+        self.chat_id = chat_id
+        self.stack = [("", "/")]
+        self.packet_available = False
+        self.prompt_action = ""
+        self.prompt_item: Optional[GroupFileListItem] = None
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Group files", id="group_file_title")
+            yield Static("/", id="group_file_path")
+            yield NavigableListView(id="group_file_list")
+            yield Input(id="group_file_prompt")
+            yield Static("Enter open/download  u upload  n folder  d delete  r rename  m move  Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        await self._load()
+
+    @property
+    def folder_id(self) -> str:
+        return self.stack[-1][0]
+
+    async def _load(self) -> None:
+        title = self.query_one("#group_file_title", Static)
+        title.update("Group files  [loading]")
+        try:
+            payload = await self.client.group_files(self.chat_id, self.folder_id)
+            self.packet_available = bool(payload.get("packet_available"))
+            view = self.query_one("#group_file_list", ListView)
+            await view.clear()
+            folders = payload.get("folders") if isinstance(payload.get("folders"), list) else []
+            files = payload.get("files") if isinstance(payload.get("files"), list) else []
+            await view.extend([GroupFileListItem("folder", item) for item in folders if isinstance(item, dict)] + [
+                GroupFileListItem("file", item) for item in files if isinstance(item, dict)
+            ])
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            title.update("Group files  [{} items{}]".format(
+                len(folders) + len(files), " | rename/move unavailable" if not self.packet_available else "",
+            ))
+            self.query_one("#group_file_path", Static).update(" / ".join(name for _, name in self.stack))
+            if view.children:
+                view.index = 0
+            view.focus()
+        except Exception as exc:
+            title.update("Group files  [error: {}]".format(exc))
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if not isinstance(event.item, GroupFileListItem):
+            return
+        if event.item.kind == "folder":
+            folder_id = str(event.item.data.get("folder_id") or event.item.data.get("folder") or "")
+            name = str(event.item.data.get("folder_name") or folder_id)
+            if folder_id:
+                self.stack.append((folder_id, name))
+                self.app._spawn(self._load())
+        else:
+            self.app._spawn(self._download(event.item.data))
+
+    async def _download(self, file: Mapping[str, Any]) -> None:
+        name = str(file.get("file_name") or file.get("name") or "file")
+        self.query_one("#group_file_title", Static).update("Downloading {}...".format(name))
+        try:
+            path = await self.client.download_group_file(self.chat_id, file)
+            self.query_one("#group_file_title", Static).update("Downloaded to {}".format(path))
+        except Exception as exc:
+            self.query_one("#group_file_title", Static).update("Download failed: {}".format(exc))
+
+    def _selected(self) -> Optional[GroupFileListItem]:
+        item = self.query_one("#group_file_list", ListView).highlighted_child
+        return item if isinstance(item, GroupFileListItem) else None
+
+    def _prompt(self, action: str, placeholder: str, item: Optional[GroupFileListItem] = None) -> None:
+        prompt = self.query_one("#group_file_prompt", Input)
+        self.prompt_action = action
+        self.prompt_item = item
+        prompt.placeholder = placeholder
+        prompt.value = ""
+        prompt.styles.display = "block"
+        prompt.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "group_file_prompt":
+            return
+        value = event.value.strip()
+        action = self.prompt_action
+        item = self.prompt_item
+        self._hide_prompt()
+        if value:
+            self.app._spawn(self._perform(action, value, item))
+
+    def _hide_prompt(self) -> None:
+        prompt = self.query_one("#group_file_prompt", Input)
+        prompt.styles.display = "none"
+        prompt.value = ""
+        self.prompt_action = ""
+        self.prompt_item = None
+        self.query_one("#group_file_list", ListView).focus()
+
+    async def _perform(self, action: str, value: str, item: Optional[GroupFileListItem]) -> None:
+        try:
+            if action == "upload":
+                await self.client.upload_group_file(self.chat_id, Path(value), self.folder_id)
+            elif action == "mkdir":
+                await self.client.create_group_folder(self.chat_id, value)
+            elif action == "delete" and item and value == "DELETE":
+                if item.kind == "folder":
+                    await self.client.delete_group_folder(self.chat_id, str(item.data.get("folder_id") or item.data.get("folder")))
+                else:
+                    await self.client.delete_group_file(self.chat_id, str(item.data.get("file_id")))
+            elif action == "rename" and item:
+                await self.client.rename_group_file(self.chat_id, str(item.data.get("file_id")), self.folder_id or "/", value)
+            elif action == "move" and item:
+                await self.client.move_group_file(self.chat_id, str(item.data.get("file_id")), self.folder_id or "/", value)
+            else:
+                return
+            await self._load()
+        except Exception as exc:
+            self.query_one("#group_file_title", Static).update("Operation failed: {}".format(exc))
+
+    def action_upload(self) -> None:
+        self._prompt("upload", "Local path to upload")
+
+    def action_new_folder(self) -> None:
+        if self.folder_id:
+            self.query_one("#group_file_title", Static).update("NapCat can only create root folders")
+            return
+        self._prompt("mkdir", "New folder name")
+
+    def action_delete(self) -> None:
+        item = self._selected()
+        if item:
+            self._prompt("delete", "Type DELETE to confirm", item)
+
+    def action_rename(self) -> None:
+        item = self._selected()
+        if not self.packet_available:
+            self.query_one("#group_file_title", Static).update("Rename requires the NapCat packet backend")
+        elif item and item.kind == "file":
+            self._prompt("rename", "New file name", item)
+
+    def action_move(self) -> None:
+        item = self._selected()
+        if not self.packet_available:
+            self.query_one("#group_file_title", Static).update("Move requires the NapCat packet backend")
+        elif item and item.kind == "file":
+            self._prompt("move", "Target folder ID; / for root", item)
+
+    def action_parent(self) -> None:
+        if len(self.stack) > 1:
+            self.stack.pop()
+            self.app._spawn(self._load())
+
+    def action_cancel(self) -> None:
+        if self.query_one("#group_file_prompt", Input).styles.display != "none":
+            self._hide_prompt()
+        else:
+            self.dismiss(None)
+
+
 class WebQQTui(App):
     TITLE = "WebQQ"
     SUB_TITLE = "Terminal client"
@@ -406,6 +601,7 @@ class WebQQTui(App):
         Binding("ctrl+i", "send_image", show=False),
         Binding("f3", "send_media", show=False),
         Binding("t", "transcribe", show=False),
+        Binding("f4", "group_files", show=False),
     ]
     CSS = """
     Screen { background: #111418; color: #e8eaed; }
@@ -1130,6 +1326,12 @@ class WebQQTui(App):
         except Exception as exc:
             self._set_notice("Transcription failed: {}".format(exc))
 
+    def action_group_files(self) -> None:
+        if not self.current_chat or self.current_chat.chat_type != "group":
+            self._set_notice("Group files are only available in group chats")
+            return
+        self.push_screen(GroupFileManager(self.client, self.current_chat.chat_id))
+
     def action_find(self) -> None:
         if self.narrow and not self.conversation_visible:
             self.query_one("#chat_filter", Input).focus()
@@ -1239,7 +1441,7 @@ class WebQQTui(App):
         if self._account_status:
             parts.append(self._account_status)
         if not self.short:
-            parts.append("Ctrl+F find  F3 media  t transcribe  Ctrl+I image  Ctrl+O file")
+            parts.append("Ctrl+F find  F3 media  F4 group files  t transcribe  Ctrl+I image  Ctrl+O file")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 

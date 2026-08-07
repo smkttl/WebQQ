@@ -760,6 +760,36 @@ svg {
 .member-error { color: var(--coral); }
 .member-loading { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px; color: var(--text-muted); font-size: 12px; }
 
+.group-files-overlay { padding: 14px; }
+.group-files-modal { width: min(920px, 96vw); height: min(720px, 92vh); display: flex; flex-direction: column; padding: 0; overflow: hidden; text-align: left; }
+.group-files-head { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); }
+.group-files-head > div { min-width: 0; flex: 1; }
+.group-files-head h2 { margin: 0; font-size: 17px; }
+.group-files-head span { display: block; margin-top: 3px; color: var(--text-muted); font-size: 10px; }
+.group-files-toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; padding: 10px 18px; border-bottom: 1px solid var(--line); }
+.group-files-toolbar button { min-height: 34px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface-subtle); color: var(--text); font-size: 11px; cursor: pointer; }
+.group-files-toolbar button:disabled { color: var(--text-muted); cursor: default; opacity: .55; }
+.group-files-toolbar button svg { width: 14px; height: 14px; }
+.group-files-path { min-width: 0; flex: 1; overflow: hidden; color: var(--text-soft); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.group-files-capability { display: none; flex: 0 0 auto; padding: 7px 18px; border-bottom: 1px solid var(--line); background: var(--amber-soft); color: var(--amber); font-size: 10px; }
+.group-files-capability:not(:empty) { display: block; }
+.group-files-list { min-height: 0; flex: 1; overflow-y: auto; }
+.group-file-row { min-height: 58px; display: flex; align-items: center; gap: 10px; padding: 7px 18px; border-bottom: 1px solid var(--line); }
+.group-file-main { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; padding: 0; border: 0; background: transparent; color: var(--text); text-align: left; text-decoration: none; cursor: pointer; }
+.group-file-kind { width: 36px; flex: 0 0 36px; color: var(--accent-strong); font-size: 9px; font-weight: 730; }
+.group-file-copy { min-width: 0; display: grid; gap: 3px; }
+.group-file-copy strong,
+.group-file-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-file-copy strong { font-size: 12px; }
+.group-file-copy small { color: var(--text-muted); font-size: 10px; }
+.group-file-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+.group-file-action { min-height: 29px; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); color: var(--text-soft); font-size: 10px; cursor: pointer; }
+.group-file-action:hover { border-color: var(--accent); }
+.group-file-action:disabled { color: var(--text-muted); opacity: .45; cursor: default; }
+.group-files-state,
+.group-files-empty { min-height: 150px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 20px; color: var(--text-muted); font-size: 12px; text-align: center; }
+.group-files-error { color: var(--coral); }
+
 .reaction-users { display: grid; gap: 8px; margin: 0 0 18px; text-align: left; }
 .reaction-user { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; line-height: 1.4; }
 .reaction-user .uid { color: var(--text-muted); font-size: 10px; }
@@ -840,6 +870,14 @@ svg {
   .forward-node-identity { grid-template-columns: 1fr; }
   .forward-compose-error { margin-inline: 13px; }
   .forward-compose-actions { padding-inline: 13px; }
+  .group-files-overlay { padding: 0; }
+  .group-files-modal { width: 100%; height: var(--app-height); max-width: none; max-height: none; border: 0; border-radius: 0; }
+  .group-files-head { padding-inline: 12px; }
+  .group-files-toolbar { flex-wrap: wrap; padding-inline: 10px; }
+  .group-files-path { order: 4; width: 100%; flex-basis: 100%; }
+  .group-file-row { align-items: flex-start; flex-direction: column; padding-inline: 12px; }
+  .group-file-main { width: 100%; }
+  .group-file-actions { width: 100%; overflow-x: auto; }
 }
 
 @media (max-width: 390px) {

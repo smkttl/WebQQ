@@ -151,6 +151,31 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertTrue(any(segment.get("type") == "face" for segment in message))
 
+    async def test_group_file_actions_match_4182_schemas(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            if action == "get_group_files_by_folder":
+                return {"status": "ok", "data": {"files": [], "folders": []}}
+            return {"status": "ok", "data": {}}
+
+        connection._request = request
+        listing, info, packet = await connection.group_files(7, "folder-1")
+        await connection.upload_group_file(7, "/tmp/a", "a.txt", "folder-1")
+        await connection.rename_group_file(7, "file-1", "folder-1", "b.txt")
+        await connection.move_group_file(7, "file-1", "folder-1", "/")
+        by_action = {action: (params, timeout) for action, params, timeout in calls}
+        self.assertEqual(listing["status"], "ok")
+        self.assertEqual(info["status"], "ok")
+        self.assertTrue(packet)
+        self.assertEqual(by_action["get_group_files_by_folder"][0]["folder_id"], "folder-1")
+        self.assertEqual(by_action["upload_group_file"][0]["folder_id"], "folder-1")
+        self.assertEqual(by_action["rename_group_file"][0]["current_parent_directory"], "folder-1")
+        self.assertEqual(by_action["move_group_file"][0]["target_parent_directory"], "/")
+
     async def test_group_messages_still_send_mentions(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace())
@@ -312,6 +337,7 @@ class ImageSendHandlerTests(unittest.IsolatedAsyncioTestCase):
         def __init__(self, name, value):
             self.name = name
             self.value = value
+            self.filename = "upload.bin" if name == "file" else None
             self.sent = False
 
         async def text(self):
@@ -473,6 +499,67 @@ class VoiceTranscriptionTests(unittest.IsolatedAsyncioTestCase):
             )
             response = await api.handle_message_transcribe(request)
             self.assertEqual(response.status, 400)
+
+
+class GroupFileHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_listing_reports_files_info_and_packet_capability(self):
+        async def group_files(group_id, folder_id):
+            self.assertEqual((group_id, folder_id), (42, "folder"))
+            return (
+                {"status": "ok", "data": {"files": [{"file_id": "f", "file_name": "a.txt"}], "folders": []}},
+                {"status": "ok", "data": {"file_count": 1}},
+                False,
+            )
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(group_files=group_files)},
+            query={"chat_id": "group_42", "folder_id": "folder"}, cookies={}, headers={}, remote="",
+        )
+        response = await api.handle_group_files(request)
+        body = json.loads(response.text)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(body["files"][0]["file_id"], "f")
+        self.assertFalse(body["packet_available"])
+
+    async def test_rename_validates_and_passes_parent(self):
+        calls = []
+
+        async def rename(group_id, file_id, parent_id, new_name):
+            calls.append((group_id, file_id, parent_id, new_name))
+            return {"status": "ok", "data": {"ok": True}}
+
+        async def request_json():
+            return {"chat_id": "group_42", "file_id": "encoded", "parent_id": "folder", "new_name": "new.txt"}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(rename_group_file=rename)},
+            query={}, cookies={}, headers={}, remote="", json=request_json,
+        )
+        response = await api.handle_group_file_rename(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calls, [(42, "encoded", "folder", "new.txt")])
+
+    async def test_upload_uses_current_folder_and_cleans_temporary_file(self):
+        captured = {}
+
+        async def upload(group_id, path, name, folder_id):
+            captured.update(group_id=group_id, path=path, name=name, folder_id=folder_id, body=Path(path).read_bytes())
+            return {"status": "ok", "data": {"file_id": "f"}}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(upload_group_file=upload)},
+            query={}, cookies={}, headers={}, remote="",
+        )
+        request.multipart = lambda: ImageSendHandlerTests()._multipart([
+            ImageSendHandlerTests.Part("chat_id", "group_9"),
+            ImageSendHandlerTests.Part("folder_id", "folder"),
+            ImageSendHandlerTests.Part("file", b"body"),
+        ])
+        response = await api.handle_group_file_upload(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(captured["folder_id"], "folder")
+        self.assertEqual(captured["body"], b"body")
+        self.assertFalse(Path(captured["path"]).exists())
 
 
 class QzoneHandlerTests(unittest.IsolatedAsyncioTestCase):

@@ -421,6 +421,53 @@ class NapCatConnection:
             raise RuntimeError("not connected to NapCat")
         return await self._request("fetch_ptt_text", {"message_id": str(message_id)}, timeout=30)
 
+    async def group_files(self, group_id, folder_id="", file_count=200):
+        params = {"group_id": str(group_id), "file_count": int(file_count)}
+        action = "get_group_root_files"
+        if folder_id:
+            action = "get_group_files_by_folder"
+            params["folder_id"] = str(folder_id)
+        listing, info, packet = await asyncio.gather(
+            self._request(action, params, timeout=30),
+            self._request("get_group_file_system_info", {"group_id": str(group_id)}, timeout=15),
+            self._request("nc_get_packet_status", {}, timeout=10),
+        )
+        return listing, info, bool(packet and packet.get("status") == "ok")
+
+    async def upload_group_file(self, group_id, path, name, folder_id=""):
+        params = {"group_id": str(group_id), "file": str(path), "name": str(name)}
+        if folder_id:
+            params["folder_id"] = str(folder_id)
+        return await self._request("upload_group_file", params, timeout=120)
+
+    async def create_group_file_folder(self, group_id, name):
+        return await self._request("create_group_file_folder", {
+            "group_id": str(group_id), "folder_name": str(name),
+        }, timeout=30)
+
+    async def delete_group_file(self, group_id, file_id):
+        return await self._request("delete_group_file", {
+            "group_id": str(group_id), "file_id": str(file_id),
+        }, timeout=30)
+
+    async def delete_group_file_folder(self, group_id, folder_id):
+        return await self._request("delete_group_folder", {
+            "group_id": str(group_id), "folder_id": str(folder_id),
+        }, timeout=30)
+
+    async def rename_group_file(self, group_id, file_id, parent_id, new_name):
+        return await self._request("rename_group_file", {
+            "group_id": str(group_id), "file_id": str(file_id),
+            "current_parent_directory": str(parent_id or "/"), "new_name": str(new_name),
+        }, timeout=30)
+
+    async def move_group_file(self, group_id, file_id, parent_id, target_id):
+        return await self._request("move_group_file", {
+            "group_id": str(group_id), "file_id": str(file_id),
+            "current_parent_directory": str(parent_id or "/"),
+            "target_parent_directory": str(target_id or "/"),
+        }, timeout=30)
+
     async def send_segments(self, chat_id, message, timeout=10):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")

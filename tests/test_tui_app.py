@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView, Static
 
-from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, MemberPicker, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, GroupFileManager, MemberPicker, RichMediaDialog, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -20,6 +20,7 @@ class FakeClient:
         self.images = []
         self.rich_media = []
         self.transcriptions = []
+        self.group_file_calls = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -79,6 +80,18 @@ class FakeClient:
             "chat_id": chat_id, "message_id": message_id, "time": 1, "sender_name": "Alice",
             "content": "[voice]", "records": [{"file": "voice.amr", "transcript": "spoken words"}],
         }}
+
+    async def group_files(self, chat_id, folder_id=""):
+        self.group_file_calls.append(("list", chat_id, folder_id))
+        return {
+            "ok": True, "packet_available": False, "info": {"file_count": 1},
+            "folders": [{"folder_id": "dir", "folder_name": "Docs", "total_file_count": 1}],
+            "files": [{"file_id": "file", "file_name": "readme.txt", "file_size": 10}],
+        }
+
+    async def download_group_file(self, chat_id, file, progress=None):
+        self.group_file_calls.append(("download", chat_id, file["file_id"]))
+        return Path("/tmp/readme.txt")
 
     async def poke(self, chat_id, user_id):
         self.poked.append((chat_id, user_id))
@@ -375,6 +388,21 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.05)
             self.assertEqual(client.transcriptions, [("group_1", "7")])
             self.assertEqual(app.messages[0].attachments[0].data["transcript"], "spoken words")
+
+    async def test_f4_group_file_manager_is_small_terminal_safe(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("f4")
+            await pilot.pause(0.05)
+            self.assertIsInstance(app.screen, GroupFileManager)
+            self.assertLessEqual(app.screen.query_one("#group_file_list", ListView).region.right, app.size.width)
+            self.assertEqual(client.group_file_calls[0], ("list", "group_1", ""))
+            await pilot.press("escape")
+            self.assertNotIsInstance(app.screen, GroupFileManager)
 
     async def test_face_reply_picker_filters_sends_and_escapes_on_small_terminal(self):
         client = FakeClient()

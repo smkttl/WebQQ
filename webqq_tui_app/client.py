@@ -167,6 +167,69 @@ class WebQQClient:
         self._require_ok(payload, "voice transcription failed")
         return payload
 
+    async def group_files(self, chat_id: str, folder_id: str = "") -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "GET", "/api/group-files", params={"chat_id": chat_id, "folder_id": folder_id},
+        )
+        self._require_ok(payload, "group files load failed")
+        return payload
+
+    async def upload_group_file(self, chat_id: str, path: Path, folder_id: str = "") -> Mapping[str, Any]:
+        path = path.expanduser().resolve()
+        if not path.is_file():
+            raise WebQQClientError("file does not exist: {}".format(path))
+        size = path.stat().st_size
+        if size <= 0:
+            raise WebQQClientError("file is empty")
+        if size > MAX_UPLOAD_SIZE:
+            raise WebQQClientError("file is larger than 100 MB")
+        form = aiohttp.FormData()
+        form.add_field("chat_id", chat_id)
+        form.add_field("folder_id", folder_id)
+        with path.open("rb") as body:
+            form.add_field(
+                "file", body, filename=path.name,
+                content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            )
+            try:
+                async with self._session().post(self.endpoint("/api/group-files/upload"), data=form) as response:
+                    payload = await self._read_json(response)
+            except (aiohttp.ClientError, OSError) as exc:
+                raise WebQQClientError("group file upload failed: {}".format(exc)) from exc
+        self._require_ok(payload, "group file upload failed")
+        return payload
+
+    async def create_group_folder(self, chat_id: str, name: str) -> Mapping[str, Any]:
+        return await self._group_file_json("POST", "/api/group-files/folders", {"chat_id": chat_id, "name": name})
+
+    async def delete_group_file(self, chat_id: str, file_id: str) -> Mapping[str, Any]:
+        return await self._group_file_json("DELETE", "/api/group-files/files", {"chat_id": chat_id, "file_id": file_id})
+
+    async def delete_group_folder(self, chat_id: str, folder_id: str) -> Mapping[str, Any]:
+        return await self._group_file_json("DELETE", "/api/group-files/folders", {"chat_id": chat_id, "folder_id": folder_id})
+
+    async def rename_group_file(self, chat_id: str, file_id: str, parent_id: str, new_name: str) -> Mapping[str, Any]:
+        return await self._group_file_json("POST", "/api/group-files/files/rename", {
+            "chat_id": chat_id, "file_id": file_id, "parent_id": parent_id, "new_name": new_name,
+        })
+
+    async def move_group_file(self, chat_id: str, file_id: str, parent_id: str, target_id: str) -> Mapping[str, Any]:
+        return await self._group_file_json("POST", "/api/group-files/files/move", {
+            "chat_id": chat_id, "file_id": file_id, "parent_id": parent_id, "target_id": target_id,
+        })
+
+    async def _group_file_json(self, method: str, endpoint: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = await self._request_json(method, endpoint, json_body=body)
+        self._require_ok(payload, "group file operation failed")
+        return payload
+
+    async def download_group_file(
+        self, chat_id: str, file: Mapping[str, Any], progress: Optional[Callable[[int, int], None]] = None,
+    ) -> Path:
+        name = str(file.get("file_name") or file.get("name") or "file")
+        attachment = Attachment("file", name, int(file.get("file_size") or file.get("size") or 0), dict(file))
+        return await self.download_attachment(chat_id, attachment, progress=progress)
+
     async def _send_upload(self, chat_id: str, path: Path, endpoint: str, kind: str) -> Mapping[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():
