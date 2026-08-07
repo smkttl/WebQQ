@@ -1,5 +1,6 @@
 from .common import *
 from .mentions import MENTION_PATTERN
+from .qzone import delete_qzone_post, publish_qzone_post
 
 class NapCatConnection:
     def __init__(self, ws_url, token, store, plugins=None):
@@ -514,22 +515,21 @@ class NapCatConnection:
         }, timeout=timeout)
 
     async def send_qzone_post(self, content, images=None, ugc_right=1, target_uins=None):
-        """Publish a personal Qzone post through NapCat's native action."""
+        """Publish a Qzone post using credentials from NapCat 4.18.2."""
         if not self.ws:
             raise RuntimeError("not connected to NapCat")
-        params = {
-            "content": content,
-            "images": list(images or []),
-            "ugc_right": int(ugc_right),
-            "target_uins": [str(uid) for uid in (target_uins or [])],
-        }
-        return await self._request("send_qzone_msg", params, timeout=180)
+        data = await publish_qzone_post(
+            self._request, content, list(images or []), int(ugc_right),
+            [str(uid) for uid in (target_uins or [])],
+        )
+        return {"status": "ok", "data": data}
 
     async def delete_qzone_post(self, tid):
-        """Delete a personal Qzone post by its transaction id."""
+        """Delete a Qzone post using credentials from NapCat 4.18.2."""
         if not self.ws:
             raise RuntimeError("not connected to NapCat")
-        return await self._request("delete_qzone_msg", {"tid": str(tid)}, timeout=30)
+        await delete_qzone_post(self._request, str(tid))
+        return {"status": "ok", "data": None}
 
     async def send_forward(self, chat_id, nodes):
         if not self.ws:

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import tempfile
 import time
@@ -22,6 +23,13 @@ from webqq_app.common import (
     recall_notice_text,
 )
 from webqq_app.napcat import NapCatConnection
+from webqq_app.qzone import (
+    parse_qzone_upload,
+    qzone_auth_from_cookies,
+    qzone_delete_form,
+    qzone_gtk,
+    qzone_publish_form,
+)
 from webqq_app.messaging import normalize_forward_nodes, send_forward_and_register, send_text_and_register
 from webqq_app.mentions import format_mentions_for_agent
 from webqq_app.plugins import PluginContext, PluginManager
@@ -43,6 +51,32 @@ class ChatIdTests(unittest.TestCase):
         self.assertEqual(canonical_chat_id("group_123"), "group_123")
         self.assertEqual(canonical_chat_id("bad"), "bad")
 
+
+class QzoneDataTests(unittest.TestCase):
+    def test_auth_uses_skey_gtk_and_exact_cookie_shape(self):
+        auth = qzone_auth_from_cookies("p_skey=ps-secret; uin=o123456; skey=@secret")
+        self.assertEqual(qzone_gtk("@secret"), "1441526987")
+        self.assertEqual(auth["g_tk"], "1441526987")
+        self.assertEqual(auth["cookie"], "p_uin=o123456; p_skey=ps-secret; skey=@secret; uin=o123456")
+
+    def test_upload_publish_and_delete_data_match_upstream(self):
+        richval = parse_qzone_upload(
+            'frameElement.callback({"code":0,"data":{"albumid":"a1","lloc":"l1","type":"22","height":"100","width":"200"}});</script>'
+        )
+        self.assertEqual(richval, ",a1,l1,l1,22,100,200,,100,200")
+        auth = {"uin": "123456"}
+        publish = qzone_publish_form(auth, "hello", [richval, richval], 16, ["1", "2"])
+        self.assertEqual(publish["richval"], richval + "\t" + richval)
+        self.assertEqual(publish["allow_uins"], "1|2")
+        self.assertEqual(publish["who"], "1")
+        delete = qzone_delete_form(auth, "tid123")
+        self.assertEqual(delete["t1_source"], "1")
+        self.assertEqual(delete["tid"], "tid123")
+
+    def test_missing_cookie_error_does_not_expose_cookie_value(self):
+        with self.assertRaisesRegex(RuntimeError, "credentials are unavailable") as caught:
+            qzone_auth_from_cookies("uin=o123456; skey=private-secret")
+        self.assertNotIn("private-secret", str(caught.exception))
 
 class NapCatParsingTests(unittest.TestCase):
     def test_plain_text_stays_plain_without_reply(self):
@@ -228,31 +262,75 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             ("send_poke", {"user_id": 10003, "group_id": 123}, 10),
         ])
 
-    async def test_qzone_actions_use_native_actions(self):
+    async def test_qzone_actions_backport_41818_through_get_cookies(self):
         calls = []
+        sessions = []
         connection = NapCatConnection("", "", SimpleNamespace())
         connection.ws = object()
 
         async def request(action, params, timeout=10):
             calls.append((action, params, timeout))
-            if action == "send_qzone_msg":
-                return {"status": "ok", "data": {"tid": "abc123"}}
-            return {"status": "ok"}
+            return {"status": "ok", "data": {
+                "cookies": "uin=o123456; skey=@secret; p_uin=o123456; p_skey=ps-secret",
+                "bkn": "ignored",
+            }}
+
+        class Response:
+            status = 200
+
+            def __init__(self, text):
+                self.body = text
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def text(self):
+                return self.body
+
+        class Session:
+            def __init__(self):
+                self.posts = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            def post(self, url, data, headers):
+                self.posts.append((url, data, headers))
+                if "upload" in url:
+                    return Response('frameElement.callback({"code":0,"data":{"albumid":"a","lloc":"l","type":"22","height":"10","width":"20"}});</script>')
+                if "publish" in url:
+                    return Response('{"subcode":0,"t1_tid":"abc123"}')
+                return Response('{"subcode":0}')
+
+        def session_factory():
+            session = Session()
+            sessions.append(session)
+            return session
 
         connection._request = request
-        result = await connection.send_qzone_post("hello", ["file:///tmp/a.png"], 16, [123, "456"])
-        await connection.delete_qzone_post("abc123")
+        with tempfile.TemporaryDirectory() as tmp, patch("webqq_app.qzone._qzone_session", side_effect=session_factory):
+            image = Path(tmp, "image.png")
+            image.write_bytes(b"image")
+            result = await connection.send_qzone_post(
+                "hello", [image.resolve().as_uri(), "base64://" + base64.b64encode(b"two").decode("ascii")], 16, [123, "456"],
+            )
+            await connection.delete_qzone_post("abc123")
 
         self.assertEqual(result["data"]["tid"], "abc123")
         self.assertEqual(calls, [
-            ("send_qzone_msg", {
-                "content": "hello",
-                "images": ["file:///tmp/a.png"],
-                "ugc_right": 16,
-                "target_uins": ["123", "456"],
-            }, 180),
-            ("delete_qzone_msg", {"tid": "abc123"}, 30),
+            ("get_cookies", {"domain": "qzone.qq.com"}, 30),
+            ("get_cookies", {"domain": "qzone.qq.com"}, 30),
         ])
+        publish = next(post for post in sessions[0].posts if "publish" in post[0])
+        self.assertEqual(publish[1]["richval"].count("\t"), 1)
+        self.assertEqual(publish[1]["allow_uins"], "123|456")
+        self.assertEqual(publish[2]["Cookie"], "p_uin=o123456; p_skey=ps-secret; skey=@secret; uin=o123456")
 
     async def test_fetch_forward_retries_napcat_parameter_alias(self):
         calls = []
