@@ -17,6 +17,14 @@ BACKGROUND_IMAGE_EXTENSIONS = {
     "bmp": ".bmp",
 }
 MUSIC_PLATFORMS = {"qq", "163", "kugou", "migu", "kuwo"}
+GROUP_CONTENT_KINDS = {
+    "notices", "essence", "honors", "muted", "albums", "album_media", "ignored", "detail",
+}
+GROUP_MANAGER_ACTIONS = {
+    "kick", "kick_many", "mute", "whole_mute", "admin", "card", "title", "group_name",
+    "add_option", "search", "robot", "notice_create", "notice_delete", "essence_set",
+    "essence_delete", "todo_set", "todo_complete", "todo_cancel", "album_delete",
+}
 
 
 def _qzone_error(result, fallback):
@@ -25,6 +33,18 @@ def _qzone_error(result, fallback):
     if not isinstance(result, dict):
         return str(result)
     return result.get("wording", result.get("message", fallback))
+
+
+def _onebot_error(result, fallback):
+    if not result:
+        return "not connected"
+    if not isinstance(result, dict):
+        return str(result)
+    return str(result.get("wording") or result.get("message") or fallback)
+
+
+def _onebot_data(result):
+    return result.get("data") if isinstance(result, dict) and result.get("status") == "ok" else None
 
 
 def _parse_qzone_right(value):
@@ -850,6 +870,302 @@ async def _handle_group_file_relocate(request, rename):
         status = 503 if result and "packet" in _group_file_error(result, "").lower() else 500
         return web.json_response({"ok": False, "error": _group_file_error(result, "file operation failed")}, status=status)
     return web.json_response({"ok": True, "data": result.get("data")})
+
+
+def _group_route_id(request):
+    group_id = str(request.match_info.get("group_id", "")).strip()
+    if not group_id.isdigit():
+        raise ValueError("group_id must be numeric")
+    return int(group_id)
+
+
+async def _group_role(request, group_id, refresh=False):
+    napcat = request.app["napcat"]
+    store = request.app["store"]
+    fetch = getattr(napcat, "_fetch_group_members", None)
+    chat_id = "group_{}".format(group_id)
+    if fetch and (refresh or chat_id not in store._group_member_details):
+        await fetch(group_id)
+    return store.current_group_role(group_id)
+
+
+def _group_bool(value, field):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, str)) and str(value).strip().lower() in ("1", "true"):
+        return True
+    if isinstance(value, (int, str)) and str(value).strip().lower() in ("0", "false"):
+        return False
+    raise ValueError("{} must be a boolean".format(field))
+
+
+def _group_int(value, field, minimum=0, maximum=2147483647):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("{} must be an integer".format(field))
+    if not minimum <= parsed <= maximum:
+        raise ValueError("{} must be between {} and {}".format(field, minimum, maximum))
+    return parsed
+
+
+def _group_text(body, field, maximum=2048, required=True):
+    value = str(body.get(field, "")).strip()
+    if required and not value:
+        raise ValueError("{} is required".format(field))
+    if len(value) > maximum:
+        raise ValueError("{} must be at most {} characters".format(field, maximum))
+    return value
+
+
+def _group_user_id(body, field="user_id"):
+    value = _group_text(body, field, 32)
+    if not value.isdigit():
+        raise ValueError("{} must be numeric".format(field))
+    return value
+
+
+def _normalize_group_action(action, body):
+    if action == "kick":
+        return {"user_id": _group_user_id(body), "reject_add_request": _group_bool(body.get("reject_add_request", False), "reject_add_request")}
+    if action == "kick_many":
+        values = body.get("user_ids")
+        if not isinstance(values, list) or not values or len(values) > 100:
+            raise ValueError("user_ids must be a non-empty array of at most 100 QQ ids")
+        user_ids = []
+        for value in values:
+            text = str(value).strip()
+            if not text.isdigit():
+                raise ValueError("user_ids must contain numeric QQ ids")
+            if text not in user_ids:
+                user_ids.append(text)
+        return {"user_id": user_ids, "reject_add_request": _group_bool(body.get("reject_add_request", False), "reject_add_request")}
+    if action == "mute":
+        return {"user_id": _group_user_id(body), "duration": _group_int(body.get("duration", 0), "duration", 0, 2592000)}
+    if action in ("whole_mute", "admin"):
+        result = {"enable": _group_bool(body.get("enable"), "enable")}
+        if action == "admin":
+            result["user_id"] = _group_user_id(body)
+        return result
+    if action == "card":
+        return {"user_id": _group_user_id(body), "card": _group_text(body, "card", 128, required=False)}
+    if action == "title":
+        return {"user_id": _group_user_id(body), "special_title": _group_text(body, "special_title", 128, required=False)}
+    if action == "group_name":
+        return {"group_name": _group_text(body, "group_name", 128)}
+    if action == "leave":
+        dismiss = _group_bool(body.get("is_dismiss", False), "is_dismiss")
+        if dismiss:
+            raise ValueError("group dissolution is not supported by NapCat 4.18.2")
+        return {"is_dismiss": False}
+    if action == "add_option":
+        result = {"add_type": _group_int(body.get("add_type"), "add_type", 0, 5)}
+        question = _group_text(body, "group_question", 255, required=False)
+        answer = _group_text(body, "group_answer", 255, required=False)
+        if question:
+            result["group_question"] = question
+        if answer:
+            result["group_answer"] = answer
+        return result
+    if action == "search":
+        return {
+            "no_code_finger_open": _group_int(body.get("no_code_finger_open", 0), "no_code_finger_open", 0, 1),
+            "no_finger_open": _group_int(body.get("no_finger_open", 0), "no_finger_open", 0, 1),
+        }
+    if action == "robot":
+        return {
+            "robot_member_switch": _group_int(body.get("robot_member_switch", 0), "robot_member_switch", 0, 1),
+            "robot_member_examine": _group_int(body.get("robot_member_examine", 0), "robot_member_examine", 0, 2),
+        }
+    if action == "notice_create":
+        return {
+            "content": _group_text(body, "content", 10000),
+            "image": _group_text(body, "image", 4096, required=False),
+            "pinned": _group_int(body.get("pinned", 0), "pinned", 0, 1),
+            "type": 1,
+            "confirm_required": _group_int(body.get("confirm_required", 0), "confirm_required", 0, 1),
+            "is_show_edit_card": 0,
+            "tip_window_type": 0,
+        }
+    if action == "notice_delete":
+        return {"notice_id": _group_text(body, "notice_id", 2048)}
+    if action in ("essence_set", "essence_delete", "todo_set", "todo_complete", "todo_cancel"):
+        return {"message_id": _group_user_id(body, "message_id")}
+    if action == "sign":
+        return {}
+    if action in ("album_like", "album_comment", "album_delete"):
+        result = {
+            "album_id": _group_text(body, "album_id", 2048),
+            "lloc": _group_text(body, "lloc", 4096),
+        }
+        if action == "album_like":
+            result["id"] = _group_text(body, "id", 8192)
+            result["set"] = True
+        elif action == "album_comment":
+            result["content"] = _group_text(body, "content", 1000)
+        return result
+    raise ValueError("unsupported group action")
+
+
+async def handle_group_dashboard(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        group_id = _group_route_id(request)
+        role = await _group_role(request, group_id, refresh=True)
+        raw = await request.app["napcat"].group_dashboard(group_id)
+        failed = [key for key in ("info", "detail") if not raw.get(key) or raw[key].get("status") != "ok"]
+        if len(failed) == 2:
+            return web.json_response({"ok": False, "error": _onebot_error(raw.get("info"), "group information unavailable")}, status=500)
+        return web.json_response({
+            "ok": True,
+            "group_id": str(group_id),
+            "role": role,
+            "can_manage": role in ("owner", "admin"),
+            "can_manage_admins": role == "owner",
+            "info": _onebot_data(raw.get("info")) or {},
+            "detail": _onebot_data(raw.get("detail")) or {},
+            "at_all": _onebot_data(raw.get("at_all")) or {},
+            "muted": _onebot_data(raw.get("muted")) or [],
+            "packet_available": bool(raw.get("packet_available")),
+        })
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+
+
+async def handle_group_content(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        group_id = _group_route_id(request)
+        kind = str(request.match_info.get("kind", "")).strip()
+        if kind not in GROUP_CONTENT_KINDS:
+            raise ValueError("unsupported group content kind")
+        params = {}
+        if kind == "honors":
+            honor_type = str(request.query.get("type", "all"))
+            if honor_type not in ("all", "talkative", "performer", "legend", "strong_newbie", "emotion"):
+                raise ValueError("invalid honor type")
+            params["type"] = honor_type
+        if kind in ("albums", "album_media"):
+            params["attach_info"] = str(request.query.get("attach_info", ""))
+        if kind == "album_media":
+            params["album_id"] = _group_text(request.query, "album_id", 2048)
+        result = await request.app["napcat"].group_content(group_id, kind, **params)
+        if not result or result.get("status") != "ok":
+            return web.json_response({"ok": False, "error": _onebot_error(result, "group content unavailable")}, status=500)
+        data = result.get("data")
+        if kind == "ignored" and isinstance(data, dict):
+            group_key = str(group_id)
+            data = {
+                key: [item for item in value if str(item.get("group_id", "")) == group_key]
+                for key, value in data.items() if isinstance(value, list)
+            }
+        return web.json_response({"ok": True, "kind": kind, "data": data})
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+
+
+async def handle_group_action(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        group_id = _group_route_id(request)
+        body = await read_json_body(request)
+        action = str(body.get("action", "")).strip()
+        params = _normalize_group_action(action, body)
+        role = await _group_role(request, group_id, refresh=action in GROUP_MANAGER_ACTIONS)
+        if action in GROUP_MANAGER_ACTIONS and role not in ("owner", "admin"):
+            return web.json_response({"ok": False, "error": "group owner or administrator permission is required"}, status=403)
+        if action == "admin" and role != "owner":
+            return web.json_response({"ok": False, "error": "group owner permission is required"}, status=403)
+        if action == "title" and role != "owner":
+            return web.json_response({"ok": False, "error": "group owner permission is required"}, status=403)
+        if action in ("kick", "kick_many", "mute", "admin"):
+            target_ids = params.get("user_id") if action == "kick_many" else [params.get("user_id")]
+            self_id = str(request.app["store"]._self_user.get("user_id") or "")
+            for target_id in target_ids:
+                target_id = str(target_id or "")
+                if target_id == self_id:
+                    return web.json_response({"ok": False, "error": "cannot apply this operation to the logged-in account"}, status=400)
+                target_role = request.app["store"].get_group_member_role(group_id, target_id)
+                if role == "admin" and target_role in ("owner", "admin"):
+                    return web.json_response({"ok": False, "error": "administrators can only moderate regular members"}, status=403)
+                if action == "admin" and target_role == "owner":
+                    return web.json_response({"ok": False, "error": "the group owner's role cannot be changed"}, status=400)
+        if action == "leave" and params.get("is_dismiss") and role != "owner":
+            return web.json_response({"ok": False, "error": "only the group owner can dissolve this group"}, status=403)
+        result = await request.app["napcat"].group_action(group_id, action, **params)
+        if not result or result.get("status") != "ok":
+            return web.json_response({"ok": False, "error": _onebot_error(result, "group operation failed")}, status=500)
+        if action in ("kick", "kick_many", "admin", "card"):
+            await _group_role(request, group_id, refresh=True)
+        return web.json_response({"ok": True, "action": action, "data": result.get("data")})
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+
+
+async def handle_group_album_upload(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    temp_path = ""
+    try:
+        group_id = _group_route_id(request)
+        reader = await request.multipart()
+        album_id = ""
+        album_name = ""
+        size = 0
+        too_large = False
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "album_id":
+                album_id = (await part.text()).strip()
+            elif part.name == "album_name":
+                album_name = (await part.text()).strip()
+            elif part.name == "file":
+                fd, temp_path = tempfile.mkstemp(prefix="webqq-group-album-")
+                with os.fdopen(fd, "wb") as output:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > MAX_FILE_UPLOAD:
+                            too_large = True
+                        else:
+                            output.write(chunk)
+            else:
+                await part.release()
+        if not album_id or len(album_id) > 2048:
+            raise ValueError("album_id is required")
+        if not album_name or len(album_name) > 255:
+            raise ValueError("album_name is required")
+        if not temp_path or size <= 0:
+            raise ValueError("file is required")
+        if too_large:
+            return web.json_response({"ok": False, "error": "image is larger than 100 MB"}, status=413)
+        result = await request.app["napcat"].upload_group_album_image(group_id, album_id, album_name, temp_path)
+        if not result or result.get("status") != "ok":
+            return web.json_response({"ok": False, "error": _onebot_error(result, "album upload failed")}, status=500)
+        return web.json_response({"ok": True, "data": result.get("data")})
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 async def handle_friend_remark(request):

@@ -790,6 +790,52 @@ svg {
 .group-files-empty { min-height: 150px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 20px; color: var(--text-muted); font-size: 12px; text-align: center; }
 .group-files-error { color: var(--coral); }
 
+.group-manager-overlay { padding: 12px; }
+.group-manager-modal { width: min(1040px, 97vw); height: min(760px, 94vh); max-width: none; max-height: none; display: flex; flex-direction: column; padding: 0; overflow: hidden; text-align: left; }
+.group-manager-head { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.group-manager-head h2 { margin: 0 0 3px; font-size: 16px; letter-spacing: 0; }
+.group-manager-head span { color: var(--text-muted); font-size: 10px; }
+.group-manager-tabs { flex: 0 0 auto; display: flex; gap: 2px; padding: 7px 12px; overflow-x: auto; border-bottom: 1px solid var(--line); background: var(--surface-subtle); }
+.group-manager-tabs button { min-height: 31px; padding: 0 11px; border: 0; border-radius: 5px; background: transparent; color: var(--text-soft); font-size: 11px; cursor: pointer; white-space: nowrap; }
+.group-manager-tabs button.active { background: var(--surface); color: var(--accent-strong); box-shadow: inset 0 -2px var(--accent); }
+.group-manager-body { min-height: 0; flex: 1; overflow: auto; background: var(--surface); }
+.group-manager-state { min-height: 150px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 20px; color: var(--text-muted); font-size: 12px; text-align: center; }
+.group-manager-state.error { color: var(--coral); }
+.group-manager-toolbar { position: sticky; top: 0; z-index: 2; min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.group-manager-toolbar input[type="search"],
+.group-manager-toolbar input:not([type]),
+.group-manager-toolbar input[type="text"] { min-width: 130px; flex: 1; height: 32px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); color: var(--text); padding: 0 9px; font-size: 11px; }
+.group-manager-toolbar > span { margin-left: auto; color: var(--text-muted); font-size: 10px; white-space: nowrap; }
+.group-manager-list,
+.group-settings-list { display: flex; flex-direction: column; }
+.group-manager-row,
+.group-setting-row { min-height: 62px; display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); text-align: left; }
+button.group-manager-row { width: 100%; border-width: 0 0 1px; border-radius: 0; cursor: pointer; }
+button.group-manager-row:hover { background: var(--surface-subtle); }
+.member-management-row > .member-avatar { flex: 0 0 34px; width: 34px; height: 34px; }
+.group-member-select { width: 16px; height: 16px; flex: 0 0 16px; accent-color: var(--accent); }
+.group-manager-copy { min-width: 120px; flex: 1; display: grid; gap: 3px; }
+.group-manager-copy strong { min-width: 0; overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.group-manager-copy small { min-width: 0; overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.group-manager-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.group-manager-action { min-height: 29px; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); color: var(--text-soft); font-size: 10px; cursor: pointer; }
+.group-manager-action:hover { border-color: var(--accent); color: var(--accent-strong); }
+.group-manager-action.danger { color: var(--coral); }
+.group-manager-action:disabled { opacity: .45; cursor: default; }
+.group-manager-actions select { height: 29px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); color: var(--text); font-size: 10px; }
+.group-content-composer { display: flex; align-items: center; gap: 9px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.group-content-composer textarea { min-height: 72px; min-width: 160px; flex: 1; resize: vertical; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); color: var(--text); padding: 8px; font: inherit; font-size: 11px; }
+.group-content-composer input[type="url"] { min-width: 150px; height: 34px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-subtle); color: var(--text); padding: 0 8px; font-size: 10px; }
+.group-content-composer label { color: var(--text-soft); font-size: 10px; white-space: nowrap; }
+.group-content-row .group-manager-copy strong { white-space: pre-wrap; overflow-wrap: anywhere; }
+.group-album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 1px; background: var(--line); }
+.group-album-item { min-height: 170px; display: flex; flex-direction: column; justify-content: space-between; gap: 8px; padding: 8px; background: var(--surface); }
+.group-album-item img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: var(--surface-subtle); }
+.group-info-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.group-info-block { min-width: 0; min-height: 180px; margin: 0; padding: 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.group-info-block h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: 0; }
+.group-info-block pre { max-height: 280px; margin: 0; overflow: auto; color: var(--text-soft); font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .reaction-users { display: grid; gap: 8px; margin: 0 0 18px; text-align: left; }
 .reaction-user { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; line-height: 1.4; }
 .reaction-user .uid { color: var(--text-muted); font-size: 10px; }
@@ -835,6 +881,7 @@ svg {
   body.chat-open .messages-area { display: flex !important; }
   body.chat-open .back-button { display: inline-flex; }
   .messages-header { height: 62px; flex-basis: 62px; padding: 0 10px; }
+  .messages-header #memberListButton { display: none !important; }
   .conversation-mark { width: 34px; height: 34px; flex-basis: 34px; }
   .messages-scroll { padding: 16px 10px; }
   .messages-scroll.selecting { padding-left: 44px; }
@@ -878,6 +925,23 @@ svg {
   .group-file-row { align-items: flex-start; flex-direction: column; padding-inline: 12px; }
   .group-file-main { width: 100%; }
   .group-file-actions { width: 100%; overflow-x: auto; }
+  .group-manager-overlay { padding: 0; }
+  .group-manager-modal { width: 100%; height: var(--app-height); max-width: none; max-height: none; border: 0; border-radius: 0; }
+  .group-manager-head { min-height: 56px; padding-inline: 12px; }
+  .group-manager-tabs { padding-inline: 8px; }
+  .group-manager-toolbar { position: static; flex-wrap: wrap; padding-inline: 10px; }
+  .group-manager-toolbar input[type="search"],
+  .group-manager-toolbar input:not([type]),
+  .group-manager-toolbar input[type="text"] { width: 100%; flex-basis: 100%; }
+  .group-manager-row,
+  .group-setting-row { align-items: flex-start; flex-wrap: wrap; padding-inline: 10px; }
+  .member-management-row .group-manager-copy { padding-top: 3px; }
+  .group-manager-actions { width: 100%; justify-content: flex-start; overflow-x: auto; flex-wrap: nowrap; }
+  .group-content-composer { align-items: flex-start; flex-wrap: wrap; padding-inline: 10px; }
+  .group-content-composer textarea { width: 100%; flex-basis: 100%; }
+  .group-content-composer input[type="url"] { min-width: 0; flex: 1; }
+  .group-info-grid { grid-template-columns: 1fr; }
+  .group-album-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 390px) {
@@ -890,6 +954,7 @@ svg {
   .send-bar .image-button { display: none; }
   .rich-media-row { grid-template-columns: 1fr; gap: 0; }
   .extra-preview { width: 82px; min-height: 82px; flex-basis: 82px; }
+  .group-album-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-height: 560px) {

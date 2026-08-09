@@ -17,6 +17,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.media_uploads = {}
         self.rich_media = []
         self.group_file_requests = []
+        self.group_management_requests = []
         self.pokes = []
         self.reactions = []
         self.forward_ids = []
@@ -45,6 +46,10 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_delete("/api/group-files/folders", self.group_file_mutation)
         app.router.add_post("/api/group-files/files/rename", self.group_file_mutation)
         app.router.add_post("/api/group-files/files/move", self.group_file_mutation)
+        app.router.add_get("/api/groups/{group_id}", self.group_dashboard)
+        app.router.add_get("/api/groups/{group_id}/content/{kind}", self.group_content)
+        app.router.add_post("/api/groups/{group_id}/actions", self.group_action)
+        app.router.add_post("/api/groups/{group_id}/albums/upload", self.group_album_upload)
         app.router.add_put("/api/friends/{user_id}/remark", self.friend_remark)
         app.router.add_get("/api/file", self.download)
         app.router.add_get("/ws", self.websocket)
@@ -188,6 +193,30 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.group_file_requests.append((request.method, request.path, body))
         return web.json_response({"ok": True})
 
+    async def group_dashboard(self, request):
+        self.group_management_requests.append((request.method, request.path, dict(request.query)))
+        return web.json_response({"ok": True, "group_id": request.match_info["group_id"], "role": "admin", "can_manage": True})
+
+    async def group_content(self, request):
+        self.group_management_requests.append((request.method, request.path, dict(request.query)))
+        return web.json_response({"ok": True, "kind": request.match_info["kind"], "data": []})
+
+    async def group_action(self, request):
+        body = await request.json()
+        self.group_management_requests.append((request.method, request.path, body))
+        return web.json_response({"ok": True, "action": body.get("action")})
+
+    async def group_album_upload(self, request):
+        reader = await request.multipart()
+        fields = {}
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            fields[part.name] = await part.read() if part.name == "file" else await part.text()
+        self.group_management_requests.append((request.method, request.path, fields))
+        return web.json_response({"ok": True})
+
     async def friend_remark(self, request):
         body = await request.json()
         return web.json_response({
@@ -264,6 +293,19 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.group_file_requests[0][2]["folder_id"], "dir")
         self.assertEqual(self.group_file_requests[1][2]["file"], b"group file")
         self.assertEqual(self.group_file_requests[-1][2]["target_id"], "/")
+
+    async def test_group_management_requests(self):
+        await self.client.login()
+        dashboard = await self.client.group_dashboard("group_1")
+        await self.client.group_content("group_1", "album_media", album_id="album")
+        await self.client.group_action("group_1", "mute", user_id="2", duration=60)
+        source = Path(self.tmp.name) / "album.png"
+        source.write_bytes(b"image")
+        await self.client.upload_group_album_image("group_1", "album", "Photos", source)
+        self.assertEqual(dashboard["role"], "admin")
+        self.assertEqual(self.group_management_requests[1][2]["album_id"], "album")
+        self.assertEqual(self.group_management_requests[2][2]["action"], "mute")
+        self.assertEqual(self.group_management_requests[3][2]["file"], b"image")
 
     async def test_friend_remark_update(self):
         await self.client.login()

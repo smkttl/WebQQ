@@ -440,6 +440,85 @@ class NapCatConnection:
         )
         return listing, info, bool(packet and packet.get("status") == "ok")
 
+    async def group_dashboard(self, group_id):
+        """Fetch the inexpensive group-management summary in parallel."""
+        group_id = str(group_id)
+        info, detail, at_all, shut, packet = await asyncio.gather(
+            self._request("get_group_info", {"group_id": group_id}, timeout=15),
+            self._request("get_group_detail_info", {"group_id": group_id}, timeout=15),
+            self._request("get_group_at_all_remain", {"group_id": group_id}, timeout=15),
+            self._request("get_group_shut_list", {"group_id": group_id}, timeout=15),
+            self._request("nc_get_packet_status", {}, timeout=10),
+        )
+        return {
+            "info": info,
+            "detail": detail,
+            "at_all": at_all,
+            "muted": shut,
+            "packet_available": bool(packet and packet.get("status") == "ok"),
+        }
+
+    async def group_content(self, group_id, kind, **params):
+        actions = {
+            "notices": "_get_group_notice",
+            "essence": "get_essence_msg_list",
+            "honors": "get_group_honor_info",
+            "muted": "get_group_shut_list",
+            "albums": "get_qun_album_list",
+            "album_media": "get_group_album_media_list",
+            "ignored": "get_group_ignored_notifies",
+            "detail": "get_group_info_ex",
+        }
+        action = actions.get(str(kind))
+        if not action:
+            raise ValueError("unsupported group content kind")
+        payload = {} if kind == "ignored" else {"group_id": str(group_id)}
+        payload.update(params)
+        return await self._request(action, payload, timeout=30)
+
+    async def group_action(self, group_id, action, **params):
+        """Run a validated group action using the NapCat 4.18.2 schemas."""
+        actions = {
+            "kick": "set_group_kick",
+            "kick_many": "set_group_kick_members",
+            "mute": "set_group_ban",
+            "whole_mute": "set_group_whole_ban",
+            "admin": "set_group_admin",
+            "card": "set_group_card",
+            "title": "set_group_special_title",
+            "group_name": "set_group_name",
+            "leave": "set_group_leave",
+            "add_option": "set_group_add_option",
+            "search": "set_group_search",
+            "robot": "set_group_robot_add_option",
+            "notice_create": "_send_group_notice",
+            "notice_delete": "_del_group_notice",
+            "essence_set": "set_essence_msg",
+            "essence_delete": "delete_essence_msg",
+            "todo_set": "set_group_todo",
+            "todo_complete": "complete_group_todo",
+            "todo_cancel": "cancel_group_todo",
+            "sign": "set_group_sign",
+            "album_like": "set_group_album_media_like",
+            "album_comment": "do_group_album_comment",
+            "album_delete": "del_group_album_media",
+        }
+        request_action = actions.get(str(action))
+        if not request_action:
+            raise ValueError("unsupported group action")
+        payload = {"group_id": str(group_id)}
+        payload.update(params)
+        timeout = 60 if action in ("notice_create", "album_comment", "album_delete") else 30
+        return await self._request(request_action, payload, timeout=timeout)
+
+    async def upload_group_album_image(self, group_id, album_id, album_name, path):
+        return await self._request("upload_image_to_qun_album", {
+            "group_id": str(group_id),
+            "album_id": str(album_id),
+            "album_name": str(album_name),
+            "file": Path(path).resolve().as_uri(),
+        }, timeout=120)
+
     async def set_friend_remark(self, user_id, remark):
         if not self.ws:
             raise RuntimeError("not connected to NapCat")

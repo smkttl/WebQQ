@@ -174,6 +174,54 @@ class WebQQClient:
         self._require_ok(payload, "group files load failed")
         return payload
 
+    @staticmethod
+    def _group_id(chat_id: str) -> str:
+        if not str(chat_id).startswith("group_") or not str(chat_id)[6:].isdigit():
+            raise WebQQClientError("a group chat is required")
+        return str(chat_id)[6:]
+
+    async def group_dashboard(self, chat_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json("GET", "/api/groups/{}".format(self._group_id(chat_id)))
+        self._require_ok(payload, "group information load failed")
+        return payload
+
+    async def group_content(self, chat_id: str, kind: str, **params: Any) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "GET", "/api/groups/{}/content/{}".format(self._group_id(chat_id), kind),
+            params={key: str(value) for key, value in params.items()},
+        )
+        self._require_ok(payload, "group content load failed")
+        return payload
+
+    async def group_action(self, chat_id: str, action: str, **values: Any) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/groups/{}/actions".format(self._group_id(chat_id)),
+            json_body={"action": action, **values},
+        )
+        self._require_ok(payload, "group operation failed")
+        return payload
+
+    async def upload_group_album_image(self, chat_id: str, album_id: str, album_name: str, path: Path) -> Mapping[str, Any]:
+        path = path.expanduser().resolve()
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise WebQQClientError("image does not exist or is empty: {}".format(path))
+        if path.stat().st_size > MAX_UPLOAD_SIZE:
+            raise WebQQClientError("image is larger than 100 MB")
+        form = aiohttp.FormData()
+        form.add_field("album_id", album_id)
+        form.add_field("album_name", album_name)
+        with path.open("rb") as body:
+            form.add_field("file", body, filename=path.name, content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+            try:
+                async with self._session().post(
+                    self.endpoint("/api/groups/{}/albums/upload".format(self._group_id(chat_id))), data=form,
+                ) as response:
+                    payload = await self._read_json(response)
+            except (aiohttp.ClientError, OSError) as exc:
+                raise WebQQClientError("album upload failed: {}".format(exc)) from exc
+        self._require_ok(payload, "album upload failed")
+        return payload
+
     async def upload_group_file(self, chat_id: str, path: Path, folder_id: str = "") -> Mapping[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():

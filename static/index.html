@@ -11,7 +11,7 @@ try {
   document.documentElement.dataset.theme = savedTheme || preferredTheme;
 } catch {}
 </script>
-<link rel="stylesheet" href="/app.css?v=20260806-1">
+<link rel="stylesheet" href="/app.css?v=20260809-1">
 </head>
 <body>
 
@@ -100,6 +100,9 @@ try {
       </button>
       <button class="icon-button header-icon-button" id="groupFilesButton" type="button" aria-label="Manage group files" data-tooltip="Group files">
         <svg><use href="#icon-paperclip"/></svg>
+      </button>
+      <button class="icon-button header-icon-button" id="groupManageButton" type="button" aria-label="Manage group" data-tooltip="Group management">
+        <svg><use href="#icon-edit"/></svg>
       </button>
       <button class="icon-button header-icon-button" id="friendRemarkButton" type="button" aria-label="Edit friend remark" data-tooltip="Edit remark">
         <svg><use href="#icon-edit"/></svg>
@@ -745,6 +748,7 @@ function updateHeaderActions() {
   const isGroup = currentChat && currentChat.startsWith('group_');
   $('memberListButton').style.display = isGroup ? 'flex' : 'none';
   $('groupFilesButton').style.display = isGroup ? 'flex' : 'none';
+  $('groupManageButton').style.display = isGroup ? 'flex' : 'none';
   $('friendRemarkButton').style.display = currentChat && currentChat.startsWith('private_') ? 'flex' : 'none';
 }
 
@@ -2448,6 +2452,479 @@ async function showMemberList() {
   }
 }
 
+async function showGroupManager() {
+  const groupId = currentGroupId();
+  if (!groupId) return;
+  const chatId = currentChat;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay group-manager-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box group-manager-modal">
+      <div class="group-manager-head">
+        <div><h2>Group management</h2><span id="groupManagerMeta">Loading...</span></div>
+        <button class="icon-button" type="button" data-close aria-label="Close"><svg><use href="#icon-x"/></svg></button>
+      </div>
+      <div class="group-manager-tabs" role="tablist">
+        <button type="button" data-tab="members" class="active">Members</button>
+        <button type="button" data-tab="settings">Settings</button>
+        <button type="button" data-tab="notices">Notices</button>
+        <button type="button" data-tab="essence">Essence</button>
+        <button type="button" data-tab="albums">Albums</button>
+        <button type="button" data-tab="info">Info</button>
+      </div>
+      <div class="group-manager-body" id="groupManagerBody"><div class="group-manager-state"><div class="loading-spinner"></div><span>Loading group...</span></div></div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const bodyEl = overlay.querySelector('#groupManagerBody');
+  const metaEl = overlay.querySelector('#groupManagerMeta');
+  let dashboard = null;
+  let members = [];
+  let activeTab = 'members';
+  let closed = false;
+
+  const close = () => { closed = true; overlay.remove(); };
+  overlay.querySelector('[data-close]').addEventListener('click', close);
+  overlay.addEventListener('pointerdown', event => { if (event.target === overlay) close(); });
+
+  async function request(path = '', options) {
+    const response = await api(`/api/groups/${encodeURIComponent(groupId)}${path}`, options);
+    const data = await readJsonResponse(response);
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Group request failed');
+    return data;
+  }
+
+  async function action(name, values = {}) {
+    const data = await request('/actions', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: name, ...values}),
+    });
+    showToast('Group operation completed');
+    return data;
+  }
+
+  function state(text, error = false) {
+    bodyEl.replaceChildren();
+    const row = document.createElement('div');
+    row.className = `group-manager-state${error ? ' error' : ''}`;
+    row.textContent = text;
+    bodyEl.appendChild(row);
+  }
+
+  function button(label, handler, options = {}) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = options.danger ? 'group-manager-action danger' : 'group-manager-action';
+    item.textContent = label;
+    item.disabled = !!options.disabled;
+    if (!item.disabled) item.addEventListener('click', async () => {
+      item.disabled = true;
+      try { await handler(); } catch (error) { showModal(error.message || String(error)); }
+      finally { if (item.isConnected) item.disabled = false; }
+    });
+    return item;
+  }
+
+  async function reloadSummary(refreshMembers = false) {
+    const tasks = [request('')];
+    if (refreshMembers || !members.length) tasks.push(loadGroupMembers(chatId));
+    const result = await Promise.all(tasks);
+    dashboard = result[0];
+    if (result[1]) members = normalizeGroupMembers(result[1]).sort((a, b) => {
+      const ranks = {owner: 0, admin: 1, member: 2};
+      return (ranks[a.role] ?? 3) - (ranks[b.role] ?? 3) || a.displayName.localeCompare(b.displayName, undefined, {numeric: true});
+    });
+    const info = {...(dashboard.info || {}), ...(dashboard.detail || {})};
+    metaEl.textContent = `${info.group_name || $('chatTitle').textContent || groupId} · ${dashboard.role || 'member'} · ${info.member_count ?? members.length} members`;
+  }
+
+  function renderMembers() {
+    bodyEl.replaceChildren();
+    const toolbar = document.createElement('div');
+    toolbar.className = 'group-manager-toolbar';
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = 'Search members';
+    const selectedLabel = document.createElement('span');
+    selectedLabel.textContent = '0 selected';
+    const batchKick = button('Kick selected', async () => {
+      const ids = Array.from(bodyEl.querySelectorAll('.group-member-select:checked')).map(item => item.value);
+      if (!ids.length || !confirm(`Kick ${ids.length} selected member(s)?`)) return;
+      await action('kick_many', {user_ids: ids, reject_add_request: false});
+      await reloadSummary(true);
+      renderMembers();
+    }, {danger: true, disabled: !dashboard.can_manage});
+    toolbar.append(search, selectedLabel, batchKick);
+    const list = document.createElement('div');
+    list.className = 'group-manager-list';
+    bodyEl.append(toolbar, list);
+
+    function renderList() {
+      const query = search.value.trim().toLowerCase();
+      const visible = members.filter(member => !query || member.searchText.includes(query));
+      list.replaceChildren();
+      if (!visible.length) {
+        const empty = document.createElement('div');
+        empty.className = 'group-manager-state';
+        empty.textContent = 'No matching members.';
+        list.appendChild(empty);
+        return;
+      }
+      for (const member of visible) {
+        const row = document.createElement('div');
+        row.className = 'group-manager-row member-management-row';
+        const select = document.createElement('input');
+        select.type = 'checkbox';
+        select.className = 'group-member-select';
+        select.value = member.uid;
+        const canModerate = dashboard.role === 'owner' ? member.role !== 'owner' : member.role === 'member';
+        select.disabled = !dashboard.can_manage || !canModerate;
+        select.setAttribute('aria-label', `Select ${member.displayName}`);
+        select.addEventListener('change', () => {
+          const count = bodyEl.querySelectorAll('.group-member-select:checked').length;
+          selectedLabel.textContent = `${count} selected`;
+        });
+        const avatar = createAvatar('member-avatar', avatarUrl('user', member.uid), member.displayName);
+        const copy = document.createElement('div');
+        copy.className = 'group-manager-copy';
+        const name = document.createElement('strong');
+        name.textContent = member.displayName;
+        const detail = document.createElement('small');
+        detail.textContent = `${member.uid}${member.role !== 'member' ? ` · ${member.role}` : ''}`;
+        copy.append(name, detail);
+        const actions = document.createElement('div');
+        actions.className = 'group-manager-actions';
+        if (dashboard.can_manage && member.role !== 'owner') {
+          if (canModerate) actions.append(
+            button('Mute', async () => {
+              const value = prompt('Mute duration in seconds (0 removes mute)', '600');
+              if (value === null) return;
+              await action('mute', {user_id: member.uid, duration: value});
+            }),
+          );
+          actions.append(button('Card', async () => {
+              const value = prompt('Group card (empty clears)', String(member.raw.card || ''));
+              if (value === null) return;
+              await action('card', {user_id: member.uid, card: value});
+              await reloadSummary(true); renderMembers();
+            }));
+          if (dashboard.can_manage_admins) actions.append(button(member.role === 'admin' ? 'Demote' : 'Promote', async () => {
+            if (!confirm(`${member.role === 'admin' ? 'Remove administrator from' : 'Make administrator'} ${member.displayName}?`)) return;
+            await action('admin', {user_id: member.uid, enable: member.role !== 'admin'});
+            await reloadSummary(true); renderMembers();
+          }));
+          if (dashboard.can_manage_admins && dashboard.packet_available) actions.append(button('Title', async () => {
+            const value = prompt('Special title (empty clears)', String(member.raw.title || member.raw.special_title || ''));
+            if (value === null) return;
+            await action('title', {user_id: member.uid, special_title: value});
+          }));
+          if (canModerate) actions.append(button('Kick', async () => {
+            if (!confirm(`Kick ${member.displayName} (${member.uid}) from this group?`)) return;
+            await action('kick', {user_id: member.uid, reject_add_request: false});
+            await reloadSummary(true); renderMembers();
+          }, {danger: true}));
+        }
+        row.append(select, avatar, copy, actions);
+        list.appendChild(row);
+      }
+    }
+    search.addEventListener('input', renderList);
+    renderList();
+    search.focus();
+  }
+
+  function settingRow(label, description) {
+    const row = document.createElement('div');
+    row.className = 'group-setting-row';
+    const copy = document.createElement('div');
+    copy.className = 'group-manager-copy';
+    const title = document.createElement('strong');
+    title.textContent = label;
+    const note = document.createElement('small');
+    note.textContent = description;
+    copy.append(title, note);
+    const actions = document.createElement('div');
+    actions.className = 'group-manager-actions';
+    row.append(copy, actions);
+    return {row, actions};
+  }
+
+  function renderSettings() {
+    bodyEl.replaceChildren();
+    const info = {...(dashboard.info || {}), ...(dashboard.detail || {})};
+    const list = document.createElement('div');
+    list.className = 'group-settings-list';
+    const quota = dashboard.at_all || {};
+
+    const name = settingRow('Group name', String(info.group_name || groupId));
+    name.actions.append(button('Rename', async () => {
+      const value = prompt('New group name', String(info.group_name || ''));
+      if (!value) return;
+      await action('group_name', {group_name: value}); await reloadSummary(); renderSettings();
+    }, {disabled: !dashboard.can_manage}));
+
+    const wholeMute = settingRow('Whole-group mute', Number(info.group_all_shut || 0) !== 0 ? 'Enabled' : 'Disabled');
+    wholeMute.actions.append(
+      button('Enable', async () => { await action('whole_mute', {enable: true}); await reloadSummary(); renderSettings(); }, {disabled: !dashboard.can_manage}),
+      button('Disable', async () => { await action('whole_mute', {enable: false}); await reloadSummary(); renderSettings(); }, {disabled: !dashboard.can_manage}),
+    );
+
+    const atAll = settingRow('@all quota', `${quota.remain_at_all_count_for_group ?? '?'} group · ${quota.remain_at_all_count_for_uin ?? quota.remain_at_all_count_for_self ?? '?'} account`);
+    const sign = settingRow('Group sign-in', dashboard.packet_available ? 'Packet backend available' : 'Requires the NapCat packet backend');
+    sign.actions.append(button('Sign in', async () => action('sign'), {disabled: !dashboard.packet_available}));
+
+    const join = settingRow('Join policy', 'Modes 0-5 from the QQ group policy');
+    const joinSelect = document.createElement('select');
+    for (const value of [0, 1, 2, 3, 4, 5]) {
+      const option = document.createElement('option'); option.value = String(value); option.textContent = String(value); joinSelect.appendChild(option);
+    }
+    joinSelect.disabled = !dashboard.can_manage;
+    join.actions.append(joinSelect, button('Apply', async () => {
+      const values = {add_type: joinSelect.value};
+      if (joinSelect.value === '4' || joinSelect.value === '5') {
+        const question = prompt('Join question');
+        if (question === null) return;
+        values.group_question = question;
+        if (joinSelect.value === '4') {
+          const answer = prompt('Expected answer');
+          if (answer === null) return;
+          values.group_answer = answer;
+        }
+      }
+      await action('add_option', values);
+    }, {disabled: !dashboard.can_manage}));
+
+    const search = settingRow('Search visibility', 'Restrict discovery by group number and search');
+    search.actions.append(button('Restrict', () => action('search', {no_code_finger_open: 1, no_finger_open: 1}), {disabled: !dashboard.can_manage}));
+
+    const robot = settingRow('Robot policy', 'Allow or deny robot members');
+    robot.actions.append(
+      button('Allow', () => action('robot', {robot_member_switch: 0, robot_member_examine: 0}), {disabled: !dashboard.can_manage}),
+      button('Review', () => action('robot', {robot_member_switch: 0, robot_member_examine: 2}), {disabled: !dashboard.can_manage}),
+      button('Deny', () => action('robot', {robot_member_switch: 1, robot_member_examine: 2}), {disabled: !dashboard.can_manage}),
+    );
+
+    const membership = settingRow('Membership', dashboard.role === 'owner' ? 'Leaving as owner may dissolve the group' : 'Leave this group');
+    membership.actions.append(button('Leave', async () => {
+      if (!confirm('Leave this group? This cannot be undone from WebQQ.')) return;
+      await action('leave', {is_dismiss: false}); close(); await loadChats();
+    }, {danger: true}));
+    list.append(name.row, wholeMute.row, atAll.row, sign.row, join.row, search.row, robot.row, membership.row);
+    bodyEl.appendChild(list);
+  }
+
+  function noticeText(notice) {
+    const message = notice && notice.message;
+    return String((message && message.text) || notice.content || notice.text || '');
+  }
+
+  async function renderNotices() {
+    state('Loading notices...');
+    try {
+      const payload = await request('/content/notices');
+      const notices = Array.isArray(payload.data) ? payload.data : [];
+      bodyEl.replaceChildren();
+      const composer = document.createElement('div');
+      composer.className = 'group-content-composer';
+      const input = document.createElement('textarea');
+      input.placeholder = dashboard.can_manage ? 'Write a group notice' : 'Only group managers can publish notices';
+      input.disabled = !dashboard.can_manage;
+      const image = document.createElement('input');
+      image.type = 'url'; image.placeholder = 'Optional image URL'; image.disabled = !dashboard.can_manage;
+      const pinned = document.createElement('label');
+      pinned.innerHTML = '<input type="checkbox"> Pin';
+      const confirmRead = document.createElement('label');
+      confirmRead.innerHTML = '<input type="checkbox"> Require confirmation';
+      const publish = button('Publish', async () => {
+        if (!input.value.trim()) return;
+        await action('notice_create', {content: input.value, image: image.value, pinned: pinned.querySelector('input').checked, confirm_required: confirmRead.querySelector('input').checked});
+        await renderNotices();
+      }, {disabled: !dashboard.can_manage});
+      composer.append(input, image, pinned, confirmRead, publish);
+      const list = document.createElement('div');
+      list.className = 'group-manager-list';
+      for (const notice of notices) {
+        const row = document.createElement('div'); row.className = 'group-manager-row group-content-row';
+        const copy = document.createElement('div'); copy.className = 'group-manager-copy';
+        const text = document.createElement('strong'); text.textContent = noticeText(notice) || '(Empty notice)';
+        const detail = document.createElement('small');
+        detail.textContent = `${notice.sender_id || 'Unknown'} · ${notice.publish_time ? new Date(Number(notice.publish_time) * 1000).toLocaleString() : ''} · ${notice.read_num ?? 0} reads`;
+        copy.append(text, detail); row.appendChild(copy);
+        if (dashboard.can_manage) row.appendChild(button('Delete', async () => {
+          if (!confirm('Delete this notice?')) return;
+          await action('notice_delete', {notice_id: notice.notice_id}); await renderNotices();
+        }, {danger: true}));
+        list.appendChild(row);
+      }
+      if (!notices.length) { const empty = document.createElement('div'); empty.className = 'group-manager-state'; empty.textContent = 'No group notices.'; list.appendChild(empty); }
+      bodyEl.append(composer, list);
+    } catch (error) { state(error.message || String(error), true); }
+  }
+
+  function essenceText(item) {
+    const content = Array.isArray(item.content) ? item.content : [];
+    return content.map(segment => {
+      if (!segment || !segment.data) return '';
+      if (segment.type === 'text') return segment.data.text || '';
+      if (segment.type === 'image') return '[image]';
+      return `[${segment.type || 'content'}]`;
+    }).join('') || '(Unsupported message content)';
+  }
+
+  async function renderEssence() {
+    state('Loading essence messages...');
+    try {
+      const payload = await request('/content/essence');
+      const items = Array.isArray(payload.data) ? payload.data : [];
+      bodyEl.replaceChildren();
+      const toolbar = document.createElement('div'); toolbar.className = 'group-manager-toolbar';
+      const messageId = document.createElement('input'); messageId.placeholder = 'Message ID'; messageId.inputMode = 'numeric';
+      toolbar.append(
+        messageId,
+        button('Add essence', async () => { await action('essence_set', {message_id: messageId.value}); await renderEssence(); }, {disabled: !dashboard.can_manage}),
+        button('Set todo', () => action('todo_set', {message_id: messageId.value}), {disabled: !dashboard.can_manage || !dashboard.packet_available}),
+        button('Complete todo', () => action('todo_complete', {message_id: messageId.value}), {disabled: !dashboard.can_manage || !dashboard.packet_available}),
+        button('Cancel todo', () => action('todo_cancel', {message_id: messageId.value}), {disabled: !dashboard.can_manage || !dashboard.packet_available}),
+      );
+      const list = document.createElement('div'); list.className = 'group-manager-list';
+      for (const item of items) {
+        const row = document.createElement('div'); row.className = 'group-manager-row group-content-row';
+        const copy = document.createElement('div'); copy.className = 'group-manager-copy';
+        const text = document.createElement('strong'); text.textContent = essenceText(item);
+        const detail = document.createElement('small'); detail.textContent = `${item.sender_nick || item.sender_id || 'Unknown'} · message ${item.message_id || '?'} · added by ${item.operator_nick || item.operator_id || '?'}`;
+        copy.append(text, detail); row.appendChild(copy);
+        if (dashboard.can_manage) row.appendChild(button('Remove', async () => {
+          if (!confirm('Remove this essence message?')) return;
+          await action('essence_delete', {message_id: item.message_id}); await renderEssence();
+        }, {danger: true}));
+        list.appendChild(row);
+      }
+      if (!items.length) { const empty = document.createElement('div'); empty.className = 'group-manager-state'; empty.textContent = 'No essence messages.'; list.appendChild(empty); }
+      bodyEl.append(toolbar, list);
+    } catch (error) { state(error.message || String(error), true); }
+  }
+
+  function firstArray(value, keys) {
+    if (Array.isArray(value)) return value;
+    if (!value || typeof value !== 'object') return [];
+    for (const key of keys) if (Array.isArray(value[key])) return value[key];
+    for (const child of Object.values(value)) {
+      const found = firstArray(child, keys); if (found.length) return found;
+    }
+    return [];
+  }
+
+  async function renderAlbums() {
+    state('Loading albums...');
+    try {
+      const payload = await request('/content/albums');
+      const albums = firstArray(payload.data, ['album_list', 'albums']);
+      bodyEl.replaceChildren();
+      const list = document.createElement('div'); list.className = 'group-manager-list';
+      for (const album of albums) {
+        const albumId = String(album.album_id || album.id || album.albumId || '');
+        const albumName = String(album.album_name || album.name || album.albumName || albumId || 'Album');
+        const row = document.createElement('button'); row.type = 'button'; row.className = 'group-manager-row group-album-row';
+        const copy = document.createElement('div'); copy.className = 'group-manager-copy';
+        const name = document.createElement('strong'); name.textContent = albumName;
+        const detail = document.createElement('small'); detail.textContent = `${album.photo_count ?? album.media_count ?? '?'} items · ${albumId}`;
+        copy.append(name, detail); row.appendChild(copy);
+        row.addEventListener('click', () => renderAlbumMedia(albumId, albumName));
+        list.appendChild(row);
+      }
+      if (!albums.length) { const empty = document.createElement('div'); empty.className = 'group-manager-state'; empty.textContent = 'No albums available.'; list.appendChild(empty); }
+      bodyEl.appendChild(list);
+    } catch (error) { state(error.message || String(error), true); }
+  }
+
+  async function renderAlbumMedia(albumId, albumName) {
+    state(`Loading ${albumName}...`);
+    try {
+      const payload = await request(`/content/album_media?album_id=${encodeURIComponent(albumId)}`);
+      const media = firstArray(payload.data, ['media_list', 'photo_list', 'medias']);
+      bodyEl.replaceChildren();
+      const toolbar = document.createElement('div'); toolbar.className = 'group-manager-toolbar';
+      const back = button('Back to albums', renderAlbums);
+      const uploadInput = document.createElement('input'); uploadInput.type = 'file'; uploadInput.accept = 'image/*'; uploadInput.hidden = true;
+      const upload = button('Upload image', () => uploadInput.click());
+      uploadInput.addEventListener('change', async () => {
+        const file = uploadInput.files && uploadInput.files[0]; uploadInput.value = '';
+        if (!file) return;
+        const form = new FormData(); form.append('album_id', albumId); form.append('album_name', albumName); form.append('file', file);
+        try { await request('/albums/upload', {method: 'POST', body: form}); showToast('Album image uploaded'); await renderAlbumMedia(albumId, albumName); }
+        catch (error) { showModal(error.message || String(error)); }
+      });
+      toolbar.append(back, upload, uploadInput);
+      const grid = document.createElement('div'); grid.className = 'group-album-grid';
+      for (const item of media) {
+        const lloc = String(item.lloc || item.media_id || item.id || '');
+        const imageUrl = String(item.url || item.origin_url || item.download_url || item.thumbnail_url || '');
+        const card = document.createElement('div'); card.className = 'group-album-item';
+        if (imageUrl) { const image = document.createElement('img'); image.src = imageUrl; image.alt = ''; image.loading = 'lazy'; card.appendChild(image); }
+        const actions = document.createElement('div'); actions.className = 'group-manager-actions';
+        const likeId = String(item.id || item.like_id || lloc);
+        actions.append(
+          button('Like', () => action('album_like', {album_id: albumId, lloc, id: likeId})),
+          button('Comment', async () => { const value = prompt('Comment'); if (value) await action('album_comment', {album_id: albumId, lloc, content: value}); }),
+        );
+        if (dashboard.can_manage) actions.append(button('Delete', async () => {
+          if (!confirm('Delete this album image?')) return;
+          await action('album_delete', {album_id: albumId, lloc}); await renderAlbumMedia(albumId, albumName);
+        }, {danger: true}));
+        card.appendChild(actions); grid.appendChild(card);
+      }
+      if (!media.length) { const empty = document.createElement('div'); empty.className = 'group-manager-state'; empty.textContent = 'This album is empty.'; grid.appendChild(empty); }
+      bodyEl.append(toolbar, grid);
+    } catch (error) { state(error.message || String(error), true); }
+  }
+
+  function summaryBlock(title, value) {
+    const block = document.createElement('section'); block.className = 'group-info-block';
+    const heading = document.createElement('h3'); heading.textContent = title;
+    const pre = document.createElement('pre'); pre.textContent = JSON.stringify(value, null, 2);
+    block.append(heading, pre); return block;
+  }
+
+  async function renderInfo() {
+    state('Loading group information...');
+    try {
+      const [honors, ignored, detail] = await Promise.all([
+        request('/content/honors'), request('/content/ignored'), request('/content/detail'),
+      ]);
+      bodyEl.replaceChildren();
+      const grid = document.createElement('div'); grid.className = 'group-info-grid';
+      grid.append(
+        summaryBlock('Details', detail.data || {}),
+        summaryBlock('Muted members', dashboard.muted || []),
+        summaryBlock('Honors', honors.data || {}),
+        summaryBlock('Ignored notifications', ignored.data || {}),
+      );
+      bodyEl.appendChild(grid);
+    } catch (error) { state(error.message || String(error), true); }
+  }
+
+  async function renderTab() {
+    if (activeTab === 'members') renderMembers();
+    else if (activeTab === 'settings') renderSettings();
+    else if (activeTab === 'notices') await renderNotices();
+    else if (activeTab === 'essence') await renderEssence();
+    else if (activeTab === 'albums') await renderAlbums();
+    else await renderInfo();
+  }
+
+  for (const tab of overlay.querySelectorAll('[data-tab]')) tab.addEventListener('click', async () => {
+    activeTab = tab.dataset.tab;
+    for (const item of overlay.querySelectorAll('[data-tab]')) item.classList.toggle('active', item === tab);
+    await renderTab();
+  });
+
+  try {
+    await reloadSummary(true);
+    if (!closed) await renderTab();
+  } catch (error) {
+    if (!closed) state(error.message || String(error), true);
+  }
+}
+
 function showGroupFileManager() {
   if (!currentChat || !currentChat.startsWith('group_')) return;
   const chatId = currentChat;
@@ -2679,12 +3156,14 @@ function normalizeGroupMember(raw) {
     qid: String(raw.qid || '').trim(),
   };
   const displayName = String(raw.display_name || raw.card || values.remark || values.name || values.nick || uid).trim();
+  const role = String(raw.role || 'member');
   const lines = [`uid: ${uid}`];
+  if (role !== 'member') lines.push(role);
   for (const key of ['remark', 'name', 'nick', 'qid']) {
     if (values[key]) lines.push(`${key}: ${values[key]}`);
   }
   const searchText = [uid, displayName, ...Object.values(values)].join(' ').toLowerCase();
-  return {uid, displayName, lines, searchText};
+  return {uid, displayName, lines, searchText, role, raw};
 }
 
 function prependReplyMention(message) {
@@ -3392,6 +3871,7 @@ $('customForwardButton').addEventListener('click', openCustomForwardComposer);
 $('replyDraftCancel').addEventListener('click', clearReplyDraft);
 $('memberListButton').addEventListener('click', showMemberList);
 $('groupFilesButton').addEventListener('click', showGroupFileManager);
+$('groupManageButton').addEventListener('click', showGroupManager);
 $('friendRemarkButton').addEventListener('click', editCurrentFriendRemark);
 $('portalSelect').addEventListener('change', e => {
   selectedPortalPluginId = e.target.value;

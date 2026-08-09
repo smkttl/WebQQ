@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView, Static
 
-from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, MemberPicker, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, MemberPicker, RichMediaDialog, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -21,6 +21,7 @@ class FakeClient:
         self.rich_media = []
         self.transcriptions = []
         self.group_file_calls = []
+        self.group_management_calls = []
         self.remarks = []
 
     async def status(self):
@@ -89,6 +90,27 @@ class FakeClient:
             "folders": [{"folder_id": "dir", "folder_name": "Docs", "total_file_count": 1}],
             "files": [{"file_id": "file", "file_name": "readme.txt", "file_size": 10}],
         }
+
+    async def group_dashboard(self, chat_id):
+        self.group_management_calls.append(("dashboard", chat_id))
+        return {
+            "ok": True, "role": "admin", "can_manage": True, "can_manage_admins": False,
+            "info": {"group_name": "Group"}, "detail": {"member_count": 2, "group_all_shut": 0},
+            "at_all": {"remain_at_all_count_for_group": 3, "remain_at_all_count_for_uin": 1},
+            "muted": [], "packet_available": False,
+        }
+
+    async def group_content(self, chat_id, kind, **params):
+        self.group_management_calls.append(("content", chat_id, kind, params))
+        return {"ok": True, "kind": kind, "data": []}
+
+    async def group_action(self, chat_id, action, **values):
+        self.group_management_calls.append(("action", chat_id, action, values))
+        return {"ok": True}
+
+    async def upload_group_album_image(self, chat_id, album_id, album_name, path):
+        self.group_management_calls.append(("upload", chat_id, album_id, album_name, path))
+        return {"ok": True}
 
     async def download_group_file(self, chat_id, file, progress=None):
         self.group_file_calls.append(("download", chat_id, file["file_id"]))
@@ -408,6 +430,41 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.group_file_calls[0], ("list", "group_1", ""))
             await pilot.press("escape")
             self.assertNotIsInstance(app.screen, GroupFileManager)
+
+    async def test_f5_group_manager_is_small_terminal_safe(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("f5")
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, GroupManager)
+            self.assertLessEqual(app.screen.query_one("#group_manage_list", ListView).region.right, app.size.width)
+            self.assertEqual(client.group_management_calls[0], ("dashboard", "group_1"))
+            await pilot.press("3")
+            await pilot.pause(0.1)
+            self.assertTrue(any(call[:3] == ("content", "group_1", "notices") for call in client.group_management_calls))
+            await pilot.press("escape")
+            self.assertNotIsInstance(app.screen, GroupManager)
+
+    async def test_f5_group_manager_contains_backend_load_failure(self):
+        class FailingGroupClient(FakeClient):
+            async def group_dashboard(self, chat_id):
+                raise RuntimeError("NapCat unavailable")
+
+        app = WebQQTui(FailingGroupClient())
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("f5")
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, GroupManager)
+            self.assertIn("error", str(app.screen.query_one("#group_manage_title", Static).render()).lower())
+            await pilot.press("escape")
+            self.assertNotIsInstance(app.screen, GroupManager)
 
     async def test_f2_updates_and_clears_private_friend_remark(self):
         client = FakeClient()

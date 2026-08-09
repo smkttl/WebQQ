@@ -389,6 +389,381 @@ class RichMediaDialog(ModalScreen):
         self.dismiss(None)
 
 
+class GroupManagementItem(ListItem):
+    def __init__(self, kind: str, data: Mapping[str, Any], label: str):
+        self.kind = kind
+        self.data = dict(data)
+        super().__init__(Static(label, markup=False))
+
+
+class GroupManager(ModalScreen):
+    BINDINGS = [
+        Binding("escape", "cancel", show=False), Binding("backspace", "parent", show=False),
+        Binding("1", "tab_members", show=False), Binding("2", "tab_settings", show=False),
+        Binding("3", "tab_notices", show=False), Binding("4", "tab_essence", show=False),
+        Binding("5", "tab_albums", show=False), Binding("6", "tab_info", show=False),
+        Binding("m", "mute", show=False), Binding("u", "unmute_or_upload", show=False),
+        Binding("k", "kick", show=False), Binding("c", "card", show=False),
+        Binding("a", "admin", show=False), Binding("t", "title_or_todo", show=False),
+        Binding("n", "name", show=False), Binding("w", "whole_mute", show=False),
+        Binding("p", "publish", show=False), Binding("e", "essence", show=False),
+        Binding("d", "delete", show=False), Binding("s", "sign", show=False),
+        Binding("l", "leave_or_like", show=False), Binding("r", "comment", show=False),
+    ]
+    CSS = """
+    GroupManager { align: center middle; background: $background 70%; }
+    GroupManager > Container { width: 110; max-width: 100%; height: 94%; min-height: 8; border: solid $accent; background: $surface; padding: 1; }
+    GroupManager #group_manage_title { height: 2; text-style: bold; }
+    GroupManager #group_manage_tabs { height: 1; color: $text-muted; }
+    GroupManager #group_manage_list { height: 1fr; }
+    GroupManager #group_manage_list > ListItem { height: auto; min-height: 2; padding: 0 1; }
+    GroupManager #group_manage_prompt { display: none; margin: 0; border: none; }
+    GroupManager .hint { height: 1; color: $text-muted; }
+    """
+
+    def __init__(self, client: WebQQClient, chat_id: str):
+        super().__init__()
+        self.client = client
+        self.chat_id = chat_id
+        self.dashboard: Mapping[str, Any] = {}
+        self.members: List[Mapping[str, Any]] = []
+        self.tab = "members"
+        self.album_id = ""
+        self.album_name = ""
+        self.prompt_action = ""
+        self.prompt_data: Mapping[str, Any] = {}
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Group management", id="group_manage_title")
+            yield Static("1 Members  2 Settings  3 Notices  4 Essence  5 Albums  6 Info", id="group_manage_tabs")
+            yield NavigableListView(id="group_manage_list")
+            yield Input(id="group_manage_prompt")
+            yield Static("Keys depend on view; Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        try:
+            await self._load_dashboard()
+            await self._load()
+        except Exception as exc:
+            await self._replace([GroupManagementItem("error", {}, "Load failed: {}".format(exc))])
+            self._set_title("error")
+
+    async def _load_dashboard(self) -> None:
+        self.dashboard = await self.client.group_dashboard(self.chat_id)
+        self.members = await self.client.group_members(self.chat_id)
+
+    @staticmethod
+    def _name(member: Mapping[str, Any]) -> str:
+        return str(member.get("card") or member.get("display_name") or member.get("nickname") or member.get("name") or member.get("user_id") or "Unknown")
+
+    @staticmethod
+    def _first_array(value: Any, keys: Set[str]) -> List[Mapping[str, Any]]:
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if not isinstance(value, dict):
+            return []
+        for key in keys:
+            if isinstance(value.get(key), list):
+                return [item for item in value[key] if isinstance(item, dict)]
+        for child in value.values():
+            found = GroupManager._first_array(child, keys)
+            if found:
+                return found
+        return []
+
+    async def _replace(self, items: List[GroupManagementItem]) -> None:
+        view = self.query_one("#group_manage_list", ListView)
+        await view.clear()
+        await view.extend(items or [GroupManagementItem("empty", {}, "No items")])
+        if view.children:
+            view.index = 0
+            view.focus()
+
+    def _set_title(self, suffix: str = "") -> None:
+        role = str(self.dashboard.get("role") or "member")
+        self.query_one("#group_manage_title", Static).update("Group management / {}  [{}]{}".format(
+            self.tab.capitalize(), role, "  " + suffix if suffix else "",
+        ))
+
+    async def _load(self) -> None:
+        self._set_title("loading")
+        try:
+            if self.tab == "members":
+                ranks = {"owner": 0, "admin": 1, "member": 2}
+                values = sorted(self.members, key=lambda item: (ranks.get(str(item.get("role") or "member"), 3), self._name(item).lower()))
+                await self._replace([
+                    GroupManagementItem("member", item, "{}  {}  {}".format(
+                        self._name(item), item.get("user_id") or item.get("uid") or "?", item.get("role") or "member",
+                    )) for item in values
+                ])
+            elif self.tab == "settings":
+                detail = {**dict(self.dashboard.get("info") or {}), **dict(self.dashboard.get("detail") or {})}
+                quota = self.dashboard.get("at_all") or {}
+                packet = "available" if self.dashboard.get("packet_available") else "unavailable"
+                await self._replace([
+                    GroupManagementItem("setting", {"action": "name"}, "Group name: {}".format(detail.get("group_name") or "?")),
+                    GroupManagementItem("setting", {"action": "whole_mute"}, "Whole mute: {}".format("on" if detail.get("group_all_shut") else "off")),
+                    GroupManagementItem("setting", {}, "@all: {} group / {} account".format(quota.get("remain_at_all_count_for_group", "?"), quota.get("remain_at_all_count_for_uin", "?"))),
+                    GroupManagementItem("setting", {}, "Packet backend: {}".format(packet)),
+                ])
+            elif self.tab in ("notices", "essence"):
+                payload = await self.client.group_content(self.chat_id, self.tab)
+                values = payload.get("data") if isinstance(payload.get("data"), list) else []
+                items = []
+                for item in values:
+                    if not isinstance(item, dict):
+                        continue
+                    if self.tab == "notices":
+                        message = item.get("message") if isinstance(item.get("message"), dict) else {}
+                        label = "{}: {}".format(item.get("sender_id") or "?", str(message.get("text") or item.get("content") or "(empty)").replace("\n", " "))
+                        kind = "notice"
+                    else:
+                        content = item.get("content") if isinstance(item.get("content"), list) else []
+                        text = "".join(str(part.get("data", {}).get("text") or "[{}]".format(part.get("type", "content"))) for part in content if isinstance(part, dict))
+                        label = "{} / {}: {}".format(item.get("message_id") or "?", item.get("sender_nick") or item.get("sender_id") or "?", text)
+                        kind = "essence"
+                    items.append(GroupManagementItem(kind, item, label))
+                await self._replace(items)
+            elif self.tab == "albums":
+                if self.album_id:
+                    payload = await self.client.group_content(self.chat_id, "album_media", album_id=self.album_id)
+                    values = self._first_array(payload.get("data"), {"media_list", "photo_list", "medias"})
+                    await self._replace([GroupManagementItem("album_media", item, "Image {}".format(item.get("lloc") or item.get("media_id") or item.get("id") or "?")) for item in values])
+                else:
+                    payload = await self.client.group_content(self.chat_id, "albums")
+                    values = self._first_array(payload.get("data"), {"album_list", "albums"})
+                    await self._replace([GroupManagementItem("album", item, "{}  [{}]".format(
+                        item.get("album_name") or item.get("name") or item.get("albumName") or "Album",
+                        item.get("photo_count") or item.get("media_count") or "?",
+                    )) for item in values])
+            else:
+                honors, ignored, detail = await asyncio.gather(
+                    self.client.group_content(self.chat_id, "honors"),
+                    self.client.group_content(self.chat_id, "ignored"),
+                    self.client.group_content(self.chat_id, "detail"),
+                )
+                values = [
+                    ("Details", detail.get("data")), ("Muted", self.dashboard.get("muted")),
+                    ("Honors", honors.get("data")), ("Ignored", ignored.get("data")),
+                ]
+                await self._replace([GroupManagementItem("info", {}, "{}\n{}".format(name, json.dumps(value, ensure_ascii=True, indent=2, default=str))) for name, value in values])
+            self._set_title()
+        except Exception as exc:
+            await self._replace([GroupManagementItem("error", {}, "Load failed: {}".format(exc))])
+            self._set_title("error")
+
+    def _selected(self) -> Optional[GroupManagementItem]:
+        child = self.query_one("#group_manage_list", ListView).highlighted_child
+        return child if isinstance(child, GroupManagementItem) else None
+
+    def _manager(self) -> bool:
+        return bool(self.dashboard.get("can_manage"))
+
+    def _prompt(self, action: str, placeholder: str, data: Optional[Mapping[str, Any]] = None, value: str = "") -> None:
+        prompt = self.query_one("#group_manage_prompt", Input)
+        self.prompt_action = action
+        self.prompt_data = dict(data or {})
+        prompt.placeholder = placeholder
+        prompt.value = value
+        prompt.styles.display = "block"
+        prompt.focus()
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "group_manage_prompt":
+            return
+        value = event.value.strip()
+        action = self.prompt_action
+        data = dict(self.prompt_data)
+        self._close_prompt()
+        try:
+            if action == "mute":
+                await self.client.group_action(self.chat_id, "mute", user_id=data["user_id"], duration=value)
+            elif action == "card":
+                await self.client.group_action(self.chat_id, "card", user_id=data["user_id"], card=value)
+            elif action == "title":
+                await self.client.group_action(self.chat_id, "title", user_id=data["user_id"], special_title=value)
+            elif action == "name":
+                await self.client.group_action(self.chat_id, "group_name", group_name=value)
+            elif action == "notice":
+                await self.client.group_action(self.chat_id, "notice_create", content=value, pinned=False, confirm_required=False)
+            elif action == "essence":
+                await self.client.group_action(self.chat_id, "essence_set", message_id=value)
+            elif action == "todo":
+                await self.client.group_action(self.chat_id, "todo_set", message_id=value)
+            elif action == "kick" and value == "KICK":
+                await self.client.group_action(self.chat_id, "kick", user_id=data["user_id"], reject_add_request=False)
+            elif action == "delete" and value == "DELETE":
+                await self._delete_selected(data)
+            elif action == "leave" and value == "LEAVE":
+                await self.client.group_action(self.chat_id, "leave", is_dismiss=False)
+                self.dismiss()
+                return
+            elif action == "album_upload":
+                await self.client.upload_group_album_image(self.chat_id, self.album_id, self.album_name, Path(value))
+            elif action == "album_comment":
+                await self.client.group_action(
+                    self.chat_id, "album_comment", album_id=self.album_id,
+                    lloc=data["lloc"], content=value,
+                )
+            else:
+                self._set_title("cancelled")
+                return
+            await self._load_dashboard()
+            await self._load()
+        except Exception as exc:
+            self._set_title("failed: {}".format(exc))
+
+    def _close_prompt(self) -> None:
+        prompt = self.query_one("#group_manage_prompt", Input)
+        prompt.value = ""
+        prompt.styles.display = "none"
+        self.prompt_action = ""
+        self.prompt_data = {}
+        self.query_one("#group_manage_list", ListView).focus()
+
+    async def _delete_selected(self, data: Mapping[str, Any]) -> None:
+        kind = str(data.get("kind") or "")
+        item = data.get("item") if isinstance(data.get("item"), dict) else {}
+        if kind == "notice":
+            await self.client.group_action(self.chat_id, "notice_delete", notice_id=item.get("notice_id"))
+        elif kind == "essence":
+            await self.client.group_action(self.chat_id, "essence_delete", message_id=item.get("message_id"))
+        elif kind == "album_media":
+            await self.client.group_action(self.chat_id, "album_delete", album_id=self.album_id, lloc=item.get("lloc") or item.get("media_id") or item.get("id"))
+
+    async def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item = event.item
+        if isinstance(item, GroupManagementItem) and item.kind == "album":
+            self.album_id = str(item.data.get("album_id") or item.data.get("id") or item.data.get("albumId") or "")
+            self.album_name = str(item.data.get("album_name") or item.data.get("name") or item.data.get("albumName") or "Album")
+            if self.album_id:
+                await self._load()
+
+    def _member(self) -> Optional[Mapping[str, Any]]:
+        item = self._selected()
+        return item.data if item and item.kind == "member" else None
+
+    def _can_moderate(self, member: Mapping[str, Any]) -> bool:
+        target_role = str(member.get("role") or "member")
+        if str(self.dashboard.get("role") or "") == "owner":
+            return target_role != "owner"
+        return str(self.dashboard.get("role") or "") == "admin" and target_role == "member"
+
+    def action_mute(self) -> None:
+        member = self._member()
+        if member and self._can_moderate(member):
+            self._prompt("mute", "Mute seconds (0 removes mute)", {"user_id": str(member.get("user_id") or member.get("uid"))}, "600")
+
+    def action_unmute_or_upload(self) -> None:
+        if self.tab == "albums" and self.album_id:
+            self._prompt("album_upload", "Image path")
+            return
+        member = self._member()
+        if member and self._can_moderate(member):
+            self.run_worker(self._quick_action("mute", user_id=str(member.get("user_id") or member.get("uid")), duration=0), exclusive=True)
+
+    def action_kick(self) -> None:
+        member = self._member()
+        if member and self._can_moderate(member):
+            self._prompt("kick", "Type KICK to confirm", {"user_id": str(member.get("user_id") or member.get("uid"))})
+
+    def action_card(self) -> None:
+        member = self._member()
+        if self._manager() and member:
+            self._prompt("card", "Group card (empty clears)", {"user_id": str(member.get("user_id") or member.get("uid"))}, str(member.get("card") or ""))
+
+    def action_admin(self) -> None:
+        member = self._member()
+        if self.dashboard.get("can_manage_admins") and member:
+            self.run_worker(self._quick_action("admin", user_id=str(member.get("user_id") or member.get("uid")), enable=str(member.get("role")) != "admin"), exclusive=True)
+
+    def action_title_or_todo(self) -> None:
+        member = self._member()
+        if self.tab == "members" and self.dashboard.get("can_manage_admins") and member and self.dashboard.get("packet_available"):
+            self._prompt("title", "Special title (empty clears)", {"user_id": str(member.get("user_id") or member.get("uid"))})
+        elif self.tab == "essence" and self._manager() and self.dashboard.get("packet_available"):
+            self._prompt("todo", "Message ID to set as todo")
+
+    def action_name(self) -> None:
+        if self.tab == "settings" and self._manager():
+            detail = {**dict(self.dashboard.get("info") or {}), **dict(self.dashboard.get("detail") or {})}
+            self._prompt("name", "New group name", value=str(detail.get("group_name") or ""))
+
+    def action_whole_mute(self) -> None:
+        if self.tab == "settings" and self._manager():
+            detail = {**dict(self.dashboard.get("info") or {}), **dict(self.dashboard.get("detail") or {})}
+            self.run_worker(self._quick_action("whole_mute", enable=not bool(detail.get("group_all_shut"))), exclusive=True)
+
+    def action_publish(self) -> None:
+        if self.tab == "notices" and self._manager():
+            self._prompt("notice", "Notice text")
+
+    def action_essence(self) -> None:
+        if self.tab == "essence" and self._manager():
+            self._prompt("essence", "Message ID to add as essence")
+
+    def action_delete(self) -> None:
+        item = self._selected()
+        if self._manager() and item and item.kind in ("notice", "essence", "album_media"):
+            self._prompt("delete", "Type DELETE to confirm", {"kind": item.kind, "item": item.data})
+
+    def action_sign(self) -> None:
+        if self.tab == "settings" and self.dashboard.get("packet_available"):
+            self.run_worker(self._quick_action("sign"), exclusive=True)
+
+    def action_leave_or_like(self) -> None:
+        item = self._selected()
+        if self.tab == "albums" and item and item.kind == "album_media":
+            lloc = str(item.data.get("lloc") or item.data.get("media_id") or item.data.get("id") or "")
+            like_id = str(item.data.get("id") or item.data.get("like_id") or lloc)
+            if lloc and like_id:
+                self.run_worker(self._quick_action("album_like", album_id=self.album_id, lloc=lloc, id=like_id), exclusive=True)
+            return
+        if self.tab == "settings":
+            self._prompt("leave", "Type LEAVE to confirm")
+
+    def action_comment(self) -> None:
+        item = self._selected()
+        if self.tab == "albums" and item and item.kind == "album_media":
+            lloc = str(item.data.get("lloc") or item.data.get("media_id") or item.data.get("id") or "")
+            if lloc:
+                self._prompt("album_comment", "Comment", {"lloc": lloc})
+
+    async def _quick_action(self, action: str, **values: Any) -> None:
+        try:
+            await self.client.group_action(self.chat_id, action, **values)
+            await self._load_dashboard()
+            await self._load()
+        except Exception as exc:
+            self._set_title("failed: {}".format(exc))
+
+    def _select_tab(self, name: str) -> None:
+        self.tab = name
+        self.album_id = ""
+        self.album_name = ""
+        self.run_worker(self._load(), exclusive=True)
+
+    def action_tab_members(self) -> None: self._select_tab("members")
+    def action_tab_settings(self) -> None: self._select_tab("settings")
+    def action_tab_notices(self) -> None: self._select_tab("notices")
+    def action_tab_essence(self) -> None: self._select_tab("essence")
+    def action_tab_albums(self) -> None: self._select_tab("albums")
+    def action_tab_info(self) -> None: self._select_tab("info")
+
+    def action_parent(self) -> None:
+        if self.tab == "albums" and self.album_id:
+            self.album_id = ""
+            self.album_name = ""
+            self.run_worker(self._load(), exclusive=True)
+
+    def action_cancel(self) -> None:
+        if self.query_one("#group_manage_prompt", Input).styles.display != "none":
+            self._close_prompt()
+        else:
+            self.dismiss()
+
+
 class GroupFileListItem(ListItem):
     def __init__(self, kind: str, data: Mapping[str, Any]):
         self.kind = kind
@@ -633,6 +1008,7 @@ class WebQQTui(App):
         Binding("f3", "send_media", show=False),
         Binding("t", "transcribe", show=False),
         Binding("f4", "group_files", show=False),
+        Binding("f5", "group_manage", show=False),
         Binding("f2", "friend_remark", show=False),
     ]
     CSS = """
@@ -1364,6 +1740,12 @@ class WebQQTui(App):
             return
         self.push_screen(GroupFileManager(self.client, self.current_chat.chat_id))
 
+    def action_group_manage(self) -> None:
+        if not self.current_chat or self.current_chat.chat_type != "group":
+            self._set_notice("Group management is only available in group chats")
+            return
+        self.push_screen(GroupManager(self.client, self.current_chat.chat_id))
+
     def action_friend_remark(self) -> None:
         if not self.current_chat or self.current_chat.chat_type != "private":
             self._set_notice("Friend remarks are only available in private chats")
@@ -1501,7 +1883,7 @@ class WebQQTui(App):
         if self._account_status:
             parts.append(self._account_status)
         if not self.short:
-            parts.append("Ctrl+F find  F2 remark  F3 media  F4 group files  t transcribe  Ctrl+I image  Ctrl+O file")
+            parts.append("Ctrl+F find  F2 remark  F3 media  F4 files  F5 group  t transcribe  Ctrl+I image  Ctrl+O file")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 

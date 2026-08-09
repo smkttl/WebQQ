@@ -1678,5 +1678,124 @@ class RevokeHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 400)
 
 
+class GroupManagementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_napcat_group_actions_use_4182_schemas(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok", "data": {}}
+
+        connection._request = request
+        await connection.group_action(7, "kick_many", user_id=["8", "9"], reject_add_request=True)
+        await connection.group_action(7, "mute", user_id="8", duration=600)
+        await connection.group_action(7, "notice_create", content="Notice", pinned=1)
+        await connection.group_action(7, "essence_set", message_id="55")
+        await connection.group_action(7, "album_comment", album_id="a", lloc="m", content="Nice")
+        by_action = {action: (params, timeout) for action, params, timeout in calls}
+        self.assertEqual(by_action["set_group_kick_members"][0]["user_id"], ["8", "9"])
+        self.assertEqual(by_action["set_group_ban"][0]["duration"], 600)
+        self.assertEqual(by_action["_send_group_notice"][0]["group_id"], "7")
+        self.assertEqual(by_action["set_essence_msg"][0]["message_id"], "55")
+        self.assertEqual(by_action["do_group_album_comment"][1], 60)
+
+    async def test_group_content_ignored_uses_empty_4182_payload(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params))
+            return {"status": "ok", "data": {}}
+
+        connection._request = request
+        await connection.group_content(7, "ignored")
+        await connection.group_content(7, "album_media", album_id="a", attach_info="next")
+        self.assertEqual(calls[0], ("get_group_ignored_notifies", {}))
+        self.assertEqual(calls[1][1], {"group_id": "7", "album_id": "a", "attach_info": "next"})
+
+    @staticmethod
+    def request(app, body=None, group_id="7", kind=""):
+        async def request_json():
+            return dict(body or {})
+        return SimpleNamespace(
+            app=app, match_info={"group_id": group_id, "kind": kind}, query={}, cookies={}, headers={},
+            remote="", json=request_json,
+        )
+
+    async def test_manager_action_is_validated_and_forwarded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(1, "Me")
+            store.set_group_members(7, {"1": "Me", "2": "Alice"}, [
+                {"user_id": "1", "role": "admin"}, {"user_id": "2", "role": "member"},
+            ])
+            calls = []
+
+            async def action(group_id, name, **values):
+                calls.append((group_id, name, values))
+                return {"status": "ok", "data": None}
+
+            app = {"config": {"web_token": ""}, "store": store, "napcat": SimpleNamespace(group_action=action)}
+            response = await api.handle_group_action(self.request(app, {"action": "mute", "user_id": "2", "duration": "600"}))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(calls, [(7, "mute", {"user_id": "2", "duration": 600})])
+
+    async def test_member_cannot_run_manager_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(1, "Me")
+            store.set_group_members(7, {"1": "Me"}, [{"user_id": "1", "role": "member"}])
+            app = {"config": {"web_token": ""}, "store": store, "napcat": SimpleNamespace(group_action=lambda *_args, **_kwargs: None)}
+            response = await api.handle_group_action(self.request(app, {"action": "kick", "user_id": "2"}))
+            self.assertEqual(response.status, 403)
+
+    async def test_admin_cannot_moderate_peer_admin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(1, "Me")
+            store.set_group_members(7, {"1": "Me", "2": "Peer"}, [
+                {"user_id": "1", "role": "admin"}, {"user_id": "2", "role": "admin"},
+            ])
+            app = {"config": {"web_token": ""}, "store": store, "napcat": SimpleNamespace(group_action=lambda *_args, **_kwargs: None)}
+            response = await api.handle_group_action(self.request(app, {"action": "mute", "user_id": "2", "duration": 60}))
+            self.assertEqual(response.status, 403)
+
+    async def test_dashboard_normalizes_onebot_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            store.set_self_user(1, "Me")
+            store.set_group_members(7, {"1": "Me"}, [{"user_id": "1", "role": "owner"}])
+
+            async def dashboard(group_id):
+                self.assertEqual(group_id, 7)
+                return {
+                    "info": {"status": "ok", "data": {"group_name": "Test"}},
+                    "detail": {"status": "ok", "data": {"member_count": 3}},
+                    "at_all": {"status": "ok", "data": {"can_at_all": True}},
+                    "muted": {"status": "ok", "data": [{"user_id": 2}]},
+                    "packet_available": True,
+                }
+
+            app = {"config": {"web_token": ""}, "store": store, "napcat": SimpleNamespace(group_dashboard=dashboard)}
+            response = await api.handle_group_dashboard(self.request(app))
+            data = json.loads(response.text)
+            self.assertEqual(response.status, 200)
+            self.assertTrue(data["can_manage_admins"])
+            self.assertEqual(data["muted"][0]["user_id"], 2)
+
+    def test_rejects_dissolution_on_4182(self):
+        with self.assertRaisesRegex(ValueError, "4.18.2"):
+            api._normalize_group_action("leave", {"is_dismiss": True})
+
+    def test_4182_join_and_robot_policy_ranges(self):
+        self.assertEqual(api._normalize_group_action("add_option", {"add_type": 5})["add_type"], 5)
+        self.assertEqual(api._normalize_group_action("robot", {
+            "robot_member_switch": 1, "robot_member_examine": 2,
+        }), {"robot_member_switch": 1, "robot_member_examine": 2})
+
+
 if __name__ == "__main__":
     unittest.main()
