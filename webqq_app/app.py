@@ -7,6 +7,7 @@ from .api import *
 from .store import MessageStore
 from .plugins import PluginManager
 from .napcat import NapCatConnection
+from .request_store import ContactRequestStore
 
 
 def configured_web_port(config):
@@ -39,8 +40,12 @@ async def main():
     config = load_config()
     store = MessageStore(maxlen=MAX_MESSAGES)
     store.load_all()
+    request_store = ContactRequestStore()
     plugins = PluginManager(PLUGIN_DIR, config, store)
-    napcat = NapCatConnection(config["ws_url"], config.get("napcat_token", ""), store, plugins=plugins)
+    napcat = NapCatConnection(
+        config["ws_url"], config.get("napcat_token", ""), store, plugins=plugins,
+        config=config, request_store=request_store,
+    )
     plugins.set_napcat(napcat)
     plugins.load_enabled()
 
@@ -48,6 +53,7 @@ async def main():
     app["config"] = config
     app["store"] = store
     app["napcat"] = napcat
+    app["request_store"] = request_store
     app["plugins"] = plugins
     app["ban_tracker"] = BanTracker(
         max_failures=config.get("fail2ban_max_failures", DEFAULT_CONFIG["fail2ban_max_failures"]),
@@ -83,6 +89,15 @@ async def main():
     app.router.add_post("/api/groups/{group_id}/actions", handle_group_action)
     app.router.add_post("/api/groups/{group_id}/albums/upload", handle_group_album_upload)
     app.router.add_put("/api/friends/{user_id}/remark", handle_friend_remark)
+    app.router.add_get("/api/friends", handle_friends)
+    app.router.add_delete("/api/friends/{user_id}", handle_friend_delete)
+    app.router.add_get("/api/profile", handle_profile_get)
+    app.router.add_put("/api/profile", handle_profile_update)
+    app.router.add_post("/api/profile/avatar", handle_profile_avatar)
+    app.router.add_get("/api/contact-requests", handle_contact_requests)
+    app.router.add_post("/api/contact-requests/{request_id}/action", handle_contact_request_action)
+    app.router.add_get("/api/contact-settings", handle_contact_settings_get)
+    app.router.add_put("/api/contact-settings", handle_contact_settings_update)
     app.router.add_post("/api/qzone/posts", handle_qzone_post)
     app.router.add_delete("/api/qzone/posts/{tid}", handle_delete_qzone_post)
     app.router.add_post("/api/message/revoke", handle_message_revoke)

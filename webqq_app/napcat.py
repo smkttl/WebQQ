@@ -3,17 +3,20 @@ from .mentions import MENTION_PATTERN
 from .qzone import delete_qzone_post, publish_qzone_post
 
 class NapCatConnection:
-    def __init__(self, ws_url, token, store, plugins=None):
+    def __init__(self, ws_url, token, store, plugins=None, config=None, request_store=None):
         self.ws_url = ws_url
         self.token = token
         self.store = store
         self.plugins = plugins
+        self.config = config if config is not None else {}
+        self.request_store = request_store
         self.session = None
         self.ws = None
         self._pending = {}
         self._stream_pending = {}
         self._subscribers = []
         self._plugin_tasks = set()
+        self._contact_request_lock = asyncio.Lock()
 
     async def start(self):
         self.session = aiohttp.ClientSession()
@@ -33,6 +36,8 @@ class NapCatConnection:
             self.ws = ws
             print("[napcat] connected")
             asyncio.create_task(self._fetch_contacts())
+            if self.request_store:
+                asyncio.create_task(self._fetch_contact_requests())
             async for raw_msg in ws:
                 if raw_msg.type == aiohttp.WSMsgType.TEXT:
                     try:
@@ -101,6 +106,55 @@ class NapCatConnection:
                 self.store.refresh_private_temp_names_for_group(group_id)
         except Exception:
             pass
+
+    async def _fetch_contact_requests(self):
+        try:
+            response = await self._request("get_group_system_msg", {"count": 100}, timeout=30)
+            data = response.get("data") if response and response.get("status") == "ok" else {}
+            seen = set()
+            for key, sub_type in (("invited_requests", "invite"), ("InvitedRequest", "invite"), ("join_requests", "add")):
+                for item in data.get(key, []) if isinstance(data, dict) else []:
+                    if not isinstance(item, dict) or item.get("checked"):
+                        continue
+                    flag = str(item.get("request_id") or item.get("flag") or "")
+                    identity = (sub_type, flag)
+                    if not flag or identity in seen:
+                        continue
+                    seen.add(identity)
+                    event = dict(item)
+                    event.update({"request_type": "group", "sub_type": sub_type, "flag": flag})
+                    record, created = self.request_store.upsert(event, source="backfill")
+                    if created:
+                        await self._broadcast_contact_request(record)
+        except Exception as error:
+            print(f"[napcat] group request backfill failed: {error}")
+
+        try:
+            response = await self._request("get_doubt_friends_add_request", {"count": 50}, timeout=30)
+            data = response.get("data") if response and response.get("status") == "ok" else None
+            candidates = data if isinstance(data, list) else []
+            if isinstance(data, dict):
+                for value in data.values():
+                    if isinstance(value, list):
+                        candidates.extend(value)
+            for item in candidates:
+                if not isinstance(item, dict) or item.get("isDecide") or item.get("checked"):
+                    continue
+                flag = str(item.get("reqTime") or item.get("request_id") or item.get("flag") or "")
+                if not flag:
+                    continue
+                event = dict(item)
+                event.update({
+                    "request_type": "friend", "sub_type": "add", "flag": flag,
+                    "user_id": item.get("uin") or item.get("user_id") or item.get("peerUin"),
+                    "user_name": item.get("nick") or item.get("nickname") or item.get("name"),
+                    "comment": item.get("msg") or item.get("message") or item.get("source"),
+                })
+                record, created = self.request_store.upsert(event, source="doubt_backfill")
+                if created:
+                    await self._broadcast_contact_request(record)
+        except Exception as error:
+            print(f"[napcat] friend request backfill unavailable: {error}")
 
     async def _request(self, action, params, timeout=10):
         if not self.ws:
@@ -304,19 +358,83 @@ class NapCatConnection:
         )
 
     async def _handle_request(self, data):
+        if not self.request_store:
+            await self._auto_approve_legacy_request(data)
+            return
+        record, _ = self.request_store.upsert(data)
+        if not record:
+            return
+        await self._broadcast_contact_request(record)
+        if not self.config.get("auto_approve_requests", DEFAULT_CONFIG["auto_approve_requests"]):
+            return
+        if record["request_type"] == "friend" or (
+            record["request_type"] == "group" and record["sub_type"] == "invite"
+        ):
+            record, response = await self.act_on_contact_request(record["id"], True, auto=True)
+            if not response or response.get("status") != "ok":
+                print(f"[napcat] failed to auto-approve request: {response}")
+
+    async def _auto_approve_legacy_request(self, data):
         request_type = data.get("request_type")
         flag = data.get("flag")
         if not flag:
             return
         if request_type == "friend":
-            resp = await self._request("set_friend_add_request", {"flag": str(flag), "approve": True}, timeout=10)
-            if not resp or resp.get("status") != "ok":
-                print(f"[napcat] failed to auto-approve friend request: {resp}")
+            await self._request("set_friend_add_request", {"flag": str(flag), "approve": True}, timeout=10)
+        elif request_type == "group" and data.get("sub_type") == "invite":
+            await self._request("set_group_add_request", {"flag": str(flag), "approve": True}, timeout=10)
+
+    async def _broadcast_contact_request(self, record):
+        if not record:
             return
-        if request_type == "group" and data.get("sub_type") == "invite":
-            resp = await self._request("set_group_add_request", {"flag": str(flag), "approve": True}, timeout=10)
-            if not resp or resp.get("status") != "ok":
-                print(f"[napcat] failed to auto-approve group invite: {resp}")
+        await self._broadcast({
+            "type": "contact_request_update",
+            "data": record,
+            "pending_count": self.request_store.pending_count() if self.request_store else 0,
+        })
+
+    async def act_on_contact_request(self, request_id, approve, remark="", reason="", auto=False):
+        if not self.request_store:
+            raise RuntimeError("contact request store is unavailable")
+        async with self._contact_request_lock:
+            record = self.request_store.get(request_id)
+            if not record:
+                raise KeyError("request not found")
+            if record.get("status") not in ("pending", "failed"):
+                raise ValueError("request has already been handled")
+            if record.get("source") == "doubt_backfill" and not approve:
+                raise ValueError("NapCat 4.18.2 cannot reject doubtful friend requests")
+            processing = self.request_store.update(
+                request_id, status="processing", decision="approve" if approve else "reject",
+                error="", auto=bool(auto),
+            )
+            await self._broadcast_contact_request(processing)
+            params = {"flag": record["flag"], "approve": bool(approve)}
+            if record["request_type"] == "friend":
+                if record.get("source") == "doubt_backfill":
+                    action = "set_doubt_friends_add_request"
+                else:
+                    action = "set_friend_add_request"
+                if approve and remark and action == "set_friend_add_request":
+                    params["remark"] = str(remark)
+            else:
+                if not approve and reason:
+                    params["reason"] = str(reason)
+                action = "set_group_add_request"
+            try:
+                response = await self._request(action, params, timeout=30)
+                if not response or response.get("status") != "ok":
+                    error = response.get("wording") or response.get("message") if isinstance(response, dict) else "not connected"
+                    updated = self.request_store.update(request_id, status="failed", error=str(error or "request action failed"))
+                else:
+                    updated = self.request_store.update(
+                        request_id, status="approved" if approve else "rejected", error="",
+                    )
+            except Exception as error:
+                response = None
+                updated = self.request_store.update(request_id, status="failed", error=str(error))
+            await self._broadcast_contact_request(updated)
+            return updated, response
 
     async def _resolve_forward_segments(self, msg):
         segments = msg.get("message", [])
@@ -535,6 +653,55 @@ class NapCatConnection:
             if isinstance(friend, dict) and str(friend.get("user_id") or friend.get("uin") or "") == key:
                 return friend
         return None
+
+    async def get_friends_with_categories(self):
+        response = await self._request("get_friends_with_category", {}, timeout=30)
+        if response and response.get("status") == "ok" and isinstance(response.get("data"), list):
+            categories = []
+            for category in response["data"]:
+                if not isinstance(category, dict):
+                    continue
+                categories.append({
+                    "id": str(category.get("categoryId", "")),
+                    "name": str(category.get("categoryName") or "Friends"),
+                    "friends": [friend for friend in category.get("buddyList", []) if isinstance(friend, dict)],
+                })
+            return {"categories": categories, "categorized": True, "category_editable": False}
+        response = await self._request("get_friend_list", {}, timeout=30)
+        if not response or response.get("status") != "ok":
+            return None
+        return {
+            "categories": [{"id": "", "name": "Friends", "friends": response.get("data") or []}],
+            "categorized": False,
+            "category_editable": False,
+        }
+
+    async def delete_friend(self, user_id):
+        return await self._request("delete_friend", {"user_id": str(user_id)}, timeout=30)
+
+    async def get_self_profile(self):
+        login = await self._request("get_login_info", {}, timeout=30)
+        if not login or login.get("status") != "ok":
+            return None
+        profile = dict(login.get("data") or {})
+        user_id = profile.get("user_id")
+        if user_id:
+            detail = await self._request(
+                "get_stranger_info", {"user_id": str(user_id), "no_cache": True}, timeout=30,
+            )
+            if detail and detail.get("status") == "ok" and isinstance(detail.get("data"), dict):
+                profile.update(detail["data"])
+        return profile
+
+    async def update_self_profile(self, nickname, personal_note):
+        return await self._request("set_qq_profile", {
+            "nickname": str(nickname), "personal_note": str(personal_note),
+        }, timeout=30)
+
+    async def set_self_avatar(self, path):
+        return await self._request("set_qq_avatar", {
+            "file": Path(path).resolve().as_uri(),
+        }, timeout=120)
 
     async def upload_group_file(self, group_id, path, name, folder_id=""):
         params = {"group_id": str(group_id), "file": str(path), "name": str(name)}

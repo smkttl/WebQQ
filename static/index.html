@@ -11,7 +11,7 @@ try {
   document.documentElement.dataset.theme = savedTheme || preferredTheme;
 } catch {}
 </script>
-<link rel="stylesheet" href="/app.css?v=20260809-1">
+<link rel="stylesheet" href="/app.css?v=20260809-2">
 </head>
 <body>
 
@@ -80,6 +80,9 @@ try {
         <span class="dot" id="statusDot"></span>
         <span id="statusText">Connecting...</span>
       </div>
+      <button class="icon-button contact-button" id="contactsButton" type="button" aria-label="Manage contacts" data-tooltip="Contacts">
+        <svg><use href="#icon-users"/></svg><span class="contact-badge" id="contactBadge" hidden>0</span>
+      </button>
       <button class="icon-button" id="pluginsButton" type="button" aria-label="Manage plugins" data-tooltip="Plugins">
         <svg><use href="#icon-puzzle"/></svg>
       </button>
@@ -190,6 +193,8 @@ let selectedPortalPluginId = '';
 let selfUser = {user_id: '', name: ''};
 let backgroundRevision = '';
 let allChats = [];
+let contactsOverlay = null;
+let contactPendingCount = 0;
 const loadedGroupMembersByChat = new Map();
 const faceManifestUrl = 'https://koishi.js.org/QFace/assets/qq_emoji/_index.json';
 const faceAssetBaseUrl = 'https://koishi.js.org/QFace/';
@@ -655,6 +660,317 @@ async function saveSelectedPluginConfig() {
   }
 }
 
+function updateContactBadge(count) {
+  contactPendingCount = Math.max(0, Number(count) || 0);
+  const badge = $('contactBadge');
+  badge.hidden = contactPendingCount === 0;
+  badge.textContent = contactPendingCount > 99 ? '99+' : String(contactPendingCount);
+  if (contactsOverlay && contactsOverlay.isConnected) {
+    const tabBadge = contactsOverlay.querySelector('#contactTabBadge');
+    if (tabBadge) tabBadge.textContent = contactPendingCount ? `(${contactPendingCount})` : '';
+  }
+  $('contactsButton').setAttribute('aria-label', contactPendingCount
+    ? `Manage contacts, ${contactPendingCount} pending requests`
+    : 'Manage contacts');
+}
+
+async function contactJson(path, options = {}) {
+  const response = await api(path, options);
+  const data = await readJsonResponse(response);
+  if (!response.ok || !data.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  return data;
+}
+
+async function refreshContactBadge() {
+  try {
+    const data = await contactJson('/api/contact-settings');
+    updateContactBadge(data.pending_count);
+  } catch {}
+}
+
+function contactRequestTitle(item) {
+  if (item.request_type === 'friend') return 'Friend request';
+  return item.sub_type === 'invite' ? 'Group invitation' : 'Group join request';
+}
+
+function contactRequestIdentity(item) {
+  const person = item.user_name || item.user_id || 'Unknown user';
+  if (item.request_type === 'friend') return item.user_id ? `${person} · ${item.user_id}` : person;
+  const group = item.group_name || item.group_id || 'Unknown group';
+  return `${person} · ${group}`;
+}
+
+function renderContactRequests(overlay) {
+  const list = overlay.querySelector('#contactRequestList');
+  const filter = overlay.querySelector('#contactRequestFilter').value;
+  const items = (overlay._contactRequests || []).filter(item => !filter || item.status === filter);
+  list.innerHTML = '';
+  if (!items.length) {
+    list.innerHTML = '<div class="contact-empty">No requests in this view.</div>';
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement('article');
+    row.className = 'contact-request-row';
+    const date = item.received_at ? new Date(item.received_at * 1000).toLocaleString() : '';
+    const retryable = item.status === 'pending' || item.status === 'failed';
+    row.innerHTML = `
+      <div class="contact-request-avatar"><span>${esc((item.user_name || item.user_id || '?').slice(0, 1).toUpperCase())}</span></div>
+      <div class="contact-request-copy">
+        <div class="contact-row-title"><strong>${esc(contactRequestTitle(item))}</strong><span class="contact-status status-${esc(item.status)}">${esc(item.status)}</span></div>
+        <div class="contact-row-identity">${esc(contactRequestIdentity(item))}</div>
+        ${item.comment ? `<div class="contact-request-comment">${esc(item.comment)}</div>` : ''}
+        ${item.error ? `<div class="contact-error">${esc(item.error)}</div>` : ''}
+        <time>${esc(date)}</time>
+      </div>
+      ${retryable ? `<div class="contact-row-actions"><button type="button" data-request-action="approve">Approve</button>${item.source === 'doubt_backfill' ? '' : '<button type="button" class="danger-quiet" data-request-action="reject">Reject</button>'}</div>` : ''}`;
+    row.querySelectorAll('[data-request-action]').forEach(button => {
+      button.addEventListener('click', () => actOnContactRequest(overlay, item, button.dataset.requestAction === 'approve'));
+    });
+    list.appendChild(row);
+  }
+}
+
+async function loadContactRequests(overlay) {
+  const list = overlay.querySelector('#contactRequestList');
+  list.innerHTML = '<div class="contact-empty">Loading requests...</div>';
+  try {
+    const [requests, settings] = await Promise.all([
+      contactJson('/api/contact-requests'), contactJson('/api/contact-settings'),
+    ]);
+    overlay._contactRequests = requests.requests || [];
+    updateContactBadge(requests.pending_count);
+    const toggle = overlay.querySelector('#autoApproveRequests');
+    toggle.checked = Boolean(settings.auto_approve_requests);
+    overlay.querySelector('#autoApproveLabel').textContent = toggle.checked ? 'Automatic approval is on' : 'Manual review is on';
+    renderContactRequests(overlay);
+  } catch (error) {
+    list.innerHTML = `<div class="contact-error-state">${esc(error.message || String(error))}</div>`;
+  }
+}
+
+async function actOnContactRequest(overlay, item, approve) {
+  let remark = '';
+  let reason = '';
+  if (approve && item.request_type === 'friend') {
+    const answer = prompt('Friend remark (optional)', '');
+    if (answer === null) return;
+    remark = answer;
+  }
+  if (!approve && item.request_type === 'group') {
+    const answer = prompt('Rejection reason (optional)', '');
+    if (answer === null) return;
+    reason = answer;
+  }
+  const buttons = overlay.querySelectorAll(`[data-request-action]`);
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    await contactJson(`/api/contact-requests/${encodeURIComponent(item.id)}/action`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({approve, remark, reason}),
+    });
+    showToast(approve ? 'Request approved' : 'Request rejected');
+    await loadContactRequests(overlay);
+    if (approve && item.request_type === 'friend') loadChats();
+  } catch (error) {
+    showModal(error.message || 'Request action failed');
+    await loadContactRequests(overlay);
+  }
+}
+
+function normalizeContactFriend(friend, category) {
+  const userId = String(friend.user_id || friend.uin || '');
+  const nickname = String(friend.nickname || friend.nick_name || friend.nick || '');
+  const remark = String(friend.remark || '');
+  return {userId, nickname, remark, name: remark || nickname || userId, category};
+}
+
+function renderContactFriends(overlay) {
+  const list = overlay.querySelector('#contactFriendList');
+  const needle = overlay.querySelector('#contactFriendSearch').value.trim().toLowerCase();
+  const categories = overlay._friendCategories || [];
+  list.innerHTML = '';
+  let shown = 0;
+  for (const category of categories) {
+    const friends = (category.friends || []).map(friend => normalizeContactFriend(friend, category.name)).filter(friend =>
+      friend.userId && (!needle || `${friend.name} ${friend.nickname} ${friend.remark} ${friend.userId}`.toLowerCase().includes(needle))
+    );
+    if (!friends.length) continue;
+    const section = document.createElement('section');
+    section.className = 'contact-friend-section';
+    section.innerHTML = `<h3>${esc(category.name || 'Friends')}<span>${friends.length}</span></h3>`;
+    for (const friend of friends) {
+      shown += 1;
+      const row = document.createElement('div');
+      row.className = 'contact-friend-row';
+      row.innerHTML = `
+        <div class="contact-friend-avatar"><span>${esc(friend.name.slice(0, 1).toUpperCase())}</span><img src="/api/avatar?type=user&id=${encodeURIComponent(friend.userId)}" alt=""></div>
+        <div class="contact-friend-copy"><strong>${esc(friend.name)}</strong><span>${esc(friend.userId)}${friend.remark && friend.nickname ? ` · ${esc(friend.nickname)}` : ''}</span></div>
+        <div class="contact-row-actions"><button type="button" data-friend-edit>Edit</button><button type="button" class="danger-quiet" data-friend-delete>Delete</button></div>`;
+      row.querySelector('[data-friend-edit]').addEventListener('click', () => editContactFriend(overlay, friend));
+      row.querySelector('[data-friend-delete]').addEventListener('click', () => deleteContactFriend(overlay, friend));
+      section.appendChild(row);
+    }
+    list.appendChild(section);
+  }
+  if (!shown) list.innerHTML = '<div class="contact-empty">No matching friends.</div>';
+}
+
+async function loadContactFriends(overlay) {
+  const list = overlay.querySelector('#contactFriendList');
+  list.innerHTML = '<div class="contact-empty">Loading friends...</div>';
+  try {
+    const data = await contactJson('/api/friends');
+    overlay._friendCategories = data.categories || [];
+    overlay.querySelector('#contactCategoryNote').textContent = data.categorized
+      ? 'Using your QQ friend categories.' : 'Friend categories are unavailable on this connection.';
+    renderContactFriends(overlay);
+  } catch (error) {
+    list.innerHTML = `<div class="contact-error-state">${esc(error.message || String(error))}</div>`;
+  }
+}
+
+async function editContactFriend(overlay, friend) {
+  const remark = prompt('Friend remark (empty clears)', friend.remark);
+  if (remark === null) return;
+  try {
+    await contactJson(`/api/friends/${encodeURIComponent(friend.userId)}/remark`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({remark}),
+    });
+    showToast('Friend remark updated');
+    await Promise.all([loadContactFriends(overlay), loadChats()]);
+  } catch (error) { showModal(error.message || 'Remark update failed'); }
+}
+
+async function deleteContactFriend(overlay, friend) {
+  if (!confirm(`Delete ${friend.name} (${friend.userId}) from your friends? Chat history will be kept.`)) return;
+  try {
+    await contactJson(`/api/friends/${encodeURIComponent(friend.userId)}`, {method: 'DELETE'});
+    showToast('Friend deleted');
+    await loadContactFriends(overlay);
+  } catch (error) { showModal(error.message || 'Friend deletion failed'); }
+}
+
+async function loadContactProfile(overlay) {
+  const form = overlay.querySelector('#contactProfileForm');
+  form.classList.add('loading');
+  try {
+    const data = await contactJson('/api/profile');
+    const profile = data.profile || {};
+    overlay._profile = profile;
+    form.querySelector('#contactProfileNickname').value = profile.nickname || '';
+    form.querySelector('#contactProfileNote').value = profile.personal_note || '';
+    form.querySelector('#contactProfileId').textContent = profile.user_id || '';
+    const image = form.querySelector('#contactProfileAvatar');
+    image.src = `${profile.avatar_url || `/api/avatar?type=user&id=${encodeURIComponent(profile.user_id || '')}`}&v=${Date.now()}`;
+  } catch (error) {
+    overlay.querySelector('#contactProfileError').textContent = error.message || String(error);
+  } finally { form.classList.remove('loading'); }
+}
+
+async function saveContactProfile(overlay) {
+  const form = overlay.querySelector('#contactProfileForm');
+  const button = form.querySelector('[type="submit"]');
+  button.disabled = true;
+  overlay.querySelector('#contactProfileError').textContent = '';
+  try {
+    await contactJson('/api/profile', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        nickname: form.querySelector('#contactProfileNickname').value.trim(),
+        personal_note: form.querySelector('#contactProfileNote').value.trim(),
+      }),
+    });
+    showToast('Profile updated');
+    await loadContactProfile(overlay);
+  } catch (error) {
+    overlay.querySelector('#contactProfileError').textContent = error.message || String(error);
+  } finally { button.disabled = false; }
+}
+
+async function uploadContactAvatar(overlay, file) {
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) { showModal('Avatar is larger than 10 MB'); return; }
+  const formData = new FormData();
+  formData.append('file', file);
+  try {
+    await contactJson('/api/profile/avatar', {method: 'POST', body: formData});
+    showToast('Avatar updated');
+    await loadContactProfile(overlay);
+  } catch (error) { showModal(error.message || 'Avatar update failed'); }
+}
+
+function activateContactsTab(overlay, tab) {
+  overlay._activeContactTab = tab;
+  overlay.querySelectorAll('[data-contact-tab]').forEach(button => button.classList.toggle('active', button.dataset.contactTab === tab));
+  overlay.querySelectorAll('[data-contact-panel]').forEach(panel => panel.hidden = panel.dataset.contactPanel !== tab);
+  if (tab === 'requests') loadContactRequests(overlay);
+  if (tab === 'friends') loadContactFriends(overlay);
+  if (tab === 'profile') loadContactProfile(overlay);
+}
+
+function showContactsPanel(initialTab = 'requests') {
+  if (contactsOverlay && contactsOverlay.isConnected) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay contacts-overlay';
+  overlay.innerHTML = `
+    <div class="modal-box contacts-modal">
+      <header class="contacts-head"><div><h2>Contacts</h2><span>Friends, requests, and your profile</span></div><button class="icon-button" type="button" id="contactsClose" aria-label="Close"><svg><use href="#icon-x"/></svg></button></header>
+      <nav class="contacts-tabs" aria-label="Contact views"><button type="button" data-contact-tab="requests">Requests <span id="contactTabBadge"></span></button><button type="button" data-contact-tab="friends">Friends</button><button type="button" data-contact-tab="profile">Profile</button></nav>
+      <main class="contacts-content">
+        <section data-contact-panel="requests">
+          <div class="contact-mode-row"><div><strong id="autoApproveLabel">Loading approval mode...</strong><span>When off, new requests wait here for review. Existing pending requests are never approved by changing this switch.</span></div><label class="switch-control"><input id="autoApproveRequests" type="checkbox"><span aria-hidden="true"></span></label></div>
+          <div class="contact-toolbar"><select id="contactRequestFilter" aria-label="Filter request status"><option value="">All history</option><option value="pending">Pending</option><option value="failed">Failed</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select><button type="button" id="contactRequestsRefresh">Refresh</button></div>
+          <div class="contact-list" id="contactRequestList"></div>
+        </section>
+        <section data-contact-panel="friends" hidden>
+          <div class="contact-toolbar"><label class="contact-search"><svg><use href="#icon-search"/></svg><input id="contactFriendSearch" type="search" placeholder="Search friends" autocomplete="off"></label><button type="button" id="contactFriendsRefresh">Refresh</button></div>
+          <p class="contact-category-note" id="contactCategoryNote"></p><div class="contact-list" id="contactFriendList"></div>
+        </section>
+        <section data-contact-panel="profile" hidden>
+          <form class="contact-profile-form" id="contactProfileForm">
+            <div class="contact-profile-identity"><div class="contact-profile-avatar"><img id="contactProfileAvatar" alt="Your avatar"></div><div><strong>Your profile</strong><span id="contactProfileId"></span><input class="file-input" id="contactProfileAvatarInput" type="file" accept="image/*"><button type="button" id="contactProfileAvatarButton">Change avatar</button></div></div>
+            <label>Nickname<input id="contactProfileNickname" maxlength="64" required></label>
+            <label>Personal signature<textarea id="contactProfileNote" maxlength="255" rows="4"></textarea></label>
+            <div class="contact-error" id="contactProfileError"></div><button class="contact-primary" type="submit">Save profile</button>
+          </form>
+        </section>
+      </main>
+    </div>`;
+  document.body.appendChild(overlay);
+  contactsOverlay = overlay;
+  const close = () => { overlay.remove(); if (contactsOverlay === overlay) contactsOverlay = null; };
+  overlay.querySelector('#contactsClose').addEventListener('click', close);
+  overlay.addEventListener('pointerdown', event => { if (event.target === overlay) close(); });
+  overlay.querySelectorAll('[data-contact-tab]').forEach(button => button.addEventListener('click', () => activateContactsTab(overlay, button.dataset.contactTab)));
+  overlay.querySelector('#contactRequestFilter').addEventListener('change', () => renderContactRequests(overlay));
+  overlay.querySelector('#contactRequestsRefresh').addEventListener('click', () => loadContactRequests(overlay));
+  overlay.querySelector('#contactFriendsRefresh').addEventListener('click', () => loadContactFriends(overlay));
+  overlay.querySelector('#contactFriendSearch').addEventListener('input', () => renderContactFriends(overlay));
+  overlay.querySelector('#autoApproveRequests').addEventListener('change', async event => {
+    event.currentTarget.disabled = true;
+    try {
+      const data = await contactJson('/api/contact-settings', {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({auto_approve_requests: event.currentTarget.checked}),
+      });
+      overlay.querySelector('#autoApproveLabel').textContent = data.auto_approve_requests ? 'Automatic approval is on' : 'Manual review is on';
+      showToast('Request handling updated');
+    } catch (error) {
+      event.currentTarget.checked = !event.currentTarget.checked;
+      showModal(error.message || 'Setting update failed');
+    } finally { event.currentTarget.disabled = false; }
+  });
+  overlay.querySelector('#contactProfileForm').addEventListener('submit', event => { event.preventDefault(); saveContactProfile(overlay); });
+  overlay.querySelector('#contactProfileAvatarButton').addEventListener('click', () => overlay.querySelector('#contactProfileAvatarInput').click());
+  overlay.querySelector('#contactProfileAvatarInput').addEventListener('change', event => {
+    const file = event.currentTarget.files && event.currentTarget.files[0];
+    event.currentTarget.value = '';
+    uploadContactAvatar(overlay, file);
+  });
+  activateContactsTab(overlay, initialTab);
+}
+
 function showReactionUsers(reaction) {
   const emojiId = String(reaction && reaction.emoji_id);
   const users = Array.isArray(reaction && reaction.users) ? reaction.users : [];
@@ -811,6 +1127,7 @@ async function updateStatus() {
     const r = await api('/api/status');
     const d = await r.json();
     if (d.self_user) selfUser = d.self_user;
+    updateContactBadge(d.pending_contact_requests);
     applyBackgroundState(Boolean(d.web_background_image), d.web_background_revision);
     $('statusDot').className = 'dot ' + (d.napcat_connected ? 'ok' : 'err');
     $('statusText').textContent = d.napcat_connected
@@ -3912,6 +4229,11 @@ document.addEventListener('touchmove', () => {
 }, {passive: true});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    if (contactsOverlay && contactsOverlay.isConnected) {
+      contactsOverlay.remove();
+      contactsOverlay = null;
+      return;
+    }
     if (forwardComposerOverlay) {
       closeForwardComposer();
       return;
@@ -3959,6 +4281,7 @@ $('imageInput').addEventListener('change', e => {
 
 $('backButton').addEventListener('click', showChatList);
 $('pluginsButton').addEventListener('click', showPluginsPanel);
+$('contactsButton').addEventListener('click', () => showContactsPanel());
 
 function updateComposerState() {
   $('sendButton').disabled = !currentChat || !$('sendInput').value.trim();
@@ -3997,6 +4320,22 @@ function connectWS() {
         applyEmojiLikeEvent(d.data);
       } else if (d.type === 'message_update' && d.data) {
         applyMessageUpdate(d.data);
+      } else if (d.type === 'contact_request_update' && d.data) {
+        updateContactBadge(d.pending_count);
+        if (contactsOverlay && contactsOverlay.isConnected && contactsOverlay._activeContactTab === 'requests') {
+          loadContactRequests(contactsOverlay);
+        }
+      } else if (d.type === 'contact_settings_update' && d.data) {
+        updateContactBadge(d.data.pending_count);
+        if (contactsOverlay && contactsOverlay.isConnected) {
+          const toggle = contactsOverlay.querySelector('#autoApproveRequests');
+          toggle.checked = Boolean(d.data.auto_approve_requests);
+          contactsOverlay.querySelector('#autoApproveLabel').textContent = toggle.checked ? 'Automatic approval is on' : 'Manual review is on';
+        }
+      } else if (d.type === 'contacts_changed') {
+        if (contactsOverlay && contactsOverlay.isConnected && contactsOverlay._activeContactTab === 'friends') loadContactFriends(contactsOverlay);
+      } else if (d.type === 'profile_update') {
+        if (contactsOverlay && contactsOverlay.isConnected && contactsOverlay._activeContactTab === 'profile') loadContactProfile(contactsOverlay);
       }
     } catch {}
   };

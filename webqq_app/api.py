@@ -9,6 +9,7 @@ QZONE_UGC_RIGHTS = {1, 4, 16, 64, 128}
 QZONE_MAX_IMAGES = 9
 BACKGROUND_UPLOAD_PREFIX = "web_background_image"
 BACKGROUND_UPLOAD_LIMIT = 100 * 1024 * 1024
+PROFILE_AVATAR_UPLOAD_LIMIT = 10 * 1024 * 1024
 BACKGROUND_IMAGE_EXTENSIONS = {
     "jpeg": ".jpg",
     "png": ".png",
@@ -1200,6 +1201,233 @@ async def handle_friend_remark(request):
     })
 
 
+async def handle_friends(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        result = await request.app["napcat"].get_friends_with_categories()
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if result is None:
+        return web.json_response({"ok": False, "error": "friends are unavailable"}, status=503)
+    return web.json_response({"ok": True, **result})
+
+
+async def handle_friend_delete(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    user_id = str(request.match_info.get("user_id", "")).strip()
+    if not user_id.isdigit():
+        return web.json_response({"ok": False, "error": "user_id must be numeric"}, status=400)
+    try:
+        result = await request.app["napcat"].delete_friend(user_id)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({
+            "ok": False, "error": _onebot_error(result, "friend deletion failed"),
+        }, status=500)
+    result_data = result.get("data")
+    if isinstance(result_data, dict) and (
+        result_data.get("valid") is False or result_data.get("result") is False
+    ):
+        return web.json_response({
+            "ok": False,
+            "error": str(result_data.get("message") or result_data.get("errMsg") or "friend deletion failed"),
+        }, status=400)
+    await request.app["napcat"]._broadcast({"type": "contacts_changed", "data": {"user_id": user_id}})
+    return web.json_response({"ok": True, "user_id": user_id})
+
+
+def _public_self_profile(profile):
+    profile = profile if isinstance(profile, dict) else {}
+    user_id = str(profile.get("user_id") or profile.get("uin") or "")
+    return {
+        "user_id": user_id,
+        "nickname": str(profile.get("nickname") or profile.get("nick") or profile.get("name") or ""),
+        "personal_note": str(
+            profile.get("personal_note") or profile.get("longNick") or profile.get("long_nick")
+            or profile.get("signature") or ""
+        ),
+        "avatar_url": avatar_url_for("user", user_id),
+    }
+
+
+async def handle_profile_get(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        profile = await request.app["napcat"].get_self_profile()
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if profile is None:
+        return web.json_response({"ok": False, "error": "profile is unavailable"}, status=503)
+    return web.json_response({"ok": True, "profile": _public_self_profile(profile)})
+
+
+async def handle_profile_update(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    nickname = str(body.get("nickname", "")).strip()
+    personal_note = str(body.get("personal_note", "")).strip()
+    if not nickname or len(nickname) > 64:
+        return web.json_response({"ok": False, "error": "nickname must be 1 to 64 characters"}, status=400)
+    if len(personal_note) > 255:
+        return web.json_response({"ok": False, "error": "personal_note must be at most 255 characters"}, status=400)
+    try:
+        result = await request.app["napcat"].update_self_profile(nickname, personal_note)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(result, "profile update failed")}, status=500)
+    confirmed = await request.app["napcat"].get_self_profile()
+    profile = confirmed if isinstance(confirmed, dict) else {
+        "user_id": request.app["store"]._self_user.get("user_id"),
+        "nickname": nickname,
+        "personal_note": personal_note,
+    }
+    public_profile = _public_self_profile(profile)
+    request.app["store"].set_self_user(public_profile["user_id"], public_profile["nickname"] or nickname)
+    await request.app["napcat"]._broadcast({"type": "profile_update", "data": public_profile})
+    return web.json_response({"ok": True, "profile": public_profile})
+
+
+async def handle_profile_avatar(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    temp_path = None
+    size = 0
+    too_large = False
+    try:
+        if request.content_type != "multipart/form-data":
+            return web.json_response({"ok": False, "error": "multipart form data is required"}, status=400)
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name != "file":
+                await part.release()
+                continue
+            fd, temp_path = tempfile.mkstemp(prefix="webqq-profile-avatar-")
+            with os.fdopen(fd, "wb") as output:
+                while True:
+                    chunk = await part.read_chunk(size=1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > PROFILE_AVATAR_UPLOAD_LIMIT:
+                        too_large = True
+                    else:
+                        output.write(chunk)
+            break
+        if not temp_path or size <= 0:
+            return web.json_response({"ok": False, "error": "file is required"}, status=400)
+        if too_large:
+            return web.json_response({"ok": False, "error": "avatar is larger than 10 MB"}, status=413)
+        if imghdr.what(temp_path) not in BACKGROUND_IMAGE_EXTENSIONS:
+            return web.json_response({"ok": False, "error": "file is not a supported image"}, status=400)
+        result = await request.app["napcat"].set_self_avatar(temp_path)
+        if not result or result.get("status") != "ok":
+            return web.json_response({"ok": False, "error": _onebot_error(result, "avatar update failed")}, status=500)
+        self_user_id = str(request.app["store"]._self_user.get("user_id") or "")
+        if self_user_id.isdigit():
+            for cache_path in avatar_cache_paths("user", self_user_id):
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+        revision = str(int(time.time() * 1000))
+        await request.app["napcat"]._broadcast({"type": "profile_update", "data": {"avatar_revision": revision}})
+        return web.json_response({"ok": True, "avatar_revision": revision})
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+async def handle_contact_requests(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    status = str(request.query.get("status", "")).strip()
+    request_type = str(request.query.get("type", "")).strip()
+    if status and status not in ("pending", "processing", "approved", "rejected", "failed"):
+        return web.json_response({"ok": False, "error": "invalid status"}, status=400)
+    if request_type and request_type not in ("friend", "group"):
+        return web.json_response({"ok": False, "error": "invalid request type"}, status=400)
+    store = request.app["request_store"]
+    return web.json_response({
+        "ok": True, "requests": store.list(status=status, request_type=request_type),
+        "pending_count": store.pending_count(),
+    })
+
+
+async def handle_contact_request_action(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    request_id = str(request.match_info.get("request_id", "")).strip()
+    body = await read_json_body(request)
+    if not isinstance(body.get("approve"), bool):
+        return web.json_response({"ok": False, "error": "approve must be a boolean"}, status=400)
+    remark = str(body.get("remark", "")).strip()
+    reason = str(body.get("reason", "")).strip()
+    if len(remark) > 128:
+        return web.json_response({"ok": False, "error": "remark must be at most 128 characters"}, status=400)
+    if len(reason) > 200:
+        return web.json_response({"ok": False, "error": "reason must be at most 200 characters"}, status=400)
+    try:
+        record, result = await request.app["napcat"].act_on_contact_request(
+            request_id, body["approve"], remark=remark, reason=reason,
+        )
+    except KeyError:
+        return web.json_response({"ok": False, "error": "request not found"}, status=404)
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=409)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    ok = bool(result and result.get("status") == "ok")
+    return web.json_response({"ok": ok, "request": record, "error": record.get("error", "")}, status=200 if ok else 502)
+
+
+async def handle_contact_settings_get(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response({
+        "ok": True,
+        "auto_approve_requests": bool(request.app["config"].get(
+            "auto_approve_requests", DEFAULT_CONFIG["auto_approve_requests"],
+        )),
+        "pending_count": request.app["request_store"].pending_count(),
+    })
+
+
+async def handle_contact_settings_update(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    if not isinstance(body.get("auto_approve_requests"), bool):
+        return web.json_response({"ok": False, "error": "auto_approve_requests must be a boolean"}, status=400)
+    config = request.app["config"]
+    previous = config.get("auto_approve_requests", DEFAULT_CONFIG["auto_approve_requests"])
+    config["auto_approve_requests"] = body["auto_approve_requests"]
+    try:
+        save_config(config)
+    except Exception as error:
+        config["auto_approve_requests"] = previous
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    payload = {
+        "auto_approve_requests": config["auto_approve_requests"],
+        "pending_count": request.app["request_store"].pending_count(),
+    }
+    await request.app["napcat"]._broadcast({"type": "contact_settings_update", "data": payload})
+    return web.json_response({"ok": True, **payload})
+
+
 async def handle_message_emoji_like(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -1314,6 +1542,10 @@ async def handle_status(request):
         "self_user": dict(request.app["store"]._self_user),
         "web_background_image": bool(source),
         "web_background_revision": _background_revision(source),
+        "auto_approve_requests": bool(request.app["config"].get(
+            "auto_approve_requests", DEFAULT_CONFIG["auto_approve_requests"],
+        )),
+        "pending_contact_requests": request.app["request_store"].pending_count() if request.app.get("request_store") else 0,
     })
 
 

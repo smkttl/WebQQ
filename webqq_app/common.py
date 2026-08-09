@@ -50,6 +50,7 @@ DEFAULT_CONFIG = {
     "web_port": 8080,
     "web_token": "",
     "web_background_image": "",
+    "auto_approve_requests": True,
     "flush_interval": 15,
     "fail2ban_max_failures": 5,
     "fail2ban_window_seconds": 300,
