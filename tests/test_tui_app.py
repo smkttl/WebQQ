@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView, Static
 
-from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, MemberPicker, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, RichMediaDialog, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -238,6 +238,25 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.05)
             self.assertEqual(app.query_one("#workspace").styles.display, "none")
             self.assertEqual(app.query_one("#too_small").styles.display, "block")
+
+    async def test_help_panel_opens_and_returns_at_minimum_size(self):
+        app = WebQQTui(FakeClient())
+        async with app.run_test(size=(32, 10)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("?")
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, HelpPanel)
+            help_list = app.screen.query_one("#help_list", ListView)
+            self.assertGreater(len(help_list.children), 20)
+            self.assertIs(app.focused, help_list)
+            await pilot.press("j", "j", "k")
+            self.assertGreater(help_list.index, 0)
+            await pilot.press("escape")
+            self.assertNotIsInstance(app.screen, HelpPanel)
+
+            await pilot.press("f1")
+            self.assertIsInstance(app.screen, HelpPanel)
+            await pilot.press("escape")
 
     async def test_escape_and_refresh_preserve_chat_selection(self):
         app = WebQQTui(FakeClient())

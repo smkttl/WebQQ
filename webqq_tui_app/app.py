@@ -1106,6 +1106,81 @@ class FriendRemarkDialog(ModalScreen):
         self.dismiss(None)
 
 
+HELP_KEY_GROUPS = (
+    ("Navigation", (
+        ("Tab / Shift+Tab", "Move focus"),
+        ("Arrows / j / k", "Move through lists"),
+        ("Enter", "Open or activate the selected item"),
+        ("Esc", "Return one level or cancel the current mode"),
+        ("F1 / ?", "Open this help"),
+        ("q", "Quit; press twice when a draft is present"),
+    )),
+    ("Chat And Search", (
+        ("Ctrl+F", "Search chats or messages"),
+        ("n / Shift+N", "Next or previous message match"),
+        ("PageUp", "Load older messages"),
+        ("F2", "Edit the current private-chat remark"),
+        ("F4", "Open group files"),
+        ("F5", "Open group management"),
+    )),
+    ("Messages", (
+        ("r", "Reply to the selected message"),
+        ("e", "React to the selected message"),
+        ("p", "Poke the selected sender"),
+        ("d", "Download an attachment"),
+        ("t", "Transcribe a selected voice message"),
+    )),
+    ("Compose And Media", (
+        ("Enter", "Send the current draft"),
+        ("Ctrl+J", "Insert a newline in the composer"),
+        ("Ctrl+I", "Send an image"),
+        ("Ctrl+O", "Send a file"),
+        ("F3", "Open media, custom faces, collections, and mini-apps"),
+    )),
+)
+
+
+class HelpListItem(ListItem):
+    def __init__(self, keys: str, description: str, heading: bool = False):
+        label = Text(keys, style="bold yellow" if heading else "bold cyan")
+        if description:
+            label.append("  " + description, style="")
+        super().__init__(Static(label, markup=False))
+        if heading:
+            self.add_class("help-heading")
+
+
+class HelpPanel(ModalScreen):
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+    CSS = """
+    HelpPanel { align: center middle; background: $background 70%; }
+    HelpPanel > Container { width: 76; max-width: 96%; height: 30; max-height: 94%; border: solid $accent; background: $surface; padding: 1; }
+    HelpPanel #help_list { height: 1fr; }
+    HelpPanel #help_list > ListItem { height: auto; min-height: 1; padding: 0 1; }
+    HelpPanel #help_list > ListItem.help-heading { margin-top: 1; background: $panel; }
+    HelpPanel .hint { height: 1; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Keyboard help", classes="dialog-title")
+            yield NavigableListView(id="help_list")
+            yield Static("Arrows/j/k scroll  Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        view = self.query_one("#help_list", ListView)
+        items = []
+        for heading, mappings in HELP_KEY_GROUPS:
+            items.append(HelpListItem(heading, "", heading=True))
+            items.extend(HelpListItem(keys, description) for keys, description in mappings)
+        await view.extend(items)
+        view.index = 0
+        view.focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class WebQQTui(App):
     TITLE = "WebQQ"
     SUB_TITLE = "Terminal client"
@@ -1127,6 +1202,8 @@ class WebQQTui(App):
         Binding("f4", "group_files", show=False),
         Binding("f5", "group_manage", show=False),
         Binding("f2", "friend_remark", show=False),
+        Binding("f1", "help", show=False),
+        Binding("question_mark", "help", show=False),
     ]
     CSS = """
     Screen { background: #111418; color: #e8eaed; }
@@ -1900,6 +1977,9 @@ class WebQQTui(App):
         remark = str(self.current_chat.raw.get("remark") or "")
         self.push_screen(FriendRemarkDialog(remark), self._friend_remark_selected)
 
+    def action_help(self) -> None:
+        self.push_screen(HelpPanel())
+
     def _friend_remark_selected(self, remark: Optional[str]) -> None:
         if remark is not None and self.current_chat:
             self._spawn(self._update_friend_remark(self.current_chat, remark))
@@ -2030,7 +2110,7 @@ class WebQQTui(App):
         if self._account_status:
             parts.append(self._account_status)
         if not self.short:
-            parts.append("Ctrl+F find  F2 remark  F3 media  F4 files  F5 group  t transcribe  Ctrl+I image  Ctrl+O file")
+            parts.append("? help  Ctrl+F find  F2 remark  F3 media  F4 files  F5 group  t transcribe")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 
