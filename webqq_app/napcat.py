@@ -1,4 +1,5 @@
 from .common import *
+import hashlib
 from .mentions import MENTION_PATTERN
 from .qzone import delete_qzone_post, publish_qzone_post
 
@@ -17,6 +18,7 @@ class NapCatConnection:
         self._subscribers = []
         self._plugin_tasks = set()
         self._contact_request_lock = asyncio.Lock()
+        self._custom_faces = {}
 
     async def start(self):
         self.session = aiohttp.ClientSession()
@@ -539,6 +541,62 @@ class NapCatConnection:
 
     async def send_music(self, chat_id, music):
         return await self.send_segments(chat_id, [{"type": "music", "data": dict(music)}], timeout=30)
+
+    @staticmethod
+    def _custom_face_id(url):
+        return hashlib.sha256(str(url).encode("utf-8")).hexdigest()[:24]
+
+    async def fetch_custom_faces(self, count=48):
+        response = await self._request("fetch_custom_face", {"count": int(count)}, timeout=30)
+        if response and response.get("status") == "ok" and isinstance(response.get("data"), list):
+            faces = []
+            for value in response["data"]:
+                url = str(value or "").strip()
+                if not url.startswith(("http://", "https://")):
+                    continue
+                face_id = self._custom_face_id(url)
+                self._custom_faces[face_id] = url
+                faces.append({"id": face_id, "url": url})
+            return {"status": "ok", "data": faces}
+        return response
+
+    async def send_custom_face(self, chat_id, face_id):
+        face_id = str(face_id)
+        url = self._custom_faces.get(face_id)
+        if not url:
+            response = await self.fetch_custom_faces(200)
+            if not response or response.get("status") != "ok":
+                return response
+            url = self._custom_faces.get(face_id)
+        if not url:
+            raise ValueError("custom face is unavailable")
+        return await self.send_segments(chat_id, [{"type": "image", "data": {"file": url}}], timeout=30)
+
+    async def get_collections(self, category=0, count=50):
+        return await self._request("get_collection_list", {
+            "category": str(int(category)), "count": str(int(count)),
+        }, timeout=30)
+
+    async def create_collection(self, brief, raw_data):
+        return await self._request("create_collection", {
+            "brief": str(brief), "rawData": str(raw_data),
+        }, timeout=30)
+
+    async def media_capabilities(self):
+        packet = await self._request("nc_get_packet_status", {}, timeout=10)
+        return {"mini_app": bool(packet and packet.get("status") == "ok")}
+
+    async def send_mini_app(self, chat_id, payload):
+        generated = await self._request("get_mini_app_ark", dict(payload), timeout=60)
+        if not generated or generated.get("status") != "ok":
+            return generated, None
+        outer = generated.get("data")
+        ark = outer.get("data") if isinstance(outer, dict) else None
+        if ark is None:
+            return {"status": "failed", "message": "mini-app generator returned no Ark data"}, None
+        encoded = ark if isinstance(ark, str) else json.dumps(ark, ensure_ascii=False, separators=(",", ":"))
+        sent = await self.send_segments(chat_id, [{"type": "json", "data": {"data": encoded}}], timeout=30)
+        return generated, sent
 
     async def fetch_ptt_text(self, message_id):
         if not self.ws:

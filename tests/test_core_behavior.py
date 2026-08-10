@@ -160,6 +160,47 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[2][1]["message"], [{"type": "contact", "data": {"type": "qq", "id": "123"}}])
         self.assertEqual(calls[3][1]["message"], [{"type": "music", "data": {"type": "163", "id": "456"}}])
 
+    async def test_custom_faces_collections_and_mini_app_use_4182_actions(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            if action == "fetch_custom_face":
+                return {"status": "ok", "data": ["https://face.example/one.png", "invalid"]}
+            if action == "get_mini_app_ark":
+                return {"status": "ok", "data": {"data": {"app": "ark", "prompt": "card"}}}
+            return {"status": "ok", "data": {}}
+
+        connection._request = request
+        faces = await connection.fetch_custom_faces(12)
+        face = faces["data"][0]
+        self.assertEqual(len(face["id"]), 24)
+        self.assertEqual(face["id"], connection._custom_face_id(face["url"]))
+        await connection.send_custom_face("group_7", face["id"])
+        await connection.get_collections(2, 30)
+        await connection.create_collection("Brief", "Raw")
+        generated, sent = await connection.send_mini_app("private_8", {
+            "type": "bili", "title": "Title", "desc": "Desc", "picUrl": "https://pic",
+            "jumpUrl": "https://jump", "webUrl": "",
+        })
+
+        self.assertEqual(calls[0], ("fetch_custom_face", {"count": 12}, 30))
+        self.assertEqual(calls[1][0], "send_group_msg")
+        self.assertEqual(calls[1][1]["message"], [{
+            "type": "image", "data": {"file": "https://face.example/one.png"},
+        }])
+        self.assertIn(("get_collection_list", {"category": "2", "count": "30"}, 30), calls)
+        self.assertIn(("create_collection", {"brief": "Brief", "rawData": "Raw"}, 30), calls)
+        self.assertEqual(generated["status"], "ok")
+        self.assertEqual(sent["status"], "ok")
+        send_call = calls[-1]
+        self.assertEqual(send_call[0], "send_private_msg")
+        ark = send_call[1]["message"][0]
+        self.assertEqual(ark["type"], "json")
+        self.assertEqual(json.loads(ark["data"]["data"]), {"app": "ark", "prompt": "card"})
+
     async def test_private_messages_keep_mentions_as_plain_text(self):
         calls = []
         store = SimpleNamespace(private_send_context=lambda user_id: {})
@@ -541,6 +582,42 @@ class RichMediaHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent[0], ("contact", "private_1", "group", "123"))
         self.assertEqual(sent[1][2]["type"], "custom")
         self.assertEqual(sent[1][2]["title"], "Song")
+
+    def test_collection_normalization_handles_nested_4182_response(self):
+        item = {
+            "cid": "c1", "createTime": "10",
+            "summary": {"richMediaSummary": {
+                "brief": "Saved item", "picList": [{"url": "https://img/1"}],
+            }},
+            "richMediaContent": {"rawData": "full text"},
+            "author": {"numId": 42, "strId": "Alice", "groupId": 7, "groupName": "Group"},
+        }
+        nested = {"data": {"collectionSearchList": {"collectionItemList": [item]}}}
+        self.assertEqual(api._collection_items(nested), [item])
+        normalized = api._normalize_collection(item)
+        self.assertEqual(normalized["id"], "c1")
+        self.assertEqual(normalized["brief"], "Saved item")
+        self.assertEqual(normalized["text"], "full text")
+        self.assertEqual(normalized["pictures"], ["https://img/1"])
+        self.assertEqual(normalized["author"]["id"], "42")
+
+    def test_mini_app_template_and_advanced_validation(self):
+        common = {
+            "title": "Title", "desc": "Description", "picUrl": "https://example/pic",
+            "jumpUrl": "https://example/jump", "webUrl": "https://example/web",
+        }
+        template = api._mini_app_payload({"mode": "bili", **common})
+        self.assertEqual(template["type"], "bili")
+        advanced_values = {
+            "iconUrl": "https://example/icon", "appId": "1", "scene": "2",
+            "templateType": "3", "businessType": "4", "verType": "5",
+            "shareType": "6", "versionId": "7", "sdkId": "8", "withShareTicket": "0",
+        }
+        advanced = api._mini_app_payload({"mode": "advanced", **common, **advanced_values})
+        self.assertEqual(advanced["appId"], "1")
+        self.assertNotIn("type", advanced)
+        with self.assertRaisesRegex(ValueError, "HTTP"):
+            api._mini_app_payload({"mode": "weibo", **common, "picUrl": "file:///tmp/pic"})
 
 
 class VoiceTranscriptionTests(unittest.IsolatedAsyncioTestCase):

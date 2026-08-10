@@ -15,6 +15,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Auto-approves friend requests and group invitations for the logged-in account
 - Group lifecycle notices and recall tags are shown in chat history
 - Images, files, video, voice, merged forwards, JSON cards, music, contacts, locations, and other structured messages render in web and terminal clients
+- Browse and send QQ custom faces, browse/create QQ collections, save message snapshots, and send Bilibili/Weibo/custom mini-app cards
 - The web client and plugins can combine existing messages or authored text nodes into merged forwards
 
 ## Requirements
@@ -85,6 +86,11 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | POST   | `/api/send`                        | Send a message           |
 | POST   | `/api/send-forward`                | Send a merged forward    |
 | POST   | `/api/poke`                        | Poke a chat participant  |
+| GET    | `/api/custom-faces`                | Browse QQ custom faces   |
+| POST   | `/api/send-custom-face`            | Send a QQ custom face    |
+| GET/POST | `/api/collections`               | Browse or create QQ collections |
+| POST   | `/api/collections/from-message`    | Save a message snapshot to collections |
+| POST   | `/api/send-mini-app`               | Generate and send a mini-app card |
 | POST   | `/api/message/emoji-like`          | React to a message       |
 | POST   | `/api/message/revoke`              | Revoke a recent self message |
 | POST   | `/api/mark-read`                   | Mark a chat as read      |
@@ -102,7 +108,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 
 ## TODO
 
-- Rich sending for images, video, voice, JSON/Markdown cards, music, contacts, locations, and dice/RPS.
+- Rich sending for Markdown cards, locations, and dice/RPS.
 - Request-management UI for reviewing and manually approving or rejecting pending requests.
 - Group file management: folders, delete/move/rename/transfer, file-system info, and root/folder listings.
 - Group notice and essence-message management.

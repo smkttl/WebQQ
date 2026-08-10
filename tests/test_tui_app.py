@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from textual.widgets import Input, ListView, Static
 
-from webqq_tui_app.app import Composer, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, MemberPicker, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, MemberPicker, RichMediaDialog, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -23,6 +23,7 @@ class FakeClient:
         self.group_file_calls = []
         self.group_management_calls = []
         self.remarks = []
+        self.custom_faces_sent = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -75,6 +76,16 @@ class FakeClient:
     async def send_music(self, chat_id, music):
         self.rich_media.append(("music", chat_id, music))
         return {"ok": True}
+
+    async def custom_faces(self, count=48):
+        return [{"id": "0123456789abcdef01234567", "url": "https://example/face.png"}]
+
+    async def send_custom_face(self, chat_id, face_id):
+        self.custom_faces_sent.append((chat_id, face_id))
+        return {"ok": True}
+
+    async def collections(self, category=0, count=50):
+        return [{"id": "one", "brief": "Saved", "text": "Collection body"}]
 
     async def transcribe_message(self, chat_id, message_id):
         self.transcriptions.append((chat_id, message_id))
@@ -175,6 +186,17 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RichMediaDialog.parse_command("contact group 123"), {"kind": "contact", "type": "group", "id": "123"})
         custom = RichMediaDialog.parse_command('music custom {"url":"https://p","audio":"https://a","title":"T"}')
         self.assertEqual(custom["music"]["type"], "custom")
+        self.assertEqual(RichMediaDialog.parse_command("faces"), {"kind": "faces"})
+        self.assertEqual(RichMediaDialog.parse_command("collections"), {"kind": "collections"})
+        mini_app = RichMediaDialog.parse_command(
+            'miniapp bili {"title":"T","picUrl":"https://p","jumpUrl":"https://j"}',
+        )
+        self.assertEqual(mini_app["mini_app"]["mode"], "bili")
+        collection = RichMediaDialog.parse_command(
+            'collection create {"brief":"B","raw_data":"R"}',
+        )
+        self.assertEqual(collection["collection"]["raw_data"], "R")
+        self.assertEqual(RichMediaDialog.parse_command("collection save"), {"kind": "collection_save"})
 
     def test_internal_text_selection_is_disabled_for_stable_mouse_events(self):
         self.assertFalse(WebQQTui.ALLOW_SELECT)
@@ -398,6 +420,32 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             await pilot.pause(0.05)
             self.assertEqual(client.rich_media, [("contact", "group_1", "qq", "123")])
+
+    async def test_f3_face_and_collection_browsers_fit_small_terminal(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(32, 10)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("f3")
+            command = app.screen.query_one("#media_command", Input)
+            command.value = "faces"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, CustomFacePicker)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertEqual(client.custom_faces_sent, [("group_1", "0123456789abcdef01234567")])
+
+            await pilot.press("f3")
+            command = app.screen.query_one("#media_command", Input)
+            command.value = "collections"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, CollectionBrowser)
+            await pilot.press("escape")
+            self.assertNotIsInstance(app.screen, CollectionBrowser)
 
     async def test_t_transcribes_selected_voice(self):
         client = FakeClient()

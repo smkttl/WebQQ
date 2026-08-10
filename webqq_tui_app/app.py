@@ -331,9 +331,9 @@ class RichMediaDialog(ModalScreen):
     def compose(self) -> ComposeResult:
         with Container():
             yield Static("Send rich media", classes="dialog-title")
-            yield Input(placeholder="video PATH | voice PATH | contact qq ID | music qq ID", id="media_command")
+            yield Input(placeholder="video PATH | faces | collections | miniapp TYPE JSON", id="media_command")
             yield Static("", id="media_error")
-            yield Static("Custom music: music custom {JSON}   Esc return", classes="hint")
+            yield Static("collection create {JSON} | collection save | Esc return", classes="hint")
 
     def on_mount(self) -> None:
         self.query_one("#media_command", Input).focus()
@@ -375,6 +375,34 @@ class RichMediaDialog(ModalScreen):
                 if not all(str(music.get(key) or "").strip() for key in ("url", "audio", "title")):
                     raise ValueError("Custom music requires url, audio, and title")
                 return {"kind": kind, "music": music}
+        if kind in {"faces", "collections"} and len(parts) == 1:
+            return {"kind": kind}
+        if kind == "collection":
+            if len(parts) == 2 and parts[1].lower() == "save":
+                return {"kind": "collection_save"}
+            if len(parts) >= 3 and parts[1].lower() == "create":
+                raw_json = value.split(None, 2)[2]
+                try:
+                    collection = json.loads(raw_json)
+                except (TypeError, ValueError):
+                    raise ValueError("Collection must be a JSON object")
+                if not isinstance(collection, dict) or not all(
+                    str(collection.get(key) or "").strip() for key in ("brief", "raw_data")
+                ):
+                    raise ValueError("Collection requires brief and raw_data")
+                return {"kind": "collection_create", "collection": collection}
+            raise ValueError("Use: collection create {JSON} | collection save")
+        if kind == "miniapp" and len(parts) >= 3:
+            mode = parts[1].lower()
+            if mode not in {"bili", "weibo", "advanced"}:
+                raise ValueError("Mini-app type must be bili, weibo, or advanced")
+            try:
+                mini_app = json.loads(value.split(None, 2)[2])
+            except (TypeError, ValueError):
+                raise ValueError("Mini-app fields must be a JSON object")
+            if not isinstance(mini_app, dict):
+                raise ValueError("Mini-app fields must be a JSON object")
+            return {"kind": "mini_app", "mini_app": {"mode": mode, **mini_app}}
         raise ValueError("Unknown media command")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -384,6 +412,95 @@ class RichMediaDialog(ModalScreen):
             self.query_one("#media_error", Static).update(str(exc))
             return
         self.dismiss(command)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class CustomFaceListItem(ListItem):
+    def __init__(self, face: Mapping[str, Any], number: int):
+        self.face = dict(face)
+        super().__init__(Static("Face {}  {}".format(number, self.face.get("id") or ""), markup=False))
+
+
+class CustomFacePicker(ModalScreen):
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+    CSS = """
+    CustomFacePicker { align: center middle; background: $background 70%; }
+    CustomFacePicker > Container { width: 64; max-width: 96%; height: 22; max-height: 92%; border: solid $accent; background: $surface; padding: 1; }
+    CustomFacePicker #custom_face_list { height: 1fr; }
+    """
+
+    def __init__(self, client: WebQQClient):
+        super().__init__()
+        self.client = client
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Custom faces", classes="dialog-title")
+            yield NavigableListView(id="custom_face_list")
+            yield Static("Enter send  Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        view = self.query_one("#custom_face_list", ListView)
+        try:
+            faces = await self.client.custom_faces()
+            if faces:
+                await view.extend(CustomFaceListItem(face, index + 1) for index, face in enumerate(faces))
+                view.index = 0
+            else:
+                await view.append(ListItem(Static("No custom faces available", markup=False)))
+        except Exception as exc:
+            await view.append(ListItem(Static("Unavailable: {}".format(exc), markup=False)))
+        view.focus()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if isinstance(event.item, CustomFaceListItem):
+            self.dismiss(event.item.face)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class CollectionListItem(ListItem):
+    def __init__(self, collection: Mapping[str, Any]):
+        self.collection = dict(collection)
+        brief = str(collection.get("brief") or "Collection").replace("\n", " ")
+        text = str(collection.get("text") or "").replace("\n", " ")
+        super().__init__(Static("{}\n{}".format(brief[:100], text[:160]), markup=False))
+
+
+class CollectionBrowser(ModalScreen):
+    BINDINGS = [Binding("escape", "cancel", show=False)]
+    CSS = """
+    CollectionBrowser { align: center middle; background: $background 70%; }
+    CollectionBrowser > Container { width: 76; max-width: 96%; height: 24; max-height: 92%; border: solid $accent; background: $surface; padding: 1; }
+    CollectionBrowser #collection_list { height: 1fr; }
+    CollectionBrowser #collection_list > ListItem { height: auto; min-height: 3; }
+    """
+
+    def __init__(self, client: WebQQClient):
+        super().__init__()
+        self.client = client
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("QQ collections", classes="dialog-title")
+            yield NavigableListView(id="collection_list")
+            yield Static("Browse with arrows/j/k  Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        view = self.query_one("#collection_list", ListView)
+        try:
+            collections = await self.client.collections()
+            if collections:
+                await view.extend(CollectionListItem(item) for item in collections)
+                view.index = 0
+            else:
+                await view.append(ListItem(Static("No collections", markup=False)))
+        except Exception as exc:
+            await view.append(ListItem(Static("Unavailable: {}".format(exc), markup=False)))
+        view.focus()
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1690,7 +1807,25 @@ class WebQQTui(App):
 
     def _rich_media_selected(self, command: Optional[Mapping[str, Any]]) -> None:
         if command and self.current_chat:
-            self._spawn(self._send_rich_media(self.current_chat.chat_id, command))
+            kind = str(command.get("kind") or "")
+            if kind == "faces":
+                self.push_screen(CustomFacePicker(self.client), self._custom_face_selected)
+            elif kind == "collections":
+                self.push_screen(CollectionBrowser(self.client))
+            else:
+                self._spawn(self._send_rich_media(self.current_chat.chat_id, command))
+
+    def _custom_face_selected(self, face: Optional[Mapping[str, Any]]) -> None:
+        if face and self.current_chat:
+            self._spawn(self._send_custom_face(self.current_chat.chat_id, str(face.get("id") or "")))
+
+    async def _send_custom_face(self, chat_id: str, face_id: str) -> None:
+        self._set_notice("Sending custom face...", seconds=120)
+        try:
+            await self.client.send_custom_face(chat_id, face_id)
+            self._set_notice("Sent custom face")
+        except Exception as exc:
+            self._set_notice("Custom face send failed: {}".format(exc))
 
     async def _send_rich_media(self, chat_id: str, command: Mapping[str, Any]) -> None:
         kind = str(command.get("kind") or "media")
@@ -1704,6 +1839,18 @@ class WebQQTui(App):
                 await self.client.send_contact(chat_id, str(command["type"]), str(command["id"]))
             elif kind == "music":
                 await self.client.send_music(chat_id, command["music"])
+            elif kind == "mini_app":
+                await self.client.send_mini_app(chat_id, command["mini_app"])
+            elif kind == "collection_create":
+                collection = command["collection"]
+                await self.client.create_collection(
+                    str(collection["brief"]), str(collection["raw_data"]),
+                )
+            elif kind == "collection_save":
+                message = self._selected_message()
+                if not message or not message.message_id:
+                    raise ValueError("select a server-confirmed message first")
+                await self.client.save_message_collection(chat_id, message.message_id)
             else:
                 raise ValueError("unsupported media type")
             self._set_notice("Sent {}".format(kind))

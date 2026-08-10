@@ -158,6 +158,49 @@ class WebQQClient:
         self._require_ok(payload, "music send failed")
         return payload
 
+    async def custom_faces(self, count: int = 48) -> List[Mapping[str, Any]]:
+        payload = await self._request_json("GET", "/api/custom-faces", params={"count": str(count)})
+        self._require_ok(payload, "custom faces load failed")
+        values = payload.get("faces")
+        return [dict(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+
+    async def send_custom_face(self, chat_id: str, face_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/send-custom-face", json_body={"chat_id": chat_id, "face_id": face_id},
+        )
+        self._require_ok(payload, "custom face send failed")
+        return payload
+
+    async def collections(self, category: int = 0, count: int = 50) -> List[Mapping[str, Any]]:
+        payload = await self._request_json(
+            "GET", "/api/collections", params={"category": str(category), "count": str(count)},
+        )
+        self._require_ok(payload, "collections load failed")
+        values = payload.get("collections")
+        return [dict(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+
+    async def create_collection(self, brief: str, raw_data: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/collections", json_body={"brief": brief, "raw_data": raw_data},
+        )
+        self._require_ok(payload, "collection creation failed")
+        return payload
+
+    async def save_message_collection(self, chat_id: str, message_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/collections/from-message",
+            json_body={"chat_id": chat_id, "message_id": message_id},
+        )
+        self._require_ok(payload, "message collection failed")
+        return payload
+
+    async def send_mini_app(self, chat_id: str, mini_app: Mapping[str, Any]) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/send-mini-app", json_body={"chat_id": chat_id, **dict(mini_app)},
+        )
+        self._require_ok(payload, "mini-app send failed")
+        return payload
+
     async def transcribe_message(self, chat_id: str, message_id: str) -> Mapping[str, Any]:
         payload = await self._request_json(
             "POST",

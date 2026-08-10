@@ -156,6 +156,7 @@ try {
   <button type="button" id="msgMenuRevoke">Revoke</button>
   <button type="button" id="msgMenuTempChat">Temp Chat</button>
   <button type="button" id="msgMenuFaceReply">Face Reply</button>
+  <button type="button" id="msgMenuSaveCollection">Save to Collections</button>
   <button type="button" id="msgMenuSelect">Select</button>
 </div>
 
@@ -266,21 +267,42 @@ function showModal(msg) {
 function showRichMediaPanel() {
   if (!currentChat) return;
   const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
+  overlay.className = 'modal-overlay rich-media-overlay';
   overlay.innerHTML = `
     <form class="modal-box rich-media-modal" id="richMediaForm">
       <div class="rich-media-head">
-        <h2>Send media</h2>
+        <h2>Media tools</h2>
         <button class="icon-button" type="button" id="richMediaClose" aria-label="Close"><svg><use href="#icon-x"/></svg></button>
       </div>
-      <label>Type<select id="richMediaKind">
-        <option value="file">File</option><option value="image">Image</option>
-        <option value="video">Video</option><option value="voice">Voice</option>
-        <option value="contact">Contact</option><option value="music">Music</option>
-      </select></label>
-      <div id="richMediaFields"></div>
+      <div class="rich-media-tabs" role="tablist">
+        <button type="button" class="active" data-media-view="send">Send</button>
+        <button type="button" data-media-view="faces">Faces</button>
+        <button type="button" data-media-view="collections">Collections</button>
+      </div>
+      <section class="rich-media-panel active" data-media-panel="send">
+        <label>Type<select id="richMediaKind">
+          <option value="file">File</option><option value="image">Image</option>
+          <option value="video">Video</option><option value="voice">Voice</option>
+          <option value="contact">Contact</option><option value="music">Music</option>
+          <option value="miniapp">Mini-app card</option>
+        </select></label>
+        <div id="richMediaFields"></div>
+        <button class="rich-media-send" type="submit">Send</button>
+      </section>
+      <section class="rich-media-panel" data-media-panel="faces">
+        <div class="media-tool-state" id="customFacesState">Open this tab to load custom faces.</div>
+        <div class="custom-face-grid" id="customFaceGrid"></div>
+      </section>
+      <section class="rich-media-panel" data-media-panel="collections">
+        <div class="collection-create">
+          <label>Title<input id="collectionBrief" maxlength="200"></label>
+          <label>Text<textarea id="collectionRawData" maxlength="10000"></textarea></label>
+          <button type="button" id="collectionCreate">Create text collection</button>
+        </div>
+        <div class="media-tool-state" id="collectionsState">Open this tab to load QQ collections.</div>
+        <div class="collection-list" id="collectionList"></div>
+      </section>
       <div class="rich-media-error" id="richMediaError"></div>
-      <button class="rich-media-send" type="submit">Send</button>
     </form>`;
   document.body.appendChild(overlay);
   const form = overlay.querySelector('#richMediaForm');
@@ -296,7 +318,7 @@ function showRichMediaPanel() {
       fields.innerHTML = `<label>${kind.options[kind.selectedIndex].text}<input id="richMediaFile" type="file"${accept} required></label>`;
     } else if (kind.value === 'contact') {
       fields.innerHTML = `<div class="rich-media-row"><label>Contact type<select id="richContactType"><option value="qq">QQ user</option><option value="group">QQ group</option></select></label><label>QQ ID<input id="richContactId" inputmode="numeric" pattern="[0-9]+" required></label></div>`;
-    } else {
+    } else if (kind.value === 'music') {
       fields.innerHTML = `<label>Music source<select id="richMusicType"><option value="qq">QQ Music</option><option value="163">NetEase</option><option value="kugou">Kugou</option><option value="migu">Migu</option><option value="kuwo">Kuwo</option><option value="custom">Custom card</option></select></label><div id="richMusicFields"></div>`;
       const musicType = fields.querySelector('#richMusicType');
       const musicFields = fields.querySelector('#richMusicFields');
@@ -307,12 +329,112 @@ function showRichMediaPanel() {
       };
       musicType.addEventListener('change', renderMusic);
       renderMusic();
+    } else {
+      fields.innerHTML = `<label>Template<select id="miniAppMode"><option value="bili">Bilibili</option><option value="weibo">Weibo</option><option value="advanced">Advanced Ark</option></select></label><label>Title<input id="miniAppTitle" maxlength="200" required></label><label>Description<input id="miniAppDesc" maxlength="500"></label><label>Cover URL<input id="miniAppPicUrl" type="url" required></label><label>Jump URL<input id="miniAppJumpUrl" type="url" required></label><label>Web URL<input id="miniAppWebUrl" type="url"></label><div id="miniAppAdvanced"></div>`;
+      const mode = fields.querySelector('#miniAppMode');
+      const advanced = fields.querySelector('#miniAppAdvanced');
+      const renderAdvanced = () => {
+        advanced.innerHTML = mode.value === 'advanced' ? `<div class="rich-media-row"><label>Icon URL<input id="miniAppIconUrl" type="url" required></label><label>App ID<input id="miniAppAppId" required></label></div><div class="rich-media-row"><label>Scene<input id="miniAppScene" inputmode="numeric" required></label><label>Template type<input id="miniAppTemplateType" inputmode="numeric" required></label></div><div class="rich-media-row"><label>Business type<input id="miniAppBusinessType" inputmode="numeric" required></label><label>Version type<input id="miniAppVerType" inputmode="numeric" required></label></div><div class="rich-media-row"><label>Share type<input id="miniAppShareType" inputmode="numeric" required></label><label>Version ID<input id="miniAppVersionId" required></label></div><div class="rich-media-row"><label>SDK ID<input id="miniAppSdkId" required></label><label>Share ticket<input id="miniAppWithShareTicket" inputmode="numeric" required></label></div>` : '';
+      };
+      mode.addEventListener('change', renderAdvanced);
+      renderAdvanced();
     }
   }
+
+  let facesLoaded = false;
+  let collectionsLoaded = false;
+  async function loadFaces() {
+    if (facesLoaded) return;
+    facesLoaded = true;
+    const state = overlay.querySelector('#customFacesState');
+    const grid = overlay.querySelector('#customFaceGrid');
+    state.textContent = 'Loading custom faces...';
+    try {
+      const response = await api('/api/custom-faces?count=100');
+      const data = await readJsonResponse(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Custom faces unavailable');
+      state.textContent = data.faces.length ? 'Select a face to send it.' : 'No custom faces available.';
+      for (const face of data.faces || []) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'custom-face-item';
+        button.title = `Send custom face ${face.id}`;
+        const image = document.createElement('img');
+        image.src = face.preview_url;
+        image.alt = 'Custom face';
+        image.loading = 'lazy';
+        button.appendChild(image);
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          try { await doSendRichJson('/api/send-custom-face', {face_id: face.id}); close(); }
+          catch (sendError) { error.textContent = sendError.message || String(sendError); button.disabled = false; }
+        });
+        grid.appendChild(button);
+      }
+    } catch (loadError) { state.textContent = loadError.message || String(loadError); }
+  }
+
+  async function loadCollections(force = false) {
+    if (collectionsLoaded && !force) return;
+    collectionsLoaded = true;
+    const state = overlay.querySelector('#collectionsState');
+    const list = overlay.querySelector('#collectionList');
+    state.textContent = 'Loading collections...';
+    list.replaceChildren();
+    try {
+      const response = await api('/api/collections?count=50');
+      const data = await readJsonResponse(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Collections unavailable');
+      state.textContent = data.collections.length ? `${data.collections.length} collections` : 'No collections.';
+      for (const collection of data.collections || []) {
+        const item = document.createElement('article');
+        item.className = 'collection-item';
+        const title = document.createElement('strong');
+        title.textContent = collection.brief || 'Collection';
+        const text = document.createElement('div');
+        text.textContent = collection.text || '';
+        item.append(title, text);
+        for (const picture of collection.pictures || []) {
+          const url = safeHttpUrl(picture);
+          if (!url) continue;
+          const image = document.createElement('img');
+          image.src = url; image.alt = ''; image.loading = 'lazy'; image.referrerPolicy = 'no-referrer';
+          item.appendChild(image);
+        }
+        list.appendChild(item);
+      }
+    } catch (loadError) { state.textContent = loadError.message || String(loadError); }
+  }
+
+  for (const tab of overlay.querySelectorAll('[data-media-view]')) {
+    tab.addEventListener('click', () => {
+      overlay.querySelectorAll('[data-media-view]').forEach(item => item.classList.toggle('active', item === tab));
+      overlay.querySelectorAll('[data-media-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.mediaPanel === tab.dataset.mediaView));
+      error.textContent = '';
+      if (tab.dataset.mediaView === 'faces') loadFaces();
+      if (tab.dataset.mediaView === 'collections') loadCollections();
+    });
+  }
+
+  overlay.querySelector('#collectionCreate').addEventListener('click', async event => {
+    const brief = overlay.querySelector('#collectionBrief').value.trim();
+    const raw_data = overlay.querySelector('#collectionRawData').value.trim();
+    event.currentTarget.disabled = true;
+    error.textContent = '';
+    try {
+      await doSendRichJson('/api/collections', {brief, raw_data});
+      overlay.querySelector('#collectionBrief').value = '';
+      overlay.querySelector('#collectionRawData').value = '';
+      showToast('Collection created');
+      await loadCollections(true);
+    } catch (createError) { error.textContent = createError.message || String(createError); }
+    finally { event.currentTarget.disabled = false; }
+  });
 
   kind.addEventListener('change', renderFields);
   overlay.querySelector('#richMediaClose').addEventListener('click', close);
   overlay.addEventListener('pointerdown', event => { if (event.target === overlay) close(); });
+  overlay.addEventListener('keydown', event => { if (event.key === 'Escape') close(); });
   form.addEventListener('submit', async event => {
     event.preventDefault();
     error.textContent = '';
@@ -329,7 +451,7 @@ function showRichMediaPanel() {
           type: fields.querySelector('#richContactType').value,
           id: fields.querySelector('#richContactId').value.trim(),
         });
-      } else {
+      } else if (kind.value === 'music') {
         const musicType = fields.querySelector('#richMusicType').value;
         const payload = {type: musicType};
         if (musicType === 'custom') {
@@ -342,6 +464,18 @@ function showRichMediaPanel() {
           });
         } else payload.id = fields.querySelector('#richMusicId').value.trim();
         await doSendRichJson('/api/send-music', payload);
+      } else {
+        const payload = {
+          mode: fields.querySelector('#miniAppMode').value,
+          title: fields.querySelector('#miniAppTitle').value.trim(),
+          desc: fields.querySelector('#miniAppDesc').value.trim(),
+          picUrl: fields.querySelector('#miniAppPicUrl').value.trim(),
+          jumpUrl: fields.querySelector('#miniAppJumpUrl').value.trim(),
+          webUrl: fields.querySelector('#miniAppWebUrl').value.trim(),
+        };
+        const names = ['IconUrl','AppId','Scene','TemplateType','BusinessType','VerType','ShareType','VersionId','SdkId','WithShareTicket'];
+        if (payload.mode === 'advanced') for (const name of names) payload[name[0].toLowerCase() + name.slice(1)] = fields.querySelector(`#miniApp${name}`).value.trim();
+        await doSendRichJson('/api/send-mini-app', payload);
       }
       close();
     } catch (sendError) {
@@ -2336,6 +2470,24 @@ function selectMessageFromMenu() {
   if (message) startMessageSelection(message);
 }
 
+async function saveSelectedMessageToCollection() {
+  const message = selectedMenuMessage;
+  hideMessageMenu();
+  if (!message || !currentChat || !normalizeMessageId(message.message_id)) return;
+  try {
+    const response = await api('/api/collections/from-message', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_id: currentChat, message_id: message.message_id}),
+    });
+    const data = await readJsonResponse(response);
+    if (!response.ok || !data.ok) throw new Error(data.error || 'Collection save failed');
+    showToast('Saved to Collections');
+  } catch (error) {
+    showModal(error.message || String(error));
+  }
+}
+
 function toggleMessageSelection(message) {
   if (!canSelectMessage(message)) return;
   const id = normalizeMessageId(message.message_id);
@@ -4181,6 +4333,7 @@ $('msgMenuPoke').addEventListener('click', pokeSelectedMessage);
 $('msgMenuRevoke').addEventListener('click', revokeSelectedMessage);
 $('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage);
 $('msgMenuFaceReply').addEventListener('click', showFaceReplyPicker);
+$('msgMenuSaveCollection').addEventListener('click', saveSelectedMessageToCollection);
 $('msgMenuSelect').addEventListener('click', selectMessageFromMenu);
 $('selectionCancel').addEventListener('click', cancelMessageSelection);
 $('selectionForward').addEventListener('click', openSelectedMessagesForward);

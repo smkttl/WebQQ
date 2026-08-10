@@ -18,6 +18,11 @@ BACKGROUND_IMAGE_EXTENSIONS = {
     "bmp": ".bmp",
 }
 MUSIC_PLATFORMS = {"qq", "163", "kugou", "migu", "kuwo"}
+MINI_APP_TEMPLATES = {"bili", "weibo"}
+MINI_APP_ADVANCED_FIELDS = {
+    "iconUrl", "appId", "scene", "templateType", "businessType", "verType",
+    "shareType", "versionId", "sdkId", "withShareTicket",
+}
 GROUP_CONTENT_KINDS = {
     "notices", "essence", "honors", "muted", "albums", "album_media", "ignored", "detail",
 }
@@ -646,6 +651,237 @@ async def handle_send_music(request):
     if not result or result.get("status") != "ok":
         return web.json_response({"ok": False, "error": _qzone_error(result, "music send failed")}, status=500)
     return web.json_response({"ok": True, "data": result.get("data")})
+
+
+async def handle_custom_faces(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        count = max(1, min(int(request.query.get("count", "48")), 200))
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "count must be an integer"}, status=400)
+    try:
+        result = await request.app["napcat"].fetch_custom_faces(count)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(result, "custom faces unavailable")}, status=500)
+    faces = [{**face, "preview_url": "/api/image?url=" + quote(face["url"], safe="")} for face in result.get("data") or []]
+    return web.json_response({"ok": True, "faces": faces, "count": len(faces), "mutable": False})
+
+
+async def handle_send_custom_face(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = str(body.get("chat_id", "")).strip()
+    face_id = str(body.get("face_id", "")).strip()
+    if not parse_chat_id(chat_id):
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    if not re.fullmatch(r"[0-9a-f]{24}", face_id):
+        return web.json_response({"ok": False, "error": "invalid face_id"}, status=400)
+    try:
+        result = await request.app["napcat"].send_custom_face(chat_id, face_id)
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=404)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(result, "custom face send failed")}, status=500)
+    return web.json_response({"ok": True, "data": result.get("data")})
+
+
+def _collection_items(data):
+    pending = [data]
+    while pending:
+        value = pending.pop(0)
+        if isinstance(value, dict):
+            items = value.get("collectionItemList")
+            if isinstance(items, list):
+                return items
+            pending.extend(child for child in value.values() if isinstance(child, (dict, list)))
+        elif isinstance(value, list):
+            pending.extend(value[:20])
+    return []
+
+
+def _normalize_collection(item):
+    if not isinstance(item, dict):
+        return None
+    summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+    rich = summary.get("richMediaSummary") if isinstance(summary.get("richMediaSummary"), dict) else {}
+    content = item.get("richMediaContent") if isinstance(item.get("richMediaContent"), dict) else {}
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    text = str(content.get("rawData") or rich.get("brief") or rich.get("title") or "")[:10000]
+    pictures = rich.get("picList") if isinstance(rich.get("picList"), list) else []
+    return {
+        "id": str(item.get("cid") or item.get("id") or ""),
+        "type": item.get("type"), "category": item.get("category"), "status": item.get("status"),
+        "brief": str(rich.get("brief") or rich.get("title") or text[:120] or "Collection")[:500],
+        "text": text,
+        "create_time": str(item.get("createTime") or ""),
+        "collect_time": str(item.get("collectTime") or ""),
+        "author": {
+            "id": str(author.get("numId") or author.get("uin") or ""),
+            "name": str(author.get("strId") or author.get("name") or "")[:200],
+            "group_id": str(author.get("groupId") or ""),
+            "group_name": str(author.get("groupName") or "")[:200],
+        },
+        "pictures": [str(pic.get("url") or pic.get("picUrl") or "") for pic in pictures[:9] if isinstance(pic, dict)],
+    }
+
+
+async def handle_collections(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        category = int(request.query.get("category", "0"))
+        count = max(1, min(int(request.query.get("count", "50")), 200))
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "category and count must be integers"}, status=400)
+    try:
+        result = await request.app["napcat"].get_collections(category, count)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(result, "collections unavailable")}, status=500)
+    data = result.get("data")
+    items = [normalized for normalized in (_normalize_collection(item) for item in _collection_items(data)) if normalized]
+    search = data.get("collectionSearchList") if isinstance(data, dict) else {}
+    return web.json_response({
+        "ok": True, "collections": items,
+        "has_more": bool(isinstance(search, dict) and search.get("hasMore")),
+        "bottom_timestamp": str(search.get("bottomTimeStamp") or "") if isinstance(search, dict) else "",
+    })
+
+
+async def _create_collection_response(request, brief, raw_data):
+    if not brief or len(brief) > 200:
+        return web.json_response({"ok": False, "error": "brief must be 1 to 200 characters"}, status=400)
+    if not raw_data or len(raw_data) > 10000:
+        return web.json_response({"ok": False, "error": "raw_data must be 1 to 10000 characters"}, status=400)
+    try:
+        result = await request.app["napcat"].create_collection(brief, raw_data)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(result, "collection creation failed")}, status=500)
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("result") not in (None, 0, "0"):
+        return web.json_response({"ok": False, "error": str(data.get("errMsg") or "collection creation failed")}, status=500)
+    return web.json_response({"ok": True, "data": data})
+
+
+async def handle_collection_create(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    return await _create_collection_response(
+        request, str(body.get("brief", "")).strip(), str(body.get("raw_data", "")).strip(),
+    )
+
+
+def _message_collection_snapshot(store, found):
+    chat_id = found["chat_id"]
+    message = found["message"]
+    chat = store._chat_meta.get(chat_id, {})
+    timestamp = message.get("time") or 0
+    when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp)) if timestamp else "Unknown time"
+    lines = [
+        "Chat: " + str(chat.get("name") or chat_id),
+        "Sender: " + str(message.get("sender_name") or message.get("sender_id") or "Unknown"),
+        "Time: " + when,
+        "", str(message.get("content") or ""),
+    ]
+    for key, label in (("images", "image"), ("files", "file"), ("videos", "video"), ("records", "voice"), ("forwards", "forward")):
+        for attachment in message.get(key) or []:
+            name = attachment.get("name") if isinstance(attachment, dict) else ""
+            lines.append("[{}{}]".format(label, ": " + str(name) if name else ""))
+    return "\n".join(lines).strip()[:10000]
+
+
+async def handle_collection_from_message(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = canonical_chat_id(str(body.get("chat_id", "")).strip())
+    message_id = str(body.get("message_id", "")).strip()
+    if not parse_chat_id(chat_id) or not is_int_string(message_id):
+        return web.json_response({"ok": False, "error": "valid chat_id and message_id are required"}, status=400)
+    found = request.app["store"].find_message(message_id, chat_id=chat_id)
+    if not found:
+        return web.json_response({"ok": False, "error": "message is not in local history"}, status=404)
+    message = found["message"]
+    brief = str(body.get("brief") or "{} - {}".format(
+        message.get("sender_name") or message.get("sender_id") or "Message",
+        str(message.get("content") or "Saved message")[:80],
+    )).strip()[:200]
+    return await _create_collection_response(request, brief, _message_collection_snapshot(request.app["store"], found))
+
+
+def _mini_app_payload(body):
+    mode = str(body.get("mode") or body.get("type") or "").strip().lower()
+    title = str(body.get("title") or "").strip()
+    desc = str(body.get("desc") or "").strip()
+    if not title or len(title) > 200 or len(desc) > 500:
+        raise ValueError("title is required (max 200); desc is limited to 500 characters")
+    payload = {"title": title, "desc": desc}
+    for key in ("picUrl", "jumpUrl", "webUrl"):
+        value = str(body.get(key) or "").strip()
+        if key != "webUrl" and not value:
+            raise ValueError("{} is required".format(key))
+        if value:
+            parsed = urlparse(value)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc or len(value) > 2048:
+                raise ValueError("{} must be an HTTP(S) URL".format(key))
+        payload[key] = value
+    if mode in MINI_APP_TEMPLATES:
+        payload["type"] = mode
+        return payload
+    if mode != "advanced":
+        raise ValueError("mode must be bili, weibo, or advanced")
+    for key in MINI_APP_ADVANCED_FIELDS:
+        value = str(body.get(key) or "").strip()
+        if not value or len(value) > 500:
+            raise ValueError("{} is required".format(key))
+        payload[key] = value
+    for key in ("scene", "templateType", "businessType", "verType", "shareType", "withShareTicket"):
+        if not payload[key].lstrip("-").isdigit():
+            raise ValueError("{} must be an integer".format(key))
+    return payload
+
+
+async def handle_send_mini_app(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = str(body.get("chat_id", "")).strip()
+    if not parse_chat_id(chat_id):
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    try:
+        generated, sent = await request.app["napcat"].send_mini_app(chat_id, _mini_app_payload(body))
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not generated or generated.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(generated, "mini-app generation failed")}, status=503)
+    if not sent or sent.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(sent, "mini-app send failed")}, status=500)
+    return web.json_response({"ok": True, "data": sent.get("data")})
+
+
+async def handle_media_capabilities(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        capabilities = await request.app["napcat"].media_capabilities()
+    except Exception:
+        capabilities = {"mini_app": False}
+    return web.json_response({
+        "ok": True, "custom_faces": True, "custom_face_mutation": False,
+        "collections": True, **capabilities,
+    })
 
 
 async def handle_message_transcribe(request):
