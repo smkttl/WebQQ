@@ -64,7 +64,7 @@ class MessageListItem(ListItem):
 
     def __init__(
         self, message: Message, compact: bool = False, search: str = "", expanded: bool = False,
-        selected: bool = False,
+        selected: bool = False, show_image_preview: bool = False,
     ):
         self.message = message
         self.compact = compact
@@ -73,7 +73,7 @@ class MessageListItem(ListItem):
         self.expanded = bool(expanded and self.is_long)
         self.selected = selected
         children = [Static(self._render_text(), markup=False)]
-        if any(item.kind == "image" for item in message.attachments):
+        if show_image_preview and any(item.kind == "image" for item in message.attachments):
             children.append(Static("Loading image preview...", classes="message-thumbnail", markup=False))
         if self.is_long:
             children.append(Button(self._button_label(), classes="message-fold-button"))
@@ -1567,6 +1567,7 @@ class WebQQTui(App):
         if too_small:
             return
 
+        old_narrow = self.narrow
         old_short = self.short
         self.narrow = width < 80 or height > width
         self.short = height < 18
@@ -1582,7 +1583,7 @@ class WebQQTui(App):
             sidebar.styles.width = 34
             sidebar.styles.display = "block"
             conversation.styles.display = "block"
-        if old_short != self.short and self.is_mounted:
+        if (old_narrow != self.narrow or old_short != self.short) and self.is_mounted:
             self._spawn(self._render_all())
 
     def _spawn(self, coroutine: Coroutine[Any, Any, Any]) -> asyncio.Task:
@@ -1784,11 +1785,14 @@ class WebQQTui(App):
             self._rendering = False
 
     async def _hydrate_inline_images(self, token: int) -> None:
-        if token != self._load_token or not self.current_chat:
+        if token != self._load_token or not self.current_chat or self.narrow or self.short:
             return
         view = self.query_one("#message_list", ListView)
         for child in list(view.children):
-            if token != self._load_token or not isinstance(child, MessageListItem) or not child.is_mounted:
+            if (
+                token != self._load_token or self.narrow or self.short
+                or not isinstance(child, MessageListItem) or not child.is_mounted
+            ):
                 return
             images = [item for item in child.message.attachments if item.kind == "image"]
             if not images:
@@ -1829,6 +1833,7 @@ class WebQQTui(App):
                         message, compact=self.short, search=search,
                         expanded=self._message_expansion_key(message) in self._expanded_message_ids,
                         selected=message.stable_id in self._selected_message_ids,
+                        show_image_preview=not self.narrow and not self.short,
                     )
                     for message in self.messages
                 )

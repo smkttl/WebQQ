@@ -42,6 +42,7 @@ class FakeClient:
         self.portal_sent = []
         self.online_actions = []
         self.games = []
+        self.image_fetches = 0
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -101,6 +102,7 @@ class FakeClient:
         return {"url": str(attachment.data.get("url") or "")}
 
     async def fetch_bytes(self, path, params=None):
+        self.image_fetches += 1
         image = Image.new("RGB", (4, 4), (20, 120, 180))
         body = io.BytesIO()
         image.save(body, format="PNG")
@@ -940,8 +942,9 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app._selected_message_ids)
             self.assertTrue(app.conversation_visible)
 
-    async def test_wide_terminal_hydrates_inline_image_and_small_terminal_keeps_fallback(self):
-        app = WebQQTui(FakeClient())
+    async def test_inline_image_preview_is_removed_when_terminal_becomes_narrow(self):
+        client = FakeClient()
+        app = WebQQTui(client)
         async with app.run_test(size=(100, 30)) as pilot:
             await self.wait_loaded(pilot, app)
             await pilot.press("enter")
@@ -956,9 +959,18 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             thumbnail = app.query_one(".message-thumbnail", Static)
             self.assertIn("▀", static_plain(thumbnail))
             self.assertLessEqual(thumbnail.region.height, 5)
+            self.assertEqual(client.image_fetches, 1)
 
-        app = WebQQTui(FakeClient())
-        async with app.run_test(size=(32, 10)) as pilot:
+            await pilot.resize_terminal(60, 20)
+            await pilot.pause(0.1)
+            self.assertTrue(app.narrow)
+            self.assertEqual(len(app.query(".message-thumbnail")), 0)
+            self.assertEqual(client.image_fetches, 1)
+
+    async def test_narrow_terminal_uses_image_attachment_fallback_without_loading_preview(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(60, 20)) as pilot:
             await self.wait_loaded(pilot, app)
             await pilot.press("enter")
             await pilot.pause(0.1)
@@ -967,7 +979,10 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
                 "content": "[image]", "images": [{"name": "photo.png", "url": "https://example.test/photo.png"}],
             })]
             await app._render_messages(select_last=True)
-            self.assertEqual(app.query_one(".message-thumbnail", Static).styles.display, "none")
+            await pilot.pause(0.1)
+            self.assertEqual(len(app.query(".message-thumbnail")), 0)
+            self.assertEqual(client.image_fetches, 0)
+            self.assertIn("[image: photo.png]", static_plain(app.query_one(MessageListItem).query_one(Static)))
 
     async def test_theme_toggle_and_contact_badge_update(self):
         app = WebQQTui(FakeClient())
