@@ -137,6 +137,32 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             ("send_private_msg", {"user_id": 11, "group_id": 10, "message": image}, 10),
         ])
 
+    async def test_online_file_actions_use_4182_private_transfer_schema(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_online_file("private_42", "/tmp/source.bin", "named.bin")
+        await connection.send_online_folder("private_42", "/tmp/folder", "Folder")
+        await connection.get_online_files("private_42")
+        await connection.online_file_action("private_42", "receive", "m1", "e1")
+        await connection.online_file_action("private_42", "refuse", "m2", "e2")
+        await connection.online_file_action("private_42", "cancel", "m3")
+
+        self.assertEqual([call[0] for call in calls], [
+            "send_online_file", "send_online_folder", "get_online_file_msg",
+            "receive_online_file", "refuse_online_file", "cancel_online_file",
+        ])
+        self.assertEqual(calls[0][1]["user_id"], "42")
+        self.assertEqual(calls[3][1], {"user_id": "42", "msg_id": "m1", "element_id": "e1"})
+        self.assertEqual(calls[5][1], {"user_id": "42", "msg_id": "m3"})
+        with self.assertRaisesRegex(ValueError, "private chats"):
+            await connection.get_online_files("group_42")
+
     async def test_rich_media_segments_use_4182_onebot_schema(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
@@ -550,6 +576,87 @@ class ImageSendHandlerTests(unittest.IsolatedAsyncioTestCase):
         response = await api.handle_send_video(request)
         self.assertEqual(response.status, 200)
         self.assertEqual(captured["body"], b"video bytes")
+        self.assertFalse(Path(captured["path"]).exists())
+
+
+class OnlineFileHandlerTests(unittest.IsolatedAsyncioTestCase):
+    def test_normalizes_transfer_direction_and_elements(self):
+        transfers = api._normalize_online_files({"msgList": [
+            {
+                "msgId": "incoming", "senderUid": "peer", "peerUid": "peer", "msgTime": "12",
+                "elements": [{"elementType": 23, "elementId": "e1", "fileElement": {"fileName": "a.txt", "fileSize": "5"}}],
+            },
+            {
+                "msgId": "outgoing", "senderUid": "self", "peerUid": "peer", "msgTime": "13",
+                "elements": [{"elementType": 30, "elementId": "e2", "fileElement": {"fileName": "docs"}}],
+            },
+        ]}, "42")
+        self.assertEqual(transfers[0]["direction"], "incoming")
+        self.assertEqual(transfers[0]["size"], "5")
+        self.assertEqual(transfers[1]["direction"], "outgoing")
+        self.assertTrue(transfers[1]["is_directory"])
+
+    def test_folder_paths_reject_traversal_and_absolute_paths(self):
+        self.assertEqual(api._online_relative_path("docs/readme.txt"), ["docs", "readme.txt"])
+        for value in ("../secret", "docs/../secret", "/", "C:/secret"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                api._online_relative_path(value)
+
+    async def test_online_file_upload_is_private_and_cleans_temporary_file(self):
+        captured = {}
+
+        async def send_online_file(chat_id, path, name):
+            captured.update(chat_id=chat_id, path=path, name=name, body=Path(path).read_bytes())
+            return {"status": "ok", "data": {"result": 0, "msgId": "m1"}}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(send_online_file=send_online_file)},
+            query={}, cookies={}, headers={}, remote="",
+        )
+        request.multipart = lambda: ImageSendHandlerTests()._multipart([
+            ImageSendHandlerTests.Part("chat_id", "private_42"),
+            ImageSendHandlerTests.Part("file", b"online bytes"),
+        ])
+        response = await api.handle_send_online_file(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(captured["body"], b"online bytes")
+        self.assertFalse(Path(captured["path"]).exists())
+
+        request.multipart = lambda: ImageSendHandlerTests()._multipart([
+            ImageSendHandlerTests.Part("chat_id", "group_42"),
+            ImageSendHandlerTests.Part("file", b"online bytes"),
+        ])
+        response = await api.handle_send_online_file(request)
+        self.assertEqual(response.status, 400)
+
+    async def test_online_folder_reconstructs_paths_and_cleans_tree(self):
+        captured = {}
+
+        async def send_online_folder(chat_id, path, name):
+            root = Path(path)
+            captured.update(
+                chat_id=chat_id,
+                path=path,
+                name=name,
+                files={item.relative_to(root).as_posix(): item.read_bytes() for item in root.rglob("*") if item.is_file()},
+            )
+            return {"status": "ok", "data": {"result": 0, "msgId": "m2"}}
+
+        request = SimpleNamespace(
+            app={"config": {"web_token": ""}, "napcat": SimpleNamespace(send_online_folder=send_online_folder)},
+            query={}, cookies={}, headers={}, remote="",
+        )
+        request.multipart = lambda: ImageSendHandlerTests()._multipart([
+            ImageSendHandlerTests.Part("chat_id", "private_42"),
+            ImageSendHandlerTests.Part("folder_name", "Docs"),
+            ImageSendHandlerTests.Part("paths", '["one.txt", "nested/two.txt"]'),
+            ImageSendHandlerTests.Part("files", b"one"),
+            ImageSendHandlerTests.Part("files", b"two"),
+        ])
+        response = await api.handle_send_online_folder(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(captured["files"], {"one.txt": b"one", "nested/two.txt": b"two"})
+        self.assertEqual(captured["name"], "Docs")
         self.assertFalse(Path(captured["path"]).exists())
 
 

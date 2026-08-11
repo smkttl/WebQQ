@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +23,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.reactions = []
         self.forward_ids = []
         self.parity_requests = []
+        self.online_requests = []
         app = web.Application()
         app.router.add_post("/api/login", self.login)
         app.router.add_get("/api/status", self.status)
@@ -38,6 +40,10 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post("/api/message/revoke", self.parity_json)
         app.router.add_post("/api/mark-read", self.mark_read)
         app.router.add_post("/api/send-file", self.send_file)
+        app.router.add_get("/api/online-files", self.online_files)
+        app.router.add_post("/api/online-files/send", self.online_upload)
+        app.router.add_post("/api/online-files/send-folder", self.online_upload)
+        app.router.add_post("/api/online-files/action", self.online_action)
         app.router.add_post("/api/send-image", self.send_image)
         app.router.add_post("/api/send-video", self.send_media_upload)
         app.router.add_post("/api/send-voice", self.send_media_upload)
@@ -161,6 +167,33 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
             else:
                 fields[part.name] = await part.text()
         self.upload = fields
+        return web.json_response({"ok": True})
+
+    async def online_files(self, request):
+        self.online_requests.append((request.method, request.path, dict(request.query)))
+        return web.json_response({"ok": True, "transfers": [{
+            "message_id": "m1", "element_id": "e1", "name": "offer.txt", "direction": "incoming",
+        }]})
+
+    async def online_upload(self, request):
+        reader = await request.multipart()
+        fields = {}
+        file_bodies = []
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name in {"file", "files"}:
+                file_bodies.append(await part.read())
+            else:
+                fields[part.name] = await part.text()
+        fields["files"] = file_bodies
+        self.online_requests.append((request.method, request.path, fields))
+        return web.json_response({"ok": True})
+
+    async def online_action(self, request):
+        body = await request.json()
+        self.online_requests.append((request.method, request.path, body))
         return web.json_response({"ok": True})
 
     async def send_image(self, request):
@@ -339,6 +372,27 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.media_uploads["/api/send-voice"]["chat_id"], "group_1")
         self.assertEqual(self.rich_media[0][1]["id"], "42")
         self.assertEqual(self.rich_media[1][1]["type"], "qq")
+
+    async def test_online_file_lifecycle_requests(self):
+        await self.client.login()
+        source = Path(self.tmp.name) / "online.txt"
+        source.write_bytes(b"online")
+        folder = Path(self.tmp.name) / "folder"
+        folder.mkdir()
+        (folder / "one.txt").write_bytes(b"one")
+        (folder / "nested").mkdir()
+        (folder / "nested" / "two.txt").write_bytes(b"two")
+
+        transfers = await self.client.online_files("private_2")
+        await self.client.send_online_file("private_2", source)
+        await self.client.send_online_folder("private_2", folder)
+        await self.client.online_file_action("private_2", "receive", "m1", "e1")
+
+        self.assertEqual(transfers[0]["name"], "offer.txt")
+        self.assertEqual(self.online_requests[1][2]["files"], [b"online"])
+        self.assertEqual(json.loads(self.online_requests[2][2]["paths"]), ["nested/two.txt", "one.txt"])
+        self.assertEqual(self.online_requests[2][2]["files"], [b"two", b"one"])
+        self.assertEqual(self.online_requests[3][2]["action"], "receive")
 
     async def test_voice_transcription_request(self):
         await self.client.login()

@@ -10,6 +10,7 @@ QZONE_MAX_IMAGES = 9
 BACKGROUND_UPLOAD_PREFIX = "web_background_image"
 BACKGROUND_UPLOAD_LIMIT = 100 * 1024 * 1024
 PROFILE_AVATAR_UPLOAD_LIMIT = 10 * 1024 * 1024
+ONLINE_FOLDER_FILE_LIMIT = 512
 BACKGROUND_IMAGE_EXTENSIONS = {
     "jpeg": ".jpg",
     "png": ".png",
@@ -477,6 +478,218 @@ async def handle_send_file(request):
                 os.unlink(temp_path)
             except OSError:
                 pass
+
+
+def _private_online_chat(chat_id):
+    parsed = parse_chat_id(str(chat_id or "").strip())
+    if not parsed or parsed.get("type") != "private":
+        raise ValueError("online file transfers are only available in private chats")
+    return "private_{}".format(parsed["private_id"]), str(parsed["private_id"])
+
+
+def _online_file_business_error(result, fallback):
+    if not result or result.get("status") != "ok":
+        return _onebot_error(result, fallback)
+    data = result.get("data")
+    if isinstance(data, dict) and data.get("result") not in (None, 0, "0"):
+        return str(data.get("errMsg") or data.get("message") or fallback)
+    return ""
+
+
+def _online_relative_path(value):
+    value = str(value or "").replace("\\", "/").strip("/")
+    parts = value.split("/") if value else []
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ValueError("folder contains an invalid relative path")
+    if ":" in parts[0] or "\x00" in value:
+        raise ValueError("folder contains an invalid relative path")
+    return parts
+
+
+def _normalize_online_files(data, peer_id):
+    if not isinstance(data, dict):
+        return []
+    messages = data.get("msgList") or data.get("messages") or []
+    transfers = []
+    for message in messages if isinstance(messages, list) else []:
+        if not isinstance(message, dict):
+            continue
+        message_id = str(message.get("msgId") or message.get("msg_id") or "")
+        sender_uid = str(message.get("senderUid") or message.get("sender_uid") or "")
+        peer_uid = str(message.get("peerUid") or message.get("peer_uid") or peer_id)
+        direction = "incoming" if sender_uid and sender_uid == peer_uid else "outgoing"
+        for element in message.get("elements") or []:
+            if not isinstance(element, dict) or element.get("elementType") not in (23, 30, "23", "30"):
+                continue
+            file_data = element.get("fileElement") if isinstance(element.get("fileElement"), dict) else {}
+            transfers.append({
+                "message_id": message_id,
+                "element_id": str(element.get("elementId") or ""),
+                "name": str(file_data.get("fileName") or "Online file"),
+                "size": str(file_data.get("fileSize") or ""),
+                "is_directory": str(element.get("elementType")) == "30",
+                "direction": direction,
+                "time": str(message.get("msgTime") or ""),
+            })
+    return transfers
+
+
+async def handle_online_files(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    try:
+        chat_id, peer_id = _private_online_chat(request.query.get("chat_id"))
+        result = await request.app["napcat"].get_online_files(chat_id)
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    error = _online_file_business_error(result, "online transfers unavailable")
+    if error:
+        return web.json_response({"ok": False, "error": error}, status=500)
+    return web.json_response({
+        "ok": True,
+        "chat_id": chat_id,
+        "transfers": _normalize_online_files(result.get("data"), peer_id),
+    })
+
+
+async def handle_send_online_file(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    chat_id = ""
+    filename = "file"
+    temp_path = None
+    size = 0
+    try:
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "chat_id":
+                chat_id = (await part.text()).strip()
+            elif part.name == "file":
+                filename = safe_download_name(part.filename or "file")
+                fd, temp_path = tempfile.mkstemp(prefix="webqq-online-")
+                with os.fdopen(fd, "wb") as output:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size <= MAX_FILE_UPLOAD:
+                            output.write(chunk)
+            else:
+                await part.release()
+        chat_id, _ = _private_online_chat(chat_id)
+        if not temp_path:
+            raise ValueError("file is required")
+        if size <= 0:
+            raise ValueError("file is empty")
+        if size > MAX_FILE_UPLOAD:
+            return web.json_response({"ok": False, "error": "file is larger than 100 MB"}, status=413)
+        result = await request.app["napcat"].send_online_file(chat_id, temp_path, filename)
+        error = _online_file_business_error(result, "online file send failed")
+        if error:
+            return web.json_response({"ok": False, "error": error}, status=500)
+        return web.json_response({"ok": True, "data": result.get("data")})
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+
+
+async def handle_send_online_folder(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    temp_root = tempfile.mkdtemp(prefix="webqq-online-folder-")
+    chat_id = ""
+    folder_name = "folder"
+    paths = []
+    written = 0
+    total_size = 0
+    try:
+        reader = await request.multipart()
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            if part.name == "chat_id":
+                chat_id = (await part.text()).strip()
+            elif part.name == "folder_name":
+                folder_name = safe_download_name((await part.text()).strip() or "folder")
+            elif part.name == "paths":
+                decoded = json.loads(await part.text())
+                if not isinstance(decoded, list) or len(decoded) > ONLINE_FOLDER_FILE_LIMIT:
+                    raise ValueError("folder must contain at most 512 files")
+                paths = [_online_relative_path(item) for item in decoded]
+            elif part.name == "files":
+                if written >= len(paths):
+                    raise ValueError("folder file list does not match its paths")
+                target = Path(temp_root).joinpath(*paths[written])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("wb") as output:
+                    while True:
+                        chunk = await part.read_chunk(size=1024 * 1024)
+                        if not chunk:
+                            break
+                        total_size += len(chunk)
+                        if total_size <= MAX_FILE_UPLOAD:
+                            output.write(chunk)
+                written += 1
+            else:
+                await part.release()
+        chat_id, _ = _private_online_chat(chat_id)
+        if not paths or written != len(paths):
+            raise ValueError("folder file list does not match its paths")
+        if total_size > MAX_FILE_UPLOAD:
+            return web.json_response({"ok": False, "error": "folder is larger than 100 MB"}, status=413)
+        result = await request.app["napcat"].send_online_folder(chat_id, temp_root, folder_name)
+        error = _online_file_business_error(result, "online folder send failed")
+        if error:
+            return web.json_response({"ok": False, "error": error}, status=500)
+        return web.json_response({"ok": True, "data": result.get("data")})
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+async def handle_online_file_action(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    action = str(body.get("action") or "").strip().lower()
+    message_id = str(body.get("message_id") or "").strip()
+    element_id = str(body.get("element_id") or "").strip()
+    try:
+        chat_id, _ = _private_online_chat(body.get("chat_id"))
+        if action not in {"receive", "refuse", "cancel"}:
+            raise ValueError("action must be receive, refuse, or cancel")
+        if not message_id:
+            raise ValueError("message_id is required")
+        if action in {"receive", "refuse"} and not element_id:
+            raise ValueError("element_id is required")
+        result = await request.app["napcat"].online_file_action(
+            chat_id, action, message_id, element_id,
+        )
+    except ValueError as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=400)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    error = _online_file_business_error(result, "online file action failed")
+    if error:
+        return web.json_response({"ok": False, "error": error}, status=500)
+    return web.json_response({"ok": True, "data": result.get("data")})
 
 
 async def handle_send_image(request):

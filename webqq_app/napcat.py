@@ -907,6 +907,50 @@ class NapCatConnection:
             "name": name,
         }, timeout=60)
 
+    @staticmethod
+    def _online_file_user_id(chat_id):
+        parsed = parse_chat_id(chat_id)
+        if not parsed or parsed.get("type") != "private":
+            raise ValueError("online file transfers are only available in private chats")
+        return str(parsed["private_id"])
+
+    async def send_online_file(self, chat_id, path, name=""):
+        user_id = self._online_file_user_id(chat_id)
+        return await self._request("send_online_file", {
+            "user_id": user_id,
+            "file_path": str(Path(path).resolve()),
+            "file_name": str(name or Path(path).name),
+        }, timeout=30)
+
+    async def send_online_folder(self, chat_id, path, name=""):
+        user_id = self._online_file_user_id(chat_id)
+        return await self._request("send_online_folder", {
+            "user_id": user_id,
+            "folder_path": str(Path(path).resolve()),
+            "folder_name": str(name or Path(path).name),
+        }, timeout=30)
+
+    async def get_online_files(self, chat_id):
+        user_id = self._online_file_user_id(chat_id)
+        return await self._request("get_online_file_msg", {"user_id": user_id}, timeout=30)
+
+    async def online_file_action(self, chat_id, action, message_id, element_id=""):
+        user_id = self._online_file_user_id(chat_id)
+        actions = {
+            "receive": "receive_online_file",
+            "refuse": "refuse_online_file",
+            "cancel": "cancel_online_file",
+        }
+        request_action = actions.get(str(action))
+        if not request_action:
+            raise ValueError("unsupported online file action")
+        params = {"user_id": user_id, "msg_id": str(message_id)}
+        if action in ("receive", "refuse"):
+            if not element_id:
+                raise ValueError("element_id is required")
+            params["element_id"] = str(element_id)
+        return await self._request(request_action, params, timeout=60)
+
     async def resolve_file_locations(self, file_id="", file_path="", busid="", url="", chat_id="", filename=""):
         urls = []
         paths = []

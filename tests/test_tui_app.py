@@ -8,7 +8,7 @@ from unittest.mock import patch
 from textual.widgets import Button, Input, ListView, Static
 from PIL import Image
 
-from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, MessageListItem, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, MessageListItem, OnlineTransferManager, RichMediaDialog, WebQQTui
 from webqq_tui_app.management import ActionPalette, ContactsManager, ForwardComposer, PluginManagerScreen
 from webqq_tui_app.models import Chat, Message
 
@@ -40,6 +40,7 @@ class FakeClient:
         self.revoked = []
         self.temp_chats = []
         self.portal_sent = []
+        self.online_actions = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -126,6 +127,21 @@ class FakeClient:
 
     async def send_voice(self, chat_id, path):
         self.rich_media.append(("voice", chat_id, path))
+        return {"ok": True}
+
+    async def send_online_file(self, chat_id, path):
+        self.rich_media.append(("online", chat_id, path))
+        return {"ok": True}
+
+    async def send_online_folder(self, chat_id, path):
+        self.rich_media.append(("online_folder", chat_id, path))
+        return {"ok": True}
+
+    async def online_files(self, chat_id):
+        return [{"message_id": "m1", "element_id": "e1", "name": "offer.zip", "size": "10", "direction": "incoming"}]
+
+    async def online_file_action(self, chat_id, action, message_id, element_id=""):
+        self.online_actions.append((chat_id, action, message_id, element_id))
         return {"ok": True}
 
     async def send_contact(self, chat_id, contact_type, contact_id):
@@ -256,6 +272,28 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(collection["collection"]["raw_data"], "R")
         self.assertEqual(RichMediaDialog.parse_command("collection save"), {"kind": "collection_save"})
+        self.assertEqual(RichMediaDialog.parse_command('online "/tmp/a b"'), {"kind": "online", "path": "/tmp/a b"})
+        self.assertEqual(RichMediaDialog.parse_command("online-folder /tmp/docs"), {"kind": "online_folder", "path": "/tmp/docs"})
+        self.assertEqual(RichMediaDialog.parse_command("transfers"), {"kind": "transfers"})
+
+    async def test_online_transfer_manager_fits_small_terminal_and_receives(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(32, 10)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("down", "enter")
+            await pilot.pause(0.1)
+            await pilot.press("f3")
+            command = app.screen.query_one("#media_command", Input)
+            command.value = "transfers"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, OnlineTransferManager)
+            await pilot.press("a")
+            await pilot.pause(0.1)
+            self.assertEqual(client.online_actions, [("private_2", "receive", "m1", "e1")])
+            await pilot.press("escape")
+            self.assertNotIsInstance(app.screen, OnlineTransferManager)
 
     def test_internal_text_selection_is_disabled_for_stable_mouse_events(self):
         self.assertFalse(WebQQTui.ALLOW_SELECT)

@@ -18,6 +18,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Browse and send QQ custom faces, browse/create QQ collections, save message snapshots, and send Bilibili/Weibo/custom mini-app cards
 - Long text messages fold automatically in both WebUI and TUI while leaving attachments visible
 - The web client and plugins can combine existing messages or authored text nodes into merged forwards
+- Send private online files/folders and receive, refuse, or cancel pending online transfers
 
 ## Requirements
 
@@ -94,6 +95,10 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | GET/POST | `/api/collections`               | Browse or create QQ collections |
 | POST   | `/api/collections/from-message`    | Save a message snapshot to collections |
 | POST   | `/api/send-mini-app`               | Generate and send a mini-app card |
+| GET    | `/api/online-files`                | List private online transfers |
+| POST   | `/api/online-files/send`           | Send a private online file |
+| POST   | `/api/online-files/send-folder`    | Send a private online folder |
+| POST   | `/api/online-files/action`         | Receive, refuse, or cancel an online transfer |
 | POST   | `/api/message/emoji-like`          | React to a message       |
 | POST   | `/api/message/revoke`              | Revoke a recent self message |
 | POST   | `/api/mark-read`                   | Mark a chat as read      |
@@ -115,7 +120,6 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 - Request-management UI for reviewing and manually approving or rejecting pending requests.
 - Group file management: folders, delete/move/rename/transfer, file-system info, and root/folder listings.
 - Group notice and essence-message management.
-- Online file receive/refuse/cancel workflows.
 - Input-status, user-status, and profile-like features.
 - Expanded media helpers: OCR, custom face fetch, record conversion, private file URLs, and richer file streaming controls.
 - Bot/system controls: status/version details, restart/exit, cache cleanup, packet/rkey/clientkey/credentials diagnostics.

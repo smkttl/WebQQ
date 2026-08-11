@@ -177,6 +177,62 @@ class WebQQClient:
     async def send_file(self, chat_id: str, path: Path) -> Mapping[str, Any]:
         return await self._send_upload(chat_id, path, "/api/send-file", "file")
 
+    async def online_files(self, chat_id: str) -> List[Mapping[str, Any]]:
+        payload = await self._request_json("GET", "/api/online-files", params={"chat_id": chat_id})
+        self._require_ok(payload, "online transfers load failed")
+        values = payload.get("transfers")
+        return [dict(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+
+    async def send_online_file(self, chat_id: str, path: Path) -> Mapping[str, Any]:
+        return await self._send_upload(chat_id, path, "/api/online-files/send", "online file")
+
+    async def send_online_folder(self, chat_id: str, path: Path) -> Mapping[str, Any]:
+        root = path.expanduser().resolve()
+        if not root.is_dir():
+            raise WebQQClientError("folder does not exist: {}".format(root))
+        files = sorted(item for item in root.rglob("*") if item.is_file() and not item.is_symlink())
+        if not files:
+            raise WebQQClientError("folder contains no files")
+        if len(files) > 512:
+            raise WebQQClientError("folder contains more than 512 files")
+        total = sum(item.stat().st_size for item in files)
+        if total > MAX_UPLOAD_SIZE:
+            raise WebQQClientError("folder is larger than 100 MB")
+        form = aiohttp.FormData()
+        form.add_field("chat_id", chat_id)
+        form.add_field("folder_name", root.name)
+        form.add_field("paths", json.dumps([item.relative_to(root).as_posix() for item in files]))
+        handles = []
+        try:
+            for item in files:
+                body = item.open("rb")
+                handles.append(body)
+                form.add_field(
+                    "files", body, filename=item.name,
+                    content_type=mimetypes.guess_type(item.name)[0] or "application/octet-stream",
+                )
+            async with self._session().post(self.endpoint("/api/online-files/send-folder"), data=form) as response:
+                payload = await self._read_json(response)
+        except (aiohttp.ClientError, OSError) as exc:
+            raise WebQQClientError("online folder upload failed: {}".format(exc)) from exc
+        finally:
+            for handle in handles:
+                handle.close()
+        self._require_ok(payload, "online folder upload failed")
+        return payload
+
+    async def online_file_action(
+        self, chat_id: str, action: str, message_id: str, element_id: str = "",
+    ) -> Mapping[str, Any]:
+        payload = await self._request_json("POST", "/api/online-files/action", json_body={
+            "chat_id": chat_id,
+            "action": action,
+            "message_id": message_id,
+            "element_id": element_id,
+        })
+        self._require_ok(payload, "online file action failed")
+        return payload
+
     async def send_image(self, chat_id: str, path: Path) -> Mapping[str, Any]:
         return await self._send_upload(chat_id, path, "/api/send-image", "image")
 

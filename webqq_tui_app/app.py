@@ -413,7 +413,7 @@ class RichMediaDialog(ModalScreen):
     def compose(self) -> ComposeResult:
         with Container():
             yield Static("Send rich media", classes="dialog-title")
-            yield Input(placeholder="video PATH | faces | collections | miniapp TYPE JSON", id="media_command")
+            yield Input(placeholder="video PATH | online PATH | online-folder PATH | transfers", id="media_command")
             yield Static("", id="media_error")
             yield Static("collection create {JSON} | collection save | Esc return", classes="hint")
 
@@ -433,6 +433,12 @@ class RichMediaDialog(ModalScreen):
             if len(parts) != 2:
                 raise ValueError("{} requires one file path".format(kind))
             return {"kind": kind, "path": parts[1]}
+        if kind in {"online", "online-folder"}:
+            if len(parts) != 2:
+                raise ValueError("{} requires one path".format(kind))
+            return {"kind": kind.replace("-", "_"), "path": parts[1]}
+        if kind == "transfers" and len(parts) == 1:
+            return {"kind": "transfers"}
         if kind == "contact":
             if len(parts) != 3 or parts[1].lower() not in {"qq", "group"} or not parts[2].isdigit():
                 raise ValueError("Use: contact qq|group ID")
@@ -1011,6 +1017,103 @@ class GroupFileListItem(ListItem):
             size = human_size(int(data.get("file_size") or data.get("size") or 0))
             label = "[FILE] {}{}".format(name, "  " + size if size else "")
         super().__init__(Static(label, markup=False))
+
+
+class OnlineTransferListItem(ListItem):
+    def __init__(self, transfer: Mapping[str, Any]):
+        self.transfer = dict(transfer)
+        direction = "IN" if transfer.get("direction") == "incoming" else "OUT"
+        kind = "DIR" if transfer.get("is_directory") else "FILE"
+        size = human_size(int(transfer.get("size") or 0))
+        label = "[{} {}] {}{}".format(
+            direction, kind, transfer.get("name") or "Online file", "  " + size if size else "",
+        )
+        super().__init__(Static(label, markup=False))
+
+
+class OnlineTransferManager(ModalScreen):
+    BINDINGS = [
+        Binding("escape", "cancel", show=False), Binding("r", "refresh", show=False),
+        Binding("a", "receive", show=False), Binding("x", "refuse", show=False),
+        Binding("c", "cancel_transfer", show=False),
+    ]
+    CSS = """
+    OnlineTransferManager { align: center middle; background: $background 70%; }
+    OnlineTransferManager > Container { width: 84; max-width: 96%; height: 26; max-height: 92%; min-height: 7; border: solid $accent; background: $surface; padding: 1; }
+    OnlineTransferManager #online_transfer_title { height: 2; text-style: bold; }
+    OnlineTransferManager #online_transfer_list { height: 1fr; }
+    OnlineTransferManager #online_transfer_list > ListItem { height: 2; padding: 0 1; }
+    OnlineTransferManager .hint { height: 2; color: $text-muted; }
+    """
+
+    def __init__(self, client: WebQQClient, chat_id: str):
+        super().__init__()
+        self.client = client
+        self.chat_id = chat_id
+
+    def compose(self) -> ComposeResult:
+        with Container():
+            yield Static("Online transfers", id="online_transfer_title")
+            yield NavigableListView(id="online_transfer_list")
+            yield Static("a receive  x refuse  c cancel outgoing  r refresh  Esc return", classes="hint")
+
+    async def on_mount(self) -> None:
+        await self._load()
+
+    async def _load(self) -> None:
+        title = self.query_one("#online_transfer_title", Static)
+        title.update("Online transfers  [loading]")
+        try:
+            transfers = await self.client.online_files(self.chat_id)
+            view = self.query_one("#online_transfer_list", ListView)
+            await view.clear()
+            await view.extend(OnlineTransferListItem(item) for item in transfers)
+            title.update("Online transfers  [{}]".format(len(transfers)))
+            if view.children:
+                view.index = 0
+            view.focus()
+        except Exception as exc:
+            title.update("Online transfers  [error: {}]".format(exc))
+
+    def _selected(self) -> Optional[Mapping[str, Any]]:
+        item = self.query_one("#online_transfer_list", ListView).highlighted_child
+        return item.transfer if isinstance(item, OnlineTransferListItem) else None
+
+    async def _act(self, action: str) -> None:
+        transfer = self._selected()
+        if not transfer:
+            return
+        incoming = transfer.get("direction") == "incoming"
+        if action in {"receive", "refuse"} and not incoming:
+            self.query_one("#online_transfer_title", Static).update("Select an incoming transfer")
+            return
+        if action == "cancel" and incoming:
+            self.query_one("#online_transfer_title", Static).update("Select an outgoing transfer")
+            return
+        try:
+            self.query_one("#online_transfer_title", Static).update("{}...".format(action.capitalize()))
+            await self.client.online_file_action(
+                self.chat_id, action, str(transfer.get("message_id") or ""),
+                str(transfer.get("element_id") or ""),
+            )
+            await self._load()
+        except Exception as exc:
+            self.query_one("#online_transfer_title", Static).update("Operation failed: {}".format(exc))
+
+    def action_receive(self) -> None:
+        self.app._spawn(self._act("receive"))
+
+    def action_refuse(self) -> None:
+        self.app._spawn(self._act("refuse"))
+
+    def action_cancel_transfer(self) -> None:
+        self.app._spawn(self._act("cancel"))
+
+    def action_refresh(self) -> None:
+        self.app._spawn(self._load())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class GroupFileManager(ModalScreen):
@@ -2420,6 +2523,11 @@ class WebQQTui(App):
                 self.push_screen(CustomFacePicker(self.client), self._custom_face_selected)
             elif kind == "collections":
                 self.push_screen(CollectionBrowser(self.client))
+            elif kind == "transfers":
+                if self.current_chat.chat_type != "private":
+                    self._set_notice("Online transfers are only available in private chats")
+                else:
+                    self.push_screen(OnlineTransferManager(self.client, self.current_chat.chat_id))
             else:
                 self._spawn(self._send_rich_media(self.current_chat.chat_id, command))
 
@@ -2443,6 +2551,10 @@ class WebQQTui(App):
                 await self.client.send_video(chat_id, Path(str(command["path"])))
             elif kind == "voice":
                 await self.client.send_voice(chat_id, Path(str(command["path"])))
+            elif kind == "online":
+                await self.client.send_online_file(chat_id, Path(str(command["path"])))
+            elif kind == "online_folder":
+                await self.client.send_online_folder(chat_id, Path(str(command["path"])))
             elif kind == "contact":
                 await self.client.send_contact(chat_id, str(command["type"]), str(command["id"]))
             elif kind == "music":

@@ -266,8 +266,9 @@ function showModal(msg) {
   document.body.appendChild(overlay);
 }
 
-function showRichMediaPanel() {
+function showRichMediaPanel(initialView = 'send') {
   if (!currentChat) return;
+  const privateChat = currentChat.startsWith('private_');
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay rich-media-overlay';
   overlay.innerHTML = `
@@ -280,6 +281,7 @@ function showRichMediaPanel() {
         <button type="button" class="active" data-media-view="send">Send</button>
         <button type="button" data-media-view="faces">Faces</button>
         <button type="button" data-media-view="collections">Collections</button>
+        <button type="button" data-media-view="transfers"${privateChat ? '' : ' disabled'}>Transfers</button>
       </div>
       <section class="rich-media-panel active" data-media-panel="send">
         <label>Type<select id="richMediaKind">
@@ -287,6 +289,7 @@ function showRichMediaPanel() {
           <option value="video">Video</option><option value="voice">Voice</option>
           <option value="contact">Contact</option><option value="music">Music</option>
           <option value="miniapp">Mini-app card</option>
+          ${privateChat ? '<option value="online-file">Online file</option><option value="online-folder">Online folder</option>' : ''}
         </select></label>
         <div id="richMediaFields"></div>
         <button class="rich-media-send" type="submit">Send</button>
@@ -304,6 +307,10 @@ function showRichMediaPanel() {
         <div class="media-tool-state" id="collectionsState">Open this tab to load QQ collections.</div>
         <div class="collection-list" id="collectionList"></div>
       </section>
+      <section class="rich-media-panel" data-media-panel="transfers">
+        <div class="media-tool-state" id="onlineTransfersState">Open this tab to load online transfers.</div>
+        <div class="online-transfer-list" id="onlineTransfersList"></div>
+      </section>
       <div class="rich-media-error" id="richMediaError"></div>
     </form>`;
   document.body.appendChild(overlay);
@@ -318,6 +325,10 @@ function showRichMediaPanel() {
     if (['file', 'image', 'video', 'voice'].includes(kind.value)) {
       const accept = kind.value === 'image' ? ' accept="image/*"' : kind.value === 'video' ? ' accept="video/*"' : kind.value === 'voice' ? ' accept="audio/*"' : '';
       fields.innerHTML = `<label>${kind.options[kind.selectedIndex].text}<input id="richMediaFile" type="file"${accept} required></label>`;
+    } else if (kind.value === 'online-file') {
+      fields.innerHTML = '<label>Online file<input id="richMediaFile" type="file" required></label>';
+    } else if (kind.value === 'online-folder') {
+      fields.innerHTML = '<label>Online folder<input id="richMediaFolder" type="file" webkitdirectory multiple required></label>';
     } else if (kind.value === 'contact') {
       fields.innerHTML = `<div class="rich-media-row"><label>Contact type<select id="richContactType"><option value="qq">QQ user</option><option value="group">QQ group</option></select></label><label>QQ ID<input id="richContactId" inputmode="numeric" pattern="[0-9]+" required></label></div>`;
     } else if (kind.value === 'music') {
@@ -345,6 +356,7 @@ function showRichMediaPanel() {
 
   let facesLoaded = false;
   let collectionsLoaded = false;
+  let transfersLoaded = false;
   async function loadFaces() {
     if (facesLoaded) return;
     facesLoaded = true;
@@ -408,6 +420,54 @@ function showRichMediaPanel() {
     } catch (loadError) { state.textContent = loadError.message || String(loadError); }
   }
 
+  async function actOnTransfer(action, transfer) {
+    await doSendRichJson('/api/online-files/action', {
+      action,
+      message_id: transfer.message_id,
+      element_id: transfer.element_id || '',
+    });
+    await loadTransfers(true);
+  }
+
+  async function loadTransfers(force = false) {
+    if (transfersLoaded && !force) return;
+    transfersLoaded = true;
+    const state = overlay.querySelector('#onlineTransfersState');
+    const list = overlay.querySelector('#onlineTransfersList');
+    state.textContent = 'Loading online transfers...';
+    list.replaceChildren();
+    try {
+      const response = await api(`/api/online-files?chat_id=${encodeURIComponent(currentChat)}`);
+      const data = await readJsonResponse(response);
+      if (!response.ok || !data.ok) throw new Error(data.error || 'Online transfers unavailable');
+      state.textContent = data.transfers.length ? `${data.transfers.length} transfers` : 'No online transfers.';
+      for (const transfer of data.transfers) {
+        const item = document.createElement('article');
+        item.className = 'online-transfer-item';
+        const main = document.createElement('div');
+        const title = document.createElement('strong');
+        title.textContent = `${transfer.direction === 'incoming' ? 'Incoming' : 'Outgoing'} ${transfer.is_directory ? 'folder' : 'file'} · ${transfer.name}`;
+        const meta = document.createElement('small');
+        meta.textContent = humanFileSize(transfer.size);
+        main.append(title, meta);
+        const actions = document.createElement('div');
+        const names = transfer.direction === 'incoming' ? [['receive', 'Receive'], ['refuse', 'Refuse']] : [['cancel', 'Cancel']];
+        for (const [action, label] of names) {
+          const button = document.createElement('button');
+          button.type = 'button'; button.textContent = label;
+          button.addEventListener('click', async () => {
+            button.disabled = true;
+            try { await actOnTransfer(action, transfer); }
+            catch (actionError) { error.textContent = actionError.message || String(actionError); button.disabled = false; }
+          });
+          actions.appendChild(button);
+        }
+        item.append(main, actions);
+        list.appendChild(item);
+      }
+    } catch (loadError) { state.textContent = loadError.message || String(loadError); }
+  }
+
   for (const tab of overlay.querySelectorAll('[data-media-view]')) {
     tab.addEventListener('click', () => {
       overlay.querySelectorAll('[data-media-view]').forEach(item => item.classList.toggle('active', item === tab));
@@ -415,6 +475,7 @@ function showRichMediaPanel() {
       error.textContent = '';
       if (tab.dataset.mediaView === 'faces') loadFaces();
       if (tab.dataset.mediaView === 'collections') loadCollections();
+      if (tab.dataset.mediaView === 'transfers') loadTransfers();
     });
   }
 
@@ -448,6 +509,30 @@ function showRichMediaPanel() {
         if (!file) throw new Error('Choose a file');
         if (file.size > 100 * 1024 * 1024) throw new Error('File is larger than 100 MB');
         await doSendMediaFile(kind.value, file);
+      } else if (kind.value === 'online-file') {
+        const file = fields.querySelector('#richMediaFile').files[0];
+        if (!file) throw new Error('Choose a file');
+        if (file.size > 100 * 1024 * 1024) throw new Error('File is larger than 100 MB');
+        const upload = new FormData();
+        upload.append('chat_id', currentChat);
+        upload.append('file', file, file.name);
+        const response = await api('/api/online-files/send', {method: 'POST', body: upload});
+        const data = await readJsonResponse(response);
+        if (!response.ok || !data.ok) throw new Error(data.error || 'Online file send failed');
+      } else if (kind.value === 'online-folder') {
+        const files = Array.from(fields.querySelector('#richMediaFolder').files || []);
+        if (!files.length) throw new Error('Choose a non-empty folder');
+        if (files.length > 512) throw new Error('Folder contains more than 512 files');
+        if (files.reduce((total, file) => total + file.size, 0) > 100 * 1024 * 1024) throw new Error('Folder is larger than 100 MB');
+        const paths = files.map(file => file.webkitRelativePath || file.name);
+        const upload = new FormData();
+        upload.append('chat_id', currentChat);
+        upload.append('folder_name', paths[0].split('/')[0] || 'folder');
+        upload.append('paths', JSON.stringify(paths.map(path => path.split('/').slice(1).join('/') || path)));
+        for (const file of files) upload.append('files', file, file.name);
+        const response = await api('/api/online-files/send-folder', {method: 'POST', body: upload});
+        const data = await readJsonResponse(response);
+        if (!response.ok || !data.ok) throw new Error(data.error || 'Online folder send failed');
       } else if (kind.value === 'contact') {
         await doSendRichJson('/api/send-contact', {
           type: fields.querySelector('#richContactType').value,
@@ -486,7 +571,9 @@ function showRichMediaPanel() {
     }
   });
   renderFields();
-  kind.focus();
+  const initialTab = overlay.querySelector(`[data-media-view="${initialView}"]`);
+  if (initialTab && !initialTab.disabled) initialTab.click();
+  else kind.focus();
 }
 
 function showPluginsPanel() {
@@ -2095,7 +2182,14 @@ function appendFiles(bubble, files) {
     main.append(name);
     if (size.textContent) main.append(size);
     card.append(icon, main);
-    if (file && (file.url || file.file || file.id || file.file_id || file.msgId)) {
+    if (file && file.kind === 'onlinefile' && currentChat && currentChat.startsWith('private_')) {
+      const manage = document.createElement('button');
+      manage.type = 'button';
+      manage.className = 'file-download';
+      manage.textContent = 'Manage';
+      manage.addEventListener('click', () => showRichMediaPanel('transfers'));
+      card.appendChild(manage);
+    } else if (file && (file.url || file.file || file.id || file.file_id || file.msgId)) {
       const link = document.createElement('a');
       link.className = 'file-download';
       link.href = fileDownloadUrl(file);

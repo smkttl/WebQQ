@@ -965,12 +965,15 @@ class MessageStore:
             return None
         file_item = {
             "id": data.get("id") or data.get("file_id") or data.get("fileId"),
+            "message_id": data.get("msg_id") or data.get("msgId") or data.get("message_id"),
+            "element_id": data.get("element_id") or data.get("elementId"),
             "name": data.get("name") or data.get("file_name") or data.get("filename") or data.get("file"),
             "size": data.get("size") or data.get("file_size") or data.get("fileSize"),
             "url": data.get("url"),
             "file": data.get("file"),
             "busid": data.get("busid") or data.get("bus_id") or data.get("busId"),
             "kind": data.get("kind"),
+            "is_directory": data.get("isDir") if data.get("isDir") is not None else data.get("is_directory"),
         }
         return {k: v for k, v in file_item.items() if v is not None and v != ""}
 
