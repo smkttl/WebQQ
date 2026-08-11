@@ -413,7 +413,7 @@ class RichMediaDialog(ModalScreen):
     def compose(self) -> ComposeResult:
         with Container():
             yield Static("Send rich media", classes="dialog-title")
-            yield Input(placeholder="video PATH | online PATH | online-folder PATH | transfers", id="media_command")
+            yield Input(placeholder="dice [1-6] | rps [rock|scissors|paper] | video PATH", id="media_command")
             yield Static("", id="media_error")
             yield Static("collection create {JSON} | collection save | Esc return", classes="hint")
 
@@ -439,6 +439,15 @@ class RichMediaDialog(ModalScreen):
             return {"kind": kind.replace("-", "_"), "path": parts[1]}
         if kind == "transfers" and len(parts) == 1:
             return {"kind": "transfers"}
+        if kind == "dice":
+            if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"1", "2", "3", "4", "5", "6"}):
+                raise ValueError("Use: dice [1-6]")
+            return {"kind": "dice", "result": parts[1] if len(parts) == 2 else None}
+        if kind == "rps":
+            result = parts[1].lower() if len(parts) == 2 else None
+            if len(parts) > 2 or result not in {None, "rock", "scissors", "paper"}:
+                raise ValueError("Use: rps [rock|scissors|paper]")
+            return {"kind": "rps", "result": result}
         if kind == "contact":
             if len(parts) != 3 or parts[1].lower() not in {"qq", "group"} or not parts[2].isdigit():
                 raise ValueError("Use: contact qq|group ID")
@@ -2555,6 +2564,8 @@ class WebQQTui(App):
                 await self.client.send_online_file(chat_id, Path(str(command["path"])))
             elif kind == "online_folder":
                 await self.client.send_online_folder(chat_id, Path(str(command["path"])))
+            elif kind in {"dice", "rps"}:
+                await self.client.send_game(chat_id, kind, command.get("result"))
             elif kind == "contact":
                 await self.client.send_contact(chat_id, str(command["type"]), str(command["id"]))
             elif kind == "music":

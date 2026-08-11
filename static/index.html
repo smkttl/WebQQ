@@ -289,6 +289,7 @@ function showRichMediaPanel(initialView = 'send') {
           <option value="video">Video</option><option value="voice">Voice</option>
           <option value="contact">Contact</option><option value="music">Music</option>
           <option value="miniapp">Mini-app card</option>
+          <option value="dice">Dice</option><option value="rps">Rock paper scissors</option>
           ${privateChat ? '<option value="online-file">Online file</option><option value="online-folder">Online folder</option>' : ''}
         </select></label>
         <div id="richMediaFields"></div>
@@ -329,6 +330,10 @@ function showRichMediaPanel(initialView = 'send') {
       fields.innerHTML = '<label>Online file<input id="richMediaFile" type="file" required></label>';
     } else if (kind.value === 'online-folder') {
       fields.innerHTML = '<label>Online folder<input id="richMediaFolder" type="file" webkitdirectory multiple required></label>';
+    } else if (kind.value === 'dice') {
+      fields.innerHTML = '<label>Result<select id="gameResult"><option value="">Random (fair)</option><option value="1">Force 1</option><option value="2">Force 2</option><option value="3">Force 3</option><option value="4">Force 4</option><option value="5">Force 5</option><option value="6">Force 6</option></select></label>';
+    } else if (kind.value === 'rps') {
+      fields.innerHTML = '<label>Result<select id="gameResult"><option value="">Random (fair)</option><option value="rock">Force rock</option><option value="scissors">Force scissors</option><option value="paper">Force paper</option></select></label>';
     } else if (kind.value === 'contact') {
       fields.innerHTML = `<div class="rich-media-row"><label>Contact type<select id="richContactType"><option value="qq">QQ user</option><option value="group">QQ group</option></select></label><label>QQ ID<input id="richContactId" inputmode="numeric" pattern="[0-9]+" required></label></div>`;
     } else if (kind.value === 'music') {
@@ -533,6 +538,11 @@ function showRichMediaPanel(initialView = 'send') {
         const response = await api('/api/online-files/send-folder', {method: 'POST', body: upload});
         const data = await readJsonResponse(response);
         if (!response.ok || !data.ok) throw new Error(data.error || 'Online folder send failed');
+      } else if (kind.value === 'dice' || kind.value === 'rps') {
+        await doSendRichJson('/api/send-game', {
+          game: kind.value,
+          result: fields.querySelector('#gameResult').value || null,
+        });
       } else if (kind.value === 'contact') {
         await doSendRichJson('/api/send-contact', {
           type: fields.querySelector('#richContactType').value,
@@ -2367,8 +2377,12 @@ function appendExtraSegments(bubble, segments) {
     if (type === 'location' && segment.latitude && segment.longitude) {
       metadata.push(`${segment.latitude}, ${segment.longitude}`);
     }
-    if ((type === 'dice' || type === 'rps') && segment.result !== undefined) {
-      metadata.push(`Result ${segment.result}`);
+    if (type === 'dice' && segment.result !== undefined) {
+      metadata.push(`Dice: ${segment.result}`);
+    }
+    if (type === 'rps' && segment.result !== undefined) {
+      const names = {'1': 'Rock', '2': 'Scissors', '3': 'Paper'};
+      metadata.push(`RPS: ${names[String(segment.result)] || segment.result}`);
     }
     if (metadata.length) {
       const meta = document.createElement('div');

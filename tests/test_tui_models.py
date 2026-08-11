@@ -151,6 +151,17 @@ class TuiModelTests(unittest.TestCase):
         self.assertTrue(message_matches(message, "release notes"))
         self.assertTrue(message_matches(message, "cloud.zip"))
 
+    def test_game_results_use_human_readable_labels(self):
+        message = Message.from_json({
+            "extra_segments": [
+                {"type": "dice", "label": "[dice]", "result": "6"},
+                {"type": "rps", "label": "[rps]", "result": "2"},
+            ],
+        })
+        rendered = format_message(message).plain
+        self.assertIn("[dice] 6 dots", rendered)
+        self.assertIn("[rps] Scissors", rendered)
+
     def test_unavailable_forward_does_not_claim_zero_messages(self):
         forward = {"title": "Thread", "status": "unavailable", "error": "expired", "nodes": []}
         message = Message.from_json({"sender_name": "A", "content": "[forward]", "forwards": [forward]})

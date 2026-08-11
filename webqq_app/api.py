@@ -19,6 +19,7 @@ BACKGROUND_IMAGE_EXTENSIONS = {
     "bmp": ".bmp",
 }
 MUSIC_PLATFORMS = {"qq", "163", "kugou", "migu", "kuwo"}
+RPS_RESULTS = {"rock": "1", "scissors": "2", "paper": "3", "1": "1", "2": "2", "3": "3"}
 MINI_APP_TEMPLATES = {"bili", "weibo"}
 MINI_APP_ADVANCED_FIELDS = {
     "iconUrl", "appId", "scene", "templateType", "businessType", "verType",
@@ -829,6 +830,37 @@ async def handle_send_contact(request):
     if not result or result.get("status") != "ok":
         return web.json_response({"ok": False, "error": _qzone_error(result, "contact send failed")}, status=500)
     return web.json_response({"ok": True, "data": result.get("data")})
+
+
+async def handle_send_game(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = str(body.get("chat_id") or "").strip()
+    game = str(body.get("game") or "").strip().lower()
+    raw_result = body.get("result")
+    if not parse_chat_id(chat_id):
+        return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
+    if game not in {"dice", "rps"}:
+        return web.json_response({"ok": False, "error": "game must be dice or rps"}, status=400)
+    result = None
+    if raw_result is not None and str(raw_result).strip().lower() not in {"", "random"}:
+        value = str(raw_result).strip().lower()
+        if game == "dice":
+            if value not in {"1", "2", "3", "4", "5", "6"}:
+                return web.json_response({"ok": False, "error": "dice result must be 1 through 6"}, status=400)
+            result = value
+        else:
+            result = RPS_RESULTS.get(value)
+            if not result:
+                return web.json_response({"ok": False, "error": "RPS result must be rock, scissors, or paper"}, status=400)
+    try:
+        response = await request.app["napcat"].send_game(chat_id, game, result)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not response or response.get("status") != "ok":
+        return web.json_response({"ok": False, "error": _onebot_error(response, "game send failed")}, status=500)
+    return web.json_response({"ok": True, "data": response.get("data"), "game": game, "result": result})
 
 
 async def handle_send_music(request):

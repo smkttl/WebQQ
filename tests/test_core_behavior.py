@@ -163,6 +163,28 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "private chats"):
             await connection.get_online_files("group_42")
 
+    async def test_dice_and_rps_support_random_and_forced_results(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace())
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_game("group_7", "dice")
+        await connection.send_game("group_7", "dice", "6")
+        await connection.send_game("group_7", "rps")
+        await connection.send_game("group_7", "rps", "2")
+
+        self.assertEqual([call[1]["message"] for call in calls], [
+            [{"type": "dice", "data": {"result": "0"}}],
+            [{"type": "face", "data": {"id": "358", "resultId": "6"}}],
+            [{"type": "rps", "data": {"result": "0"}}],
+            [{"type": "face", "data": {"id": "359", "resultId": "2"}}],
+        ])
+
     async def test_rich_media_segments_use_4182_onebot_schema(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
@@ -661,6 +683,30 @@ class OnlineFileHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RichMediaHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_game_handler_normalizes_forced_results_and_keeps_random(self):
+        sent = []
+
+        async def send_game(chat_id, game, result):
+            sent.append((chat_id, game, result))
+            return {"status": "ok", "data": {"message_id": 1}}
+
+        async def invoke(body):
+            request = SimpleNamespace(
+                app={"config": {"web_token": ""}, "napcat": SimpleNamespace(send_game=send_game)},
+                query={}, cookies={}, headers={}, remote="",
+            )
+            request.json = lambda: self._json(body)
+            return await api.handle_send_game(request)
+
+        self.assertEqual((await invoke({"chat_id": "group_1", "game": "dice"})).status, 200)
+        self.assertEqual((await invoke({"chat_id": "private_2", "game": "rps", "result": "scissors"})).status, 200)
+        self.assertEqual(sent, [("group_1", "dice", None), ("private_2", "rps", "2")])
+        self.assertEqual((await invoke({"chat_id": "group_1", "game": "dice", "result": "7"})).status, 400)
+        self.assertEqual((await invoke({"chat_id": "group_1", "game": "rps", "result": "lizard"})).status, 400)
+
+    async def _json(self, body):
+        return body
+
     async def test_contact_and_custom_music_are_validated_and_sent(self):
         sent = []
 

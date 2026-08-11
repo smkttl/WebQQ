@@ -19,6 +19,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Long text messages fold automatically in both WebUI and TUI while leaving attachments visible
 - The web client and plugins can combine existing messages or authored text nodes into merged forwards
 - Send private online files/folders and receive, refuse, or cancel pending online transfers
+- Send native QQ dice and rock-paper-scissors messages with random or explicitly selected results
 
 ## Requirements
 
@@ -95,6 +96,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | GET/POST | `/api/collections`               | Browse or create QQ collections |
 | POST   | `/api/collections/from-message`    | Save a message snapshot to collections |
 | POST   | `/api/send-mini-app`               | Generate and send a mini-app card |
+| POST   | `/api/send-game`                   | Send random or forced dice/RPS |
 | GET    | `/api/online-files`                | List private online transfers |
 | POST   | `/api/online-files/send`           | Send a private online file |
 | POST   | `/api/online-files/send-folder`    | Send a private online folder |
@@ -116,7 +118,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 
 ## TODO
 
-- Rich sending for Markdown cards, locations, and dice/RPS.
+- Rich sending for Markdown cards and locations.
 - Request-management UI for reviewing and manually approving or rejecting pending requests.
 - Group file management: folders, delete/move/rename/transfer, file-system info, and root/folder listings.
 - Group notice and essence-message management.

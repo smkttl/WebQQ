@@ -253,8 +253,12 @@ def extra_segment_summary(segment: Mapping[str, Any], compact: bool = False) -> 
         contact_id = str(segment.get("contact_id") or "")
         if contact_id:
             details.append("{} {}".format(contact_type, contact_id))
-    elif segment_type in ("dice", "rps") and segment.get("result") is not None:
-        details.append("result {}".format(segment.get("result")))
+    elif segment_type == "dice" and segment.get("result") is not None:
+        details.append("{} dots".format(segment.get("result")))
+    elif segment_type == "rps" and segment.get("result") is not None:
+        names = {"1": "Rock", "2": "Scissors", "3": "Paper"}
+        value = str(segment.get("result"))
+        details.append(names.get(value, value))
     if segment.get("url"):
         details.append("link")
     if segment.get("audio"):

@@ -80,6 +80,7 @@ async def main():
     app.router.add_post("/api/send-voice", handle_send_voice)
     app.router.add_post("/api/send-music", handle_send_music)
     app.router.add_post("/api/send-contact", handle_send_contact)
+    app.router.add_post("/api/send-game", handle_send_game)
     app.router.add_get("/api/custom-faces", handle_custom_faces)
     app.router.add_post("/api/send-custom-face", handle_send_custom_face)
     app.router.add_get("/api/collections", handle_collections)

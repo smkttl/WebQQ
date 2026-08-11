@@ -251,6 +251,14 @@ class WebQQClient:
         self._require_ok(payload, "contact send failed")
         return payload
 
+    async def send_game(self, chat_id: str, game: str, result: Optional[str] = None) -> Mapping[str, Any]:
+        body: Dict[str, Any] = {"chat_id": chat_id, "game": game}
+        if result is not None:
+            body["result"] = result
+        payload = await self._request_json("POST", "/api/send-game", json_body=body)
+        self._require_ok(payload, "game send failed")
+        return payload
+
     async def send_music(self, chat_id: str, music: Mapping[str, Any]) -> Mapping[str, Any]:
         payload = await self._request_json(
             "POST",

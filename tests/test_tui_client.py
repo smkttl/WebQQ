@@ -49,6 +49,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post("/api/send-voice", self.send_media_upload)
         app.router.add_post("/api/send-contact", self.send_rich_media)
         app.router.add_post("/api/send-music", self.send_rich_media)
+        app.router.add_post("/api/send-game", self.send_rich_media)
         app.router.add_post("/api/message/transcribe", self.transcribe)
         app.router.add_get("/api/group-files", self.group_files)
         app.router.add_post("/api/group-files/upload", self.group_file_upload)
@@ -368,10 +369,14 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         await self.client.send_voice("group_1", source)
         await self.client.send_contact("group_1", "qq", "42")
         await self.client.send_music("group_1", {"type": "qq", "id": "7"})
+        await self.client.send_game("group_1", "dice")
+        await self.client.send_game("group_1", "rps", "rock")
         self.assertEqual(self.media_uploads["/api/send-video"]["file"], b"video")
         self.assertEqual(self.media_uploads["/api/send-voice"]["chat_id"], "group_1")
         self.assertEqual(self.rich_media[0][1]["id"], "42")
         self.assertEqual(self.rich_media[1][1]["type"], "qq")
+        self.assertEqual(self.rich_media[2][1], {"chat_id": "group_1", "game": "dice"})
+        self.assertEqual(self.rich_media[3][1]["result"], "rock")
 
     async def test_online_file_lifecycle_requests(self):
         await self.client.login()

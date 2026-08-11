@@ -539,6 +539,17 @@ class NapCatConnection:
             "data": {"type": str(contact_type), "id": str(contact_id)},
         }])
 
+    async def send_game(self, chat_id, game, result=None):
+        game = str(game).lower()
+        if game not in ("dice", "rps"):
+            raise ValueError("game must be dice or rps")
+        if result is None:
+            return await self.send_segments(chat_id, [{"type": game, "data": {"result": "0"}}])
+        face_id = "358" if game == "dice" else "359"
+        return await self.send_segments(chat_id, [{
+            "type": "face", "data": {"id": face_id, "resultId": str(result)},
+        }])
+
     async def send_music(self, chat_id, music):
         return await self.send_segments(chat_id, [{"type": "music", "data": dict(music)}], timeout=30)
 

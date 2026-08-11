@@ -41,6 +41,7 @@ class FakeClient:
         self.temp_chats = []
         self.portal_sent = []
         self.online_actions = []
+        self.games = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -142,6 +143,10 @@ class FakeClient:
 
     async def online_file_action(self, chat_id, action, message_id, element_id=""):
         self.online_actions.append((chat_id, action, message_id, element_id))
+        return {"ok": True}
+
+    async def send_game(self, chat_id, game, result=None):
+        self.games.append((chat_id, game, result))
         return {"ok": True}
 
     async def send_contact(self, chat_id, contact_type, contact_id):
@@ -275,6 +280,25 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RichMediaDialog.parse_command('online "/tmp/a b"'), {"kind": "online", "path": "/tmp/a b"})
         self.assertEqual(RichMediaDialog.parse_command("online-folder /tmp/docs"), {"kind": "online_folder", "path": "/tmp/docs"})
         self.assertEqual(RichMediaDialog.parse_command("transfers"), {"kind": "transfers"})
+        self.assertEqual(RichMediaDialog.parse_command("dice"), {"kind": "dice", "result": None})
+        self.assertEqual(RichMediaDialog.parse_command("dice 6"), {"kind": "dice", "result": "6"})
+        self.assertEqual(RichMediaDialog.parse_command("rps scissors"), {"kind": "rps", "result": "scissors"})
+        with self.assertRaises(ValueError):
+            RichMediaDialog.parse_command("dice 7")
+
+    async def test_f3_sends_forced_rps(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(32, 10)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("f3")
+            command = app.screen.query_one("#media_command", Input)
+            command.value = "rps scissors"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertEqual(client.games, [("group_1", "rps", "scissors")])
 
     async def test_online_transfer_manager_fits_small_terminal_and_receives(self):
         client = FakeClient()
