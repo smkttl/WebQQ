@@ -106,6 +106,52 @@ class WebQQClient:
         self._require_ok(payload, "send failed")
         return payload
 
+    async def send_portal_message(
+        self, plugin_id: str, chat_id: str, text: str, reply_to: str = "",
+    ) -> Mapping[str, Any]:
+        body: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if reply_to:
+            body["reply_to"] = reply_to
+        payload = await self._request_json(
+            "POST", "/api/plugins/{}/portal-message".format(plugin_id), json_body=body,
+        )
+        self._require_ok(payload, "plugin portal send failed")
+        return payload
+
+    async def send_forward(self, chat_id: str, nodes: List[Mapping[str, Any]]) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/send-forward", json_body={"chat_id": chat_id, "nodes": nodes},
+        )
+        self._require_ok(payload, "combined forward send failed")
+        return payload
+
+    async def start_temp_chat(
+        self, group_id: str, user_id: str, name: str = "", group_name: str = "",
+    ) -> Mapping[str, Any]:
+        payload = await self._request_json("POST", "/api/temp-chat", json_body={
+            "group_id": group_id, "user_id": user_id, "name": name, "group_name": group_name,
+        })
+        self._require_ok(payload, "temporary chat failed")
+        return payload
+
+    async def revoke_message(self, chat_id: str, message_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/message/revoke",
+            json_body={"chat_id": chat_id, "message_id": message_id},
+        )
+        self._require_ok(payload, "message revoke failed")
+        return payload
+
+    async def reaction_details(
+        self, chat_id: str, message_id: str, emoji_id: str = "",
+    ) -> List[Mapping[str, Any]]:
+        params = {"chat_id": chat_id, "message_id": message_id}
+        if emoji_id:
+            params["emoji_id"] = emoji_id
+        payload = await self._request_json("GET", "/api/message/emoji-likes", params=params)
+        values = payload.get("reactions")
+        return [dict(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+
     async def poke(self, chat_id: str, user_id: str) -> Mapping[str, Any]:
         payload = await self._request_json(
             "POST",
@@ -328,6 +374,117 @@ class WebQQClient:
         self._require_ok(payload, "friend remark update failed")
         return payload
 
+    async def friends(self) -> Mapping[str, Any]:
+        payload = await self._request_json("GET", "/api/friends")
+        self._require_ok(payload, "friends load failed")
+        return payload
+
+    async def delete_friend(self, user_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json("DELETE", "/api/friends/{}".format(user_id))
+        self._require_ok(payload, "friend deletion failed")
+        return payload
+
+    async def profile(self) -> Mapping[str, Any]:
+        payload = await self._request_json("GET", "/api/profile")
+        self._require_ok(payload, "profile load failed")
+        profile = payload.get("profile")
+        if not isinstance(profile, dict):
+            raise ServerResponseError("invalid profile response")
+        return dict(profile)
+
+    async def update_profile(self, nickname: str, personal_note: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "PUT", "/api/profile",
+            json_body={"nickname": nickname, "personal_note": personal_note},
+        )
+        self._require_ok(payload, "profile update failed")
+        return payload
+
+    async def upload_profile_avatar(self, path: Path) -> Mapping[str, Any]:
+        return await self._upload_file(path, "/api/profile/avatar", "avatar")
+
+    async def contact_requests(
+        self, status: str = "", request_type: str = "",
+    ) -> Mapping[str, Any]:
+        params = {key: value for key, value in (("status", status), ("type", request_type)) if value}
+        payload = await self._request_json("GET", "/api/contact-requests", params=params)
+        self._require_ok(payload, "contact requests load failed")
+        return payload
+
+    async def act_on_contact_request(
+        self, request_id: str, approve: bool, remark: str = "", reason: str = "",
+    ) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST", "/api/contact-requests/{}/action".format(request_id),
+            json_body={"approve": approve, "remark": remark, "reason": reason},
+        )
+        self._require_ok(payload, "contact request action failed")
+        return payload
+
+    async def contact_settings(self) -> Mapping[str, Any]:
+        payload = await self._request_json("GET", "/api/contact-settings")
+        self._require_ok(payload, "contact settings load failed")
+        return payload
+
+    async def update_contact_settings(self, auto_approve: bool) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "PUT", "/api/contact-settings", json_body={"auto_approve_requests": auto_approve},
+        )
+        self._require_ok(payload, "contact settings update failed")
+        return payload
+
+    async def plugins(self) -> List[Mapping[str, Any]]:
+        payload = await self._request_json("GET", "/api/plugins")
+        values = payload.get("plugins")
+        return [dict(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+
+    async def refresh_plugins(self) -> List[Mapping[str, Any]]:
+        payload = await self._request_json("POST", "/api/plugins/refresh", json_body={})
+        self._require_ok(payload, "plugin refresh failed")
+        values = payload.get("plugins")
+        return [dict(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
+
+    async def plugin_action(self, plugin_id: str, action: str) -> Mapping[str, Any]:
+        if action not in ("enable", "disable", "restart"):
+            raise WebQQClientError("invalid plugin action")
+        payload = await self._request_json(
+            "POST", "/api/plugins/{}/{}".format(plugin_id, action), json_body={},
+        )
+        self._require_ok(payload, "plugin {} failed".format(action))
+        return payload
+
+    async def plugin_config(self, plugin_id: str) -> Mapping[str, Any]:
+        return await self._request_json("GET", "/api/plugins/{}/config".format(plugin_id))
+
+    async def update_plugin_config(self, plugin_id: str, text: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "PUT", "/api/plugins/{}/config".format(plugin_id), json_body={"text": text},
+        )
+        self._require_ok(payload, "plugin configuration save failed")
+        return payload
+
+    async def upload_background(self, path: Path) -> Mapping[str, Any]:
+        return await self._upload_file(path, "/api/background-image", "background image", max_size=MAX_UPLOAD_SIZE)
+
+    async def clear_background(self) -> Mapping[str, Any]:
+        payload = await self._request_json("DELETE", "/api/background-image")
+        self._require_ok(payload, "background clear failed")
+        return payload
+
+    async def fetch_bytes(
+        self, path: str, params: Optional[Mapping[str, str]] = None,
+    ) -> tuple:
+        try:
+            async with self._session().get(self.endpoint(path), params=params) as response:
+                if response.status == 401:
+                    raise AuthenticationError("resource authentication failed")
+                if response.status >= 400:
+                    payload = await self._read_json(response)
+                    raise ServerResponseError(str(payload.get("error") or "resource load failed"), response.status)
+                return await response.read(), str(response.headers.get("Content-Type") or "")
+        except (aiohttp.ClientError, OSError) as exc:
+            raise WebQQClientError("resource load failed: {}".format(exc)) from exc
+
     async def _send_upload(self, chat_id: str, path: Path, endpoint: str, kind: str) -> Mapping[str, Any]:
         path = path.expanduser().resolve()
         if not path.is_file():
@@ -345,6 +502,28 @@ class WebQQClient:
             form.add_field("file", body, filename=path.name, content_type=content_type)
             try:
                 async with session.post(self.endpoint(endpoint), data=form) as response:
+                    payload = await self._read_json(response)
+            except (aiohttp.ClientError, OSError) as exc:
+                raise WebQQClientError("{} upload failed: {}".format(kind, exc)) from exc
+        self._require_ok(payload, "{} upload failed".format(kind))
+        return payload
+
+    async def _upload_file(
+        self, path: Path, endpoint: str, kind: str, max_size: int = 10 * 1024 * 1024,
+    ) -> Mapping[str, Any]:
+        path = path.expanduser().resolve()
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise WebQQClientError("{} does not exist or is empty: {}".format(kind, path))
+        if path.stat().st_size > max_size:
+            raise WebQQClientError("{} is larger than {} MB".format(kind, max_size // (1024 * 1024)))
+        form = aiohttp.FormData()
+        with path.open("rb") as body:
+            form.add_field(
+                "file", body, filename=path.name,
+                content_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            )
+            try:
+                async with self._session().post(self.endpoint(endpoint), data=form) as response:
                     payload = await self._read_json(response)
             except (aiohttp.ClientError, OSError) as exc:
                 raise WebQQClientError("{} upload failed: {}".format(kind, exc)) from exc

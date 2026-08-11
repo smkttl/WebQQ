@@ -1,9 +1,12 @@
 import asyncio
 import json
+import os
 import shlex
+import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Any, Coroutine, List, Mapping, Optional, Set
+from typing import Any, Coroutine, Dict, List, Mapping, Optional, Set
 
 import aiohttp
 from rich.text import Text
@@ -17,7 +20,20 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, ListItem, ListView, Static, TextArea
 
 from .client import AuthenticationError, WebQQClient, WebQQClientError
+from .config import load_tui_preferences, save_tui_preferences
 from .emoji import reaction_emoji_entries
+from .management import (
+    ActionEntry,
+    ActionPalette,
+    ConfirmDialog,
+    ContactsManager,
+    ForwardComposer,
+    ImagePreview,
+    PluginManagerScreen,
+    ReactionUsers,
+    TextPrompt,
+    render_image_cells,
+)
 from .models import (
     Attachment,
     Chat,
@@ -48,22 +64,33 @@ class MessageListItem(ListItem):
 
     def __init__(
         self, message: Message, compact: bool = False, search: str = "", expanded: bool = False,
+        selected: bool = False,
     ):
         self.message = message
         self.compact = compact
         self.search = search
         self.is_long = not bool(search) and message_body_is_long(message)
         self.expanded = bool(expanded and self.is_long)
+        self.selected = selected
         children = [Static(self._render_text(), markup=False)]
+        if any(item.kind == "image" for item in message.attachments):
+            children.append(Static("Loading image preview...", classes="message-thumbnail", markup=False))
         if self.is_long:
             children.append(Button(self._button_label(), classes="message-fold-button"))
         super().__init__(*children)
+        if self.selected:
+            self.add_class("message-selected")
 
     def _render_text(self) -> Text:
-        return format_message(
+        text = format_message(
             self.message, compact=self.compact, search=self.search,
             fold_long=self.is_long, expanded=self.expanded,
         )
+        if self.selected:
+            selected = Text("[selected] ", style="bold yellow")
+            selected.append_text(text)
+            text = selected
+        return text
 
     def _button_label(self) -> str:
         return "Collapse message" if self.expanded else "Show full message"
@@ -78,6 +105,11 @@ class MessageListItem(ListItem):
     def refresh_message(self, message: Optional[Message] = None) -> None:
         if message is not None:
             self.message = message
+        self.query_one(Static).update(self._render_text())
+
+    def set_selected(self, selected: bool) -> None:
+        self.selected = bool(selected)
+        self.set_class(self.selected, "message-selected")
         self.query_one(Static).update(self._render_text())
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -474,7 +506,7 @@ class CustomFaceListItem(ListItem):
 
 
 class CustomFacePicker(ModalScreen):
-    BINDINGS = [Binding("escape", "cancel", show=False)]
+    BINDINGS = [Binding("escape", "cancel", show=False), Binding("v", "preview", show=False)]
     CSS = """
     CustomFacePicker { align: center middle; background: $background 70%; }
     CustomFacePicker > Container { width: 64; max-width: 96%; height: 22; max-height: 92%; border: solid $accent; background: $surface; padding: 1; }
@@ -489,7 +521,7 @@ class CustomFacePicker(ModalScreen):
         with Container():
             yield Static("Custom faces", classes="dialog-title")
             yield NavigableListView(id="custom_face_list")
-            yield Static("Enter send  Esc return", classes="hint")
+            yield Static("Enter send  V preview  Esc return", classes="hint")
 
     async def on_mount(self) -> None:
         view = self.query_one("#custom_face_list", ListView)
@@ -508,6 +540,14 @@ class CustomFacePicker(ModalScreen):
         if isinstance(event.item, CustomFaceListItem):
             self.dismiss(event.item.face)
 
+    def action_preview(self) -> None:
+        item = self.query_one("#custom_face_list", ListView).highlighted_child
+        if not isinstance(item, CustomFaceListItem):
+            return
+        url = str(item.face.get("url") or "")
+        if url:
+            self.app.push_screen(ImagePreview(self.client, "Custom face", "/api/image", {"url": url}))
+
     def action_cancel(self) -> None:
         self.dismiss(None)
 
@@ -521,7 +561,7 @@ class CollectionListItem(ListItem):
 
 
 class CollectionBrowser(ModalScreen):
-    BINDINGS = [Binding("escape", "cancel", show=False)]
+    BINDINGS = [Binding("escape", "cancel", show=False), Binding("v", "preview", show=False)]
     CSS = """
     CollectionBrowser { align: center middle; background: $background 70%; }
     CollectionBrowser > Container { width: 76; max-width: 96%; height: 24; max-height: 92%; border: solid $accent; background: $surface; padding: 1; }
@@ -537,7 +577,7 @@ class CollectionBrowser(ModalScreen):
         with Container():
             yield Static("QQ collections", classes="dialog-title")
             yield NavigableListView(id="collection_list")
-            yield Static("Browse with arrows/j/k  Esc return", classes="hint")
+            yield Static("Arrows/j/k browse  V preview image  Esc return", classes="hint")
 
     async def on_mount(self) -> None:
         view = self.query_one("#collection_list", ListView)
@@ -551,6 +591,15 @@ class CollectionBrowser(ModalScreen):
         except Exception as exc:
             await view.append(ListItem(Static("Unavailable: {}".format(exc), markup=False)))
         view.focus()
+
+    def action_preview(self) -> None:
+        item = self.query_one("#collection_list", ListView).highlighted_child
+        if not isinstance(item, CollectionListItem):
+            return
+        pictures = item.collection.get("pictures")
+        url = str(pictures[0] if isinstance(pictures, list) and pictures else "")
+        if url:
+            self.app.push_screen(ImagePreview(self.client, "Collection image", "/api/image", {"url": url}))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -576,6 +625,7 @@ class GroupManager(ModalScreen):
         Binding("p", "publish", show=False), Binding("e", "essence", show=False),
         Binding("d", "delete", show=False), Binding("s", "sign", show=False),
         Binding("l", "leave_or_like", show=False), Binding("r", "comment", show=False),
+        Binding("o", "temp_chat", show=False),
     ]
     CSS = """
     GroupManager { align: center middle; background: $background 70%; }
@@ -897,6 +947,23 @@ class GroupManager(ModalScreen):
             if lloc:
                 self._prompt("album_comment", "Comment", {"lloc": lloc})
 
+    def action_temp_chat(self) -> None:
+        member = self._member()
+        user_id = str((member or {}).get("user_id") or (member or {}).get("uid") or "")
+        if member and user_id:
+            self.run_worker(self._open_temp_chat(user_id, self._name(member)), exclusive=True)
+
+    async def _open_temp_chat(self, user_id: str, name: str) -> None:
+        try:
+            group_name = str((self.dashboard.get("info") or {}).get("group_name") or "")
+            result = await self.client.start_temp_chat(
+                self.chat_id[6:], user_id,
+                "{} / {}".format(group_name, name) if group_name else name, group_name,
+            )
+            self.dismiss(result)
+        except Exception as error:
+            self._set_title("temporary chat failed: {}".format(error))
+
     async def _quick_action(self, action: str, **values: Any) -> None:
         try:
             await self.client.group_action(self.chat_id, action, **values)
@@ -1175,9 +1242,12 @@ HELP_KEY_GROUPS = (
     )),
     ("Messages", (
         ("Enter / fold button", "Expand or collapse a long message"),
+        ("Space", "Select or unselect a message for combined forwarding"),
         ("r", "Reply to the selected message"),
         ("e", "React to the selected message"),
         ("p", "Poke the selected sender"),
+        ("c", "Copy the selected message"),
+        ("v", "Preview the selected image"),
         ("d", "Download an attachment"),
         ("t", "Transcribe a selected voice message"),
     )),
@@ -1187,6 +1257,10 @@ HELP_KEY_GROUPS = (
         ("Ctrl+I", "Send an image"),
         ("Ctrl+O", "Send a file"),
         ("F3", "Open media, custom faces, collections, and mini-apps"),
+    )),
+    ("Management", (
+        ("Ctrl+P", "Search all message, contact, plugin, profile, and appearance actions"),
+        ("Esc", "Return one level or cancel the current mode"),
     )),
 )
 
@@ -1236,6 +1310,7 @@ class WebQQTui(App):
     TITLE = "WebQQ"
     SUB_TITLE = "Terminal client"
     ALLOW_SELECT = False
+    ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
         Binding("q", "quit_requested", "Quit", show=False),
         Binding("escape", "back", "Back", show=False),
@@ -1255,6 +1330,10 @@ class WebQQTui(App):
         Binding("f2", "friend_remark", show=False),
         Binding("f1", "help", show=False),
         Binding("question_mark", "help", show=False),
+        Binding("ctrl+p", "palette", show=False),
+        Binding("space", "toggle_message_selection", show=False),
+        Binding("v", "preview", show=False),
+        Binding("c", "copy_message", show=False),
     ]
     CSS = """
     Screen { background: #111418; color: #e8eaed; }
@@ -1267,6 +1346,8 @@ class WebQQTui(App):
     #message_list > ListItem { height: auto; min-height: 3; padding: 0 1 1 1; }
     #message_list .message-fold-button { width: auto; min-width: 18; height: 1; min-height: 1; margin: 0; padding: 0 1; border: none; background: transparent; color: #45a3c7; }
     #message_list .message-fold-button:hover { background: #2b3138; color: #8ab4c4; }
+    #message_list .message-thumbnail { width: auto; max-width: 38; height: auto; max-height: 5; margin-top: 1; overflow: hidden hidden; }
+    #message_list > ListItem.message-selected { background: #3d3520; }
     ListView > ListItem.--highlight { background: #2b3138; }
     #conversation { width: 1fr; }
     #message_search, #file_path, #image_path { display: none; }
@@ -1279,7 +1360,13 @@ class WebQQTui(App):
     .short #chat_list > ListItem { height: 2; }
     .short #composer { height: 3; border: none; }
     .short #chat_header { height: 1; }
+    .short #message_list .message-thumbnail { display: none; }
     .dialog-title { height: 2; text-style: bold; }
+    .light Screen { background: #f7f8fa; color: #202124; }
+    .light #sidebar { background: #eef1f4; border-right: solid #aeb4bb; }
+    .light #sidebar_title, .light #chat_header, .light #status_bar, .light #reply_bar { background: #e2e6ea; color: #202124; }
+    .light #composer { background: #ffffff; border: tall #aeb4bb; color: #202124; }
+    .light ListView > ListItem.--highlight { background: #d7e8ef; }
     """
 
     def __init__(self, client: WebQQClient):
@@ -1299,6 +1386,13 @@ class WebQQTui(App):
         self._running = True
         self._tasks: Set[asyncio.Task] = set()
         self._expanded_message_ids: Set[str] = set()
+        self._image_preview_cache: Dict[str, Text] = {}
+        self._selected_message_ids: Set[str] = set()
+        self._send_plugin_id = ""
+        self._send_plugin_name = ""
+        self._pending_contact_requests = 0
+        preferences = load_tui_preferences()
+        self._theme = "light" if preferences.get("theme") == "light" else "dark"
         self._load_token = 0
         self._match_indexes: List[int] = []
         self._match_position = -1
@@ -1333,6 +1427,7 @@ class WebQQTui(App):
         yield Static("Terminal is too small. Resize to at least 32x10.", id="too_small")
 
     async def on_mount(self) -> None:
+        self.set_class(self._theme == "light", "light")
         self._apply_layout(self.size.width, self.size.height)
         self.query_one("#chat_list", ListView).focus()
         self._spawn(self._initial_load())
@@ -1456,6 +1551,21 @@ class WebQQTui(App):
             await self._apply_message_update(data)
         elif event_type == "emoji_like":
             await self._apply_reaction_update(data)
+        elif event_type in ("contact_request_update", "contact_settings_update"):
+            pending = payload.get("pending_count", data.get("pending_count"))
+            if pending is not None:
+                self._pending_contact_requests = int(pending or 0)
+            self._rebuild_base_status()
+            if isinstance(self.screen, ContactsManager):
+                self.screen.run_worker(self.screen._load(), exclusive=True)
+        elif event_type == "contacts_changed":
+            await self._refresh_chats(silent=True)
+            if isinstance(self.screen, ContactsManager):
+                self.screen.run_worker(self.screen._load(), exclusive=True)
+        elif event_type == "profile_update":
+            await self._refresh_status(silent=True)
+            if isinstance(self.screen, ContactsManager):
+                self.screen.run_worker(self.screen._load(), exclusive=True)
         if event_type in ("new_message", "message_update"):
             await self._refresh_chats(silent=True)
 
@@ -1505,6 +1615,7 @@ class WebQQTui(App):
             self._napcat_status = "NapCat connected" if connected else "NapCat disconnected"
             self._account_status = name
             self._chat_count = int(status.get("chats_count", len(self.chats)) or 0)
+            self._pending_contact_requests = int(status.get("pending_contact_requests") or 0)
             self._rebuild_base_status()
         except Exception as exc:
             self._live_status = "Server unreachable"
@@ -1560,6 +1671,35 @@ class WebQQTui(App):
         finally:
             self._rendering = False
 
+    async def _hydrate_inline_images(self, token: int) -> None:
+        if token != self._load_token or not self.current_chat:
+            return
+        view = self.query_one("#message_list", ListView)
+        for child in list(view.children):
+            if token != self._load_token or not isinstance(child, MessageListItem) or not child.is_mounted:
+                return
+            images = [item for item in child.message.attachments if item.kind == "image"]
+            if not images:
+                continue
+            try:
+                target = child.query_one(".message-thumbnail", Static)
+            except NoMatches:
+                continue
+            attachment = images[0]
+            params = self.client._attachment_params(child.message.chat_id, attachment)
+            key = "|".join("{}={}".format(name, params[name]) for name in sorted(params))
+            try:
+                preview = self._image_preview_cache.get(key)
+                if preview is None:
+                    data, _ = await self.client.fetch_bytes("/api/image", params)
+                    preview = render_image_cells(data, max_width=min(36, max(8, self.size.width - 42)), max_height=4)
+                    self._image_preview_cache[key] = preview
+                if child.is_mounted and token == self._load_token:
+                    target.update(preview)
+            except Exception as error:
+                if child.is_mounted and token == self._load_token:
+                    target.update("Image preview unavailable: {}".format(error))
+
     async def _render_messages(self, select_last: bool = False) -> None:
         if not self.is_mounted:
             return
@@ -1576,6 +1716,7 @@ class WebQQTui(App):
                     MessageListItem(
                         message, compact=self.short, search=search,
                         expanded=self._message_expansion_key(message) in self._expanded_message_ids,
+                        selected=message.stable_id in self._selected_message_ids,
                     )
                     for message in self.messages
                 )
@@ -1590,6 +1731,8 @@ class WebQQTui(App):
                 view.scroll_to_widget(view.children[view.index], animate=False)
         finally:
             self._rendering = False
+        if self.messages and not self.narrow and not self.short:
+            self._spawn(self._hydrate_inline_images(self._load_token))
 
     def _refresh_message_row(self, message: Message) -> None:
         if not self.is_mounted:
@@ -1742,6 +1885,7 @@ class WebQQTui(App):
             if isinstance(messages, Exception):
                 raise messages
             self.messages = deduplicate_messages(messages)
+            self._selected_message_ids.clear()
             self.no_more_messages = len(messages) < 50
             self.query_one("#chat_header", Static).update(self._chat_header_text())
             await self._render_messages(select_last=True)
@@ -1789,12 +1933,325 @@ class WebQQTui(App):
         reply_id = self.reply_to.message_id if self.reply_to else ""
         composer.load_text("")
         try:
-            await self.client.send_message(self.current_chat.chat_id, text, reply_to=reply_id)
+            if self._send_plugin_id:
+                await self.client.send_portal_message(
+                    self._send_plugin_id, self.current_chat.chat_id, text, reply_to=reply_id,
+                )
+            else:
+                await self.client.send_message(self.current_chat.chat_id, text, reply_to=reply_id)
             self.reply_to = None
             self._update_reply_bar()
         except Exception as exc:
             composer.load_text(text)
             self._set_notice("Send failed: {}".format(exc))
+
+    def action_palette(self) -> None:
+        message = self._selected_message()
+        in_chat = self.current_chat is not None and self.conversation_visible
+        has_server_message = bool(message and message.message_id.lstrip("-").isdigit())
+        has_image = bool(message and any(item.kind == "image" for item in message.attachments))
+        entries = [
+            ActionEntry("toggle_select", "Select or unselect message", "Build a combined forward", has_server_message),
+            ActionEntry("forward_selected", "Forward selected messages", "{} selected".format(len(self._selected_message_ids)), bool(self._selected_message_ids)),
+            ActionEntry("forward_custom", "Create custom combined forward", "Author sender names and content", bool(self.chats)),
+            ActionEntry("revoke", "Revoke message", "Server permissions and recall window apply", has_server_message),
+            ActionEntry("temp_chat", "Start temporary chat", "Open the selected group member", bool(message and not message.self_sent and self.current_chat and self.current_chat.chat_type == "group")),
+            ActionEntry("copy_message", "Copy message text", "Uses terminal clipboard support", bool(message)),
+            ActionEntry("copy_user", "Copy sender QQ ID", str(message.sender_id if message else ""), bool(message and message.sender_id)),
+            ActionEntry("reaction_users", "View reaction users", "Refresh identities from QQ", bool(has_server_message and message and message.reactions)),
+            ActionEntry("insert_face", "Insert standard QQ face", "Add a face token to the composer", in_chat),
+            ActionEntry("preview_image", "Preview message image", "Color-cell terminal preview", has_image),
+            ActionEntry("open_media", "Open attachment externally", "Downloads before opening", bool(message and message.downloadable_attachments)),
+            ActionEntry("view_avatar", "View sender or chat avatar", "Color-cell terminal preview", bool(message or self.current_chat)),
+            ActionEntry("send_target", "Choose send destination", "Current: {}".format(self._send_plugin_name or "QQ chat"), in_chat),
+            ActionEntry("contacts", "Manage contacts and profile", "Requests, friends, avatar, automatic approval"),
+            ActionEntry("plugins", "Manage plugins", "Refresh, enable, restart, errors, JSON config"),
+            ActionEntry("theme", "Toggle light or dark theme", "Current: {}".format(self._theme)),
+            ActionEntry("background_upload", "Upload WebUI background", "Configure the server-side conversation image"),
+            ActionEntry("background_preview", "Preview WebUI background", "Shows the configured server image"),
+            ActionEntry("background_clear", "Clear WebUI background", "Requires confirmation"),
+        ]
+        self.push_screen(ActionPalette(entries), self._palette_selected)
+
+    def _palette_selected(self, action_id: Optional[str]) -> None:
+        if not action_id:
+            return
+        actions = {
+            "toggle_select": self.action_toggle_message_selection,
+            "forward_selected": self.action_forward_selected,
+            "forward_custom": self.action_custom_forward,
+            "revoke": self.action_revoke,
+            "temp_chat": self.action_temp_chat,
+            "copy_message": self.action_copy_message,
+            "copy_user": self.action_copy_user,
+            "reaction_users": self.action_reaction_users,
+            "insert_face": self.action_insert_face,
+            "preview_image": self.action_preview,
+            "open_media": self.action_open_media,
+            "view_avatar": self.action_view_avatar,
+            "send_target": self.action_send_target,
+            "contacts": self.action_contacts,
+            "plugins": self.action_plugins,
+            "theme": self.action_toggle_theme,
+            "background_upload": self.action_background_upload,
+            "background_preview": self.action_background_preview,
+            "background_clear": self.action_background_clear,
+        }
+        callback = actions.get(action_id)
+        if callback:
+            callback()
+
+    def action_toggle_message_selection(self) -> None:
+        if isinstance(self.focused, (Composer, Input)):
+            return
+        message = self._selected_message()
+        if not message or not message.message_id.lstrip("-").isdigit():
+            self._set_notice("Select a server-confirmed message")
+            return
+        if message.stable_id in self._selected_message_ids:
+            self._selected_message_ids.discard(message.stable_id)
+        else:
+            self._selected_message_ids.add(message.stable_id)
+        view = self.query_one("#message_list", ListView)
+        item = view.highlighted_child
+        if isinstance(item, MessageListItem):
+            item.set_selected(message.stable_id in self._selected_message_ids)
+        self._set_notice("{} messages selected".format(len(self._selected_message_ids)), seconds=2)
+
+    def action_forward_selected(self) -> None:
+        nodes = [
+            {"message_id": message.message_id}
+            for message in self.messages
+            if message.stable_id in self._selected_message_ids and message.message_id.lstrip("-").isdigit()
+        ]
+        if not nodes:
+            self._set_notice("Select messages with Space first")
+            return
+        self.push_screen(ForwardComposer(self.client, self.chats, nodes), self._forward_finished)
+
+    def action_custom_forward(self) -> None:
+        self.push_screen(ForwardComposer(self.client, self.chats), self._forward_finished)
+
+    def _forward_finished(self, result: Optional[Mapping[str, Any]]) -> None:
+        if result and result.get("sent"):
+            self._selected_message_ids.clear()
+            self._set_notice("Combined forward sent")
+            self._spawn(self._refresh_chats(silent=True))
+
+    def action_revoke(self) -> None:
+        message = self._selected_message()
+        if not message or not message.message_id.lstrip("-").isdigit() or message.recalled:
+            self._set_notice("Select a revocable server message")
+            return
+        self.push_screen(
+            ConfirmDialog("Revoke message", "Revoke message #{}?".format(message.message_id)),
+            lambda confirmed: self._spawn(self._revoke(message)) if confirmed else None,
+        )
+
+    async def _revoke(self, message: Message) -> None:
+        try:
+            payload = await self.client.revoke_message(message.chat_id, message.message_id)
+            if isinstance(payload.get("message"), dict):
+                await self._apply_message_update({
+                    "chat_id": message.chat_id, "message_id": message.message_id,
+                    "message": payload["message"], "patch": payload.get("patch") or {"recalled": True},
+                })
+            self._set_notice("Message revoked")
+        except Exception as error:
+            self._set_notice("Revoke failed: {}".format(error))
+
+    def action_temp_chat(self) -> None:
+        message = self._selected_message()
+        if not message or message.self_sent or not self.current_chat or self.current_chat.chat_type != "group":
+            self._set_notice("Select another member's group message")
+            return
+        self._spawn(self._start_temp_chat(message))
+
+    async def _start_temp_chat(self, message: Message) -> None:
+        group_id = self.current_chat.chat_id[6:] if self.current_chat else ""
+        group_name = self.current_chat.name if self.current_chat else ""
+        try:
+            payload = await self.client.start_temp_chat(
+                group_id, message.sender_id,
+                "{} / {}".format(group_name, message.sender_name), group_name,
+            )
+            await self._refresh_chats()
+            chat_id = str(payload.get("chat_id") or "")
+            chat = next((item for item in self.chats if item.chat_id == chat_id), None)
+            if chat:
+                await self._open_chat(chat)
+            self._set_notice("Temporary chat opened")
+        except Exception as error:
+            self._set_notice("Temporary chat failed: {}".format(error))
+
+    def _copy_text(self, value: str, label: str) -> None:
+        if not value:
+            self._set_notice("Nothing to copy")
+            return
+        try:
+            self.copy_to_clipboard(value)
+            self._set_notice("Copied {}".format(label))
+        except Exception as error:
+            self._set_notice("Clipboard unavailable: {}".format(error))
+
+    def action_copy_message(self) -> None:
+        if isinstance(self.focused, (Composer, Input)):
+            return
+        message = self._selected_message()
+        if message:
+            self._copy_text(display_content(message), "message")
+
+    def action_copy_user(self) -> None:
+        message = self._selected_message()
+        if message:
+            self._copy_text(message.sender_id, "QQ ID")
+
+    def action_reaction_users(self) -> None:
+        message = self._selected_message()
+        if message and message.message_id:
+            self.push_screen(ReactionUsers(self.client, message))
+
+    def action_insert_face(self) -> None:
+        if not self.current_chat:
+            return
+        self.push_screen(FaceReplyPicker(), self._insert_face)
+
+    def _insert_face(self, emoji_id: Optional[str]) -> None:
+        if not emoji_id:
+            return
+        composer = self.query_one("#composer", Composer)
+        separator = "" if not composer.text or composer.text.endswith((" ", "\n")) else " "
+        composer.load_text(composer.text + separator + "[face:{}]".format(emoji_id))
+        composer.focus()
+
+    def action_preview(self) -> None:
+        if isinstance(self.focused, (Composer, Input)):
+            return
+        message = self._selected_message()
+        images = [item for item in (message.attachments if message else []) if item.kind == "image"]
+        if not images:
+            self._set_notice("Selected message has no image")
+            return
+        attachment = images[0]
+        self.push_screen(ImagePreview(
+            self.client, attachment.name, "/api/image/full",
+            self.client._attachment_params(message.chat_id, attachment),
+        ))
+
+    def action_open_media(self) -> None:
+        message = self._selected_message()
+        attachments = message.downloadable_attachments if message else []
+        if not attachments:
+            self._set_notice("Selected message has no attachment")
+        elif len(attachments) == 1:
+            self._spawn(self._open_attachment(attachments[0]))
+        else:
+            self.push_screen(AttachmentPicker(attachments), lambda item: self._spawn(self._open_attachment(item)) if item else None)
+
+    async def _open_attachment(self, attachment: Attachment) -> None:
+        if not self.current_chat:
+            return
+        try:
+            path = await self.client.download_attachment(self.current_chat.chat_id, attachment)
+            if sys.platform == "darwin":
+                command = ["open", str(path)]
+            elif os.name == "nt":
+                getattr(os, "startfile")(str(path))
+                command = []
+            else:
+                command = ["xdg-open", str(path)]
+            if command:
+                subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._set_notice("Opened {}".format(path))
+        except Exception as error:
+            self._set_notice("Open failed: {}".format(error))
+
+    def action_view_avatar(self) -> None:
+        message = self._selected_message()
+        if message and message.sender_id.isdigit():
+            avatar_type, avatar_id, title = "user", message.sender_id, message.sender_name
+        elif self.current_chat and self.current_chat.chat_id.startswith("group_"):
+            avatar_type, avatar_id, title = "group", self.current_chat.chat_id[6:], self.current_chat.name
+        elif self.current_chat and self.current_chat.chat_id.startswith("private_"):
+            avatar_type, avatar_id, title = "user", self.current_chat.chat_id[8:], self.current_chat.name
+        else:
+            self._set_notice("No avatar is available")
+            return
+        self.push_screen(ImagePreview(
+            self.client, "Avatar - {}".format(title), "/api/avatar",
+            {"type": avatar_type, "id": avatar_id},
+        ))
+
+    def action_send_target(self) -> None:
+        self._spawn(self._choose_send_target())
+
+    async def _choose_send_target(self) -> None:
+        try:
+            plugins = await self.client.plugins()
+        except Exception as error:
+            self._set_notice("Plugin destinations failed: {}".format(error))
+            return
+        entries = [ActionEntry("portal:", "QQ chat", "Send normally")]
+        for plugin in plugins:
+            if plugin.get("enabled") and plugin.get("loaded") and plugin.get("portal_receiver"):
+                plugin_id = str(plugin.get("id") or "")
+                entries.append(ActionEntry("portal:" + plugin_id, plugin_id, "Plugin portal"))
+        self.push_screen(ActionPalette(entries), self._send_target_selected)
+
+    def _send_target_selected(self, action_id: Optional[str]) -> None:
+        if not action_id or not action_id.startswith("portal:"):
+            return
+        self._send_plugin_id = action_id[7:]
+        self._send_plugin_name = self._send_plugin_id
+        self._update_reply_bar()
+        self._set_notice("Send destination: {}".format(self._send_plugin_name or "QQ chat"))
+
+    def action_contacts(self) -> None:
+        self.push_screen(ContactsManager(self.client), lambda _: self._spawn(self._initial_load()))
+
+    def action_plugins(self) -> None:
+        self.push_screen(PluginManagerScreen(self.client))
+
+    def action_toggle_theme(self) -> None:
+        self._theme = "light" if self._theme == "dark" else "dark"
+        self.set_class(self._theme == "light", "light")
+        try:
+            save_tui_preferences({"theme": self._theme})
+        except OSError as error:
+            self._set_notice("Theme changed for this session; save failed: {}".format(error))
+            return
+        self._set_notice("{} theme".format(self._theme.title()))
+
+    def action_background_upload(self) -> None:
+        self.push_screen(TextPrompt("WebUI background image path", allow_empty=False), self._background_path)
+
+    def _background_path(self, value: Optional[str]) -> None:
+        if value:
+            self._spawn(self._upload_background(Path(value)))
+
+    async def _upload_background(self, path: Path) -> None:
+        self._set_notice("Uploading background...", seconds=120)
+        try:
+            await self.client.upload_background(path)
+            self._set_notice("WebUI background updated")
+        except Exception as error:
+            self._set_notice("Background upload failed: {}".format(error))
+
+    def action_background_preview(self) -> None:
+        self.push_screen(ImagePreview(self.client, "WebUI conversation background", "/api/background-image"))
+
+    def action_background_clear(self) -> None:
+        self.push_screen(
+            ConfirmDialog("Clear background", "Remove the configured WebUI conversation background?"),
+            lambda confirmed: self._spawn(self._clear_background()) if confirmed else None,
+        )
+
+    async def _clear_background(self) -> None:
+        try:
+            await self.client.clear_background()
+            self._set_notice("WebUI background cleared")
+        except Exception as error:
+            self._set_notice("Background clear failed: {}".format(error))
 
     async def _upload_file(self, path: Path) -> None:
         if not self.current_chat:
@@ -2042,7 +2499,17 @@ class WebQQTui(App):
         if not self.current_chat or self.current_chat.chat_type != "group":
             self._set_notice("Group management is only available in group chats")
             return
-        self.push_screen(GroupManager(self.client, self.current_chat.chat_id))
+        self.push_screen(GroupManager(self.client, self.current_chat.chat_id), self._group_manager_result)
+
+    def _group_manager_result(self, result: Optional[Mapping[str, Any]]) -> None:
+        if result and result.get("chat_id"):
+            self._spawn(self._open_returned_chat(str(result["chat_id"])))
+
+    async def _open_returned_chat(self, chat_id: str) -> None:
+        await self._refresh_chats()
+        chat = next((item for item in self.chats if item.chat_id == chat_id), None)
+        if chat:
+            await self._open_chat(chat)
 
     def action_friend_remark(self) -> None:
         if not self.current_chat or self.current_chat.chat_type != "private":
@@ -2133,6 +2600,11 @@ class WebQQTui(App):
             self.reply_to = None
             self._update_reply_bar()
             return
+        if self._selected_message_ids:
+            self._selected_message_ids.clear()
+            self._spawn(self._render_messages())
+            self._set_notice("Message selection cancelled", seconds=2)
+            return
         if self.focused is self.query_one("#composer", Composer):
             self.query_one("#message_list", ListView).focus()
             return
@@ -2167,7 +2639,11 @@ class WebQQTui(App):
         bar = self.query_one("#reply_bar", Static)
         if self.reply_to:
             preview = display_content(self.reply_to).replace("\n", " ")[:80]
-            bar.update("Reply to {}: {}  (Esc cancel)".format(self.reply_to.sender_name, preview))
+            destination = " via {}".format(self._send_plugin_name) if self._send_plugin_name else ""
+            bar.update("Reply{} to {}: {}  (Esc cancel)".format(destination, self.reply_to.sender_name, preview))
+            bar.styles.display = "block"
+        elif self._send_plugin_id:
+            bar.update("Sending via plugin: {}  (Ctrl+P to change)".format(self._send_plugin_name))
             bar.styles.display = "block"
         else:
             bar.update("")
@@ -2183,8 +2659,10 @@ class WebQQTui(App):
         parts = [self._live_status, self._napcat_status, "{} chats".format(self._chat_count)]
         if self._account_status:
             parts.append(self._account_status)
+        if self._pending_contact_requests:
+            parts.append("{} pending contacts".format(self._pending_contact_requests))
         if not self.short:
-            parts.append("? help  Ctrl+F find  F2 remark  F3 media  F4 files  F5 group  t transcribe")
+            parts.append("Ctrl+P actions  ? help  Ctrl+F find  F3 media  F4 files  F5 group")
         self._base_status = " | ".join(parts)
         self._update_status_bar()
 

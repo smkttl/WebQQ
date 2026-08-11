@@ -1,12 +1,24 @@
 import asyncio
+import io
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from textual.widgets import Button, Input, ListView, Static
+from PIL import Image
 
 from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, MessageListItem, RichMediaDialog, WebQQTui
+from webqq_tui_app.management import ActionPalette, ContactsManager, ForwardComposer, PluginManagerScreen
 from webqq_tui_app.models import Chat, Message
+
+
+def static_plain(widget):
+    renderable = getattr(widget, "renderable", None)
+    if renderable is not None:
+        return getattr(renderable, "plain", str(renderable))
+    rendered = widget.render()
+    return getattr(rendered, "plain", str(rendered))
 
 
 class FakeClient:
@@ -24,6 +36,10 @@ class FakeClient:
         self.group_management_calls = []
         self.remarks = []
         self.custom_faces_sent = []
+        self.forwards_sent = []
+        self.revoked = []
+        self.temp_chats = []
+        self.portal_sent = []
 
     async def status(self):
         return {"napcat_connected": True, "chats_count": 2, "self_user": {"user_id": 1, "name": "Me"}}
@@ -56,6 +72,49 @@ class FakeClient:
     async def send_message(self, chat_id, text, reply_to=""):
         self.sent.append((chat_id, text, reply_to))
         return {"ok": True}
+
+    async def send_portal_message(self, plugin_id, chat_id, text, reply_to=""):
+        self.portal_sent.append((plugin_id, chat_id, text, reply_to))
+        return {"ok": True}
+
+    async def send_forward(self, chat_id, nodes):
+        self.forwards_sent.append((chat_id, nodes))
+        return {"ok": True}
+
+    async def revoke_message(self, chat_id, message_id):
+        self.revoked.append((chat_id, message_id))
+        return {"ok": True, "message": {"chat_id": chat_id, "message_id": message_id, "recalled": True}}
+
+    async def start_temp_chat(self, group_id, user_id, name="", group_name=""):
+        self.temp_chats.append((group_id, user_id, name, group_name))
+        return {"ok": True, "chat_id": "private_{}".format(user_id), "name": name}
+
+    async def reaction_details(self, chat_id, message_id, emoji_id=""):
+        return [{"emoji_id": "14", "count": 1, "users": [{"user_id": "2", "name": "Alice"}]}]
+
+    async def plugins(self):
+        return [{"id": "echo", "enabled": True, "loaded": True, "portal_receiver": True}]
+
+    def _attachment_params(self, chat_id, attachment):
+        return {"url": str(attachment.data.get("url") or "")}
+
+    async def fetch_bytes(self, path, params=None):
+        image = Image.new("RGB", (4, 4), (20, 120, 180))
+        body = io.BytesIO()
+        image.save(body, format="PNG")
+        return body.getvalue(), "image/png"
+
+    async def contact_requests(self, status="", request_type=""):
+        return {"ok": True, "requests": [{"id": "r1", "status": "pending", "request_type": "friend", "user_id": "3"}], "pending_count": 1}
+
+    async def contact_settings(self):
+        return {"ok": True, "auto_approve_requests": False, "pending_count": 1}
+
+    async def friends(self):
+        return {"ok": True, "categories": [{"name": "Friends", "friends": [{"user_id": "2", "nickname": "Alice"}]}]}
+
+    async def profile(self):
+        return {"user_id": "1", "nickname": "Me", "personal_note": "Hi"}
 
     async def send_image(self, chat_id, path):
         self.images.append((chat_id, path))
@@ -275,8 +334,8 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(item, MessageListItem)
             self.assertTrue(item.is_long)
             self.assertFalse(item.expanded)
-            self.assertIn("visible.txt", item.query_one(Static).render().plain)
-            self.assertNotIn(long_body.strip(), item.query_one(Static).render().plain)
+            self.assertIn("visible.txt", static_plain(item.query_one(Static)))
+            self.assertNotIn(long_body.strip(), static_plain(item.query_one(Static)))
 
             fold_button = item.query_one(Button)
             fold_button.scroll_visible(animate=False)
@@ -285,7 +344,7 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(clicked)
             await pilot.pause(0.1)
             self.assertTrue(item.expanded)
-            self.assertIn(long_body.strip(), item.query_one(Static).render().plain)
+            self.assertIn(long_body.strip(), static_plain(item.query_one(Static)))
             self.assertEqual(str(item.query_one(Button).label), "Collapse message")
 
             await app._render_messages()
@@ -303,7 +362,7 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.2)
             item = app.query_one("#message_list", ListView).highlighted_child
             self.assertFalse(item.is_long)
-            self.assertIn(long_body.strip(), item.query_one(Static).render().plain)
+            self.assertIn(long_body.strip(), static_plain(item.query_one(Static)))
             self.assertEqual(len(item.query(Button)), 0)
 
     async def test_escape_and_refresh_preserve_chat_selection(self):
@@ -577,7 +636,7 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("f5")
             await pilot.pause(0.1)
             self.assertIsInstance(app.screen, GroupManager)
-            self.assertIn("error", str(app.screen.query_one("#group_manage_title", Static).render()).lower())
+            self.assertIn("error", static_plain(app.screen.query_one("#group_manage_title", Static)).lower())
             await pilot.press("escape")
             self.assertNotIsInstance(app.screen, GroupManager)
 
@@ -705,7 +764,7 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client.forward_ids, ["forward-1"])
             self.assertEqual(len(app.messages[0].forwards[0]["nodes"]), 2)
             row = app.query_one("#message_list", ListView).children[0]
-            self.assertIn("2 messages", row.query_one(Static).render().plain)
+            self.assertIn("2 messages", static_plain(row.query_one(Static)))
 
     async def test_chat_filter(self):
         app = WebQQTui(FakeClient())
@@ -744,6 +803,131 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.05)
             self.assertFalse(app.conversation_visible)
             self.assertIs(app.focused, app.query_one("#chat_list", ListView))
+
+    async def test_action_palette_message_selection_and_forward(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("space")
+            await pilot.pause(0.1)
+            self.assertEqual(len(app._selected_message_ids), 1)
+            item = app.query_one("#message_list", ListView).highlighted_child
+            self.assertIn("selected", static_plain(item.query_one(Static)))
+
+            await pilot.press("ctrl+p")
+            self.assertIsInstance(app.screen, ActionPalette)
+            action_filter = app.screen.query_one("#action_filter", Input)
+            action_filter.value = "forward selected"
+            await pilot.pause(0.1)
+            await pilot.press("down", "enter")
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, ForwardComposer)
+            chats = app.screen.query_one("#forward_chats", ListView)
+            await app.screen.on_list_view_selected(SimpleNamespace(list_view=chats, item=chats.children[0]))
+            await pilot.pause(0.1)
+            await pilot.press("ctrl+s")
+            await pilot.pause(0.1)
+            self.assertEqual(client.forwards_sent[0][1], [{"message_id": "1"}])
+            self.assertFalse(app._selected_message_ids)
+
+    async def test_palette_opens_contacts_plugins_and_portal_send(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(32, 10)) as pilot:
+            await self.wait_loaded(pilot, app)
+            app.action_contacts()
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, ContactsManager)
+            self.assertLessEqual(app.screen.query_one("#contact_list", ListView).region.right, app.size.width)
+            await pilot.press("escape")
+
+            app.action_plugins()
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, PluginManagerScreen)
+            await pilot.press("escape")
+
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            app.action_send_target()
+            await pilot.pause(0.1)
+            self.assertIsInstance(app.screen, ActionPalette)
+            portal_list = app.screen.query_one("#action_list", ListView)
+            portal_list.index = 1
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            composer = app.query_one("#composer", Composer)
+            composer.load_text("through plugin")
+            composer.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.05)
+            self.assertEqual(client.portal_sent, [("echo", "group_1", "through plugin", "")])
+
+    async def test_escape_cancels_message_selection_before_leaving_chat(self):
+        app = WebQQTui(FakeClient())
+        async with app.run_test(size=(60, 20)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            await pilot.press("space")
+            self.assertTrue(app._selected_message_ids)
+            await pilot.press("escape")
+            await pilot.pause(0.1)
+            self.assertFalse(app._selected_message_ids)
+            self.assertTrue(app.conversation_visible)
+
+    async def test_wide_terminal_hydrates_inline_image_and_small_terminal_keeps_fallback(self):
+        app = WebQQTui(FakeClient())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            app.messages = [Message.from_json({
+                "chat_id": "group_1", "message_id": 8, "sender_id": 2,
+                "sender_name": "Alice", "content": "[image]",
+                "images": [{"name": "photo.png", "url": "https://example.test/photo.png"}],
+            })]
+            await app._render_messages(select_last=True)
+            await pilot.pause(0.1)
+            thumbnail = app.query_one(".message-thumbnail", Static)
+            self.assertIn("▀", static_plain(thumbnail))
+            self.assertLessEqual(thumbnail.region.height, 5)
+
+        app = WebQQTui(FakeClient())
+        async with app.run_test(size=(32, 10)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            app.messages = [Message.from_json({
+                "chat_id": "group_1", "message_id": 8, "sender_name": "Alice",
+                "content": "[image]", "images": [{"name": "photo.png", "url": "https://example.test/photo.png"}],
+            })]
+            await app._render_messages(select_last=True)
+            self.assertEqual(app.query_one(".message-thumbnail", Static).styles.display, "none")
+
+    async def test_theme_toggle_and_contact_badge_update(self):
+        app = WebQQTui(FakeClient())
+        async with app.run_test(size=(60, 20)) as pilot:
+            await self.wait_loaded(pilot, app)
+            original = app._theme
+            original_background = app.screen.styles.background
+            with patch("webqq_tui_app.app.save_tui_preferences") as save:
+                app.action_toggle_theme()
+            await pilot.pause(0.05)
+            self.assertNotEqual(app._theme, original)
+            self.assertEqual(app.has_class("light"), app._theme == "light")
+            self.assertNotEqual(app.screen.styles.background, original_background)
+            save.assert_called_once_with({"theme": app._theme})
+
+            await app._handle_socket_event({
+                "type": "contact_request_update",
+                "pending_count": 3,
+                "data": {"id": "request", "status": "pending"},
+            })
+            self.assertEqual(app._pending_contact_requests, 3)
+            self.assertIn("3 pending contacts", app._base_status)
 
 
 if __name__ == "__main__":

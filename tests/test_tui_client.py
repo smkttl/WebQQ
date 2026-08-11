@@ -21,6 +21,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.pokes = []
         self.reactions = []
         self.forward_ids = []
+        self.parity_requests = []
         app = web.Application()
         app.router.add_post("/api/login", self.login)
         app.router.add_get("/api/status", self.status)
@@ -29,8 +30,12 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_get("/api/group-members", self.group_members)
         app.router.add_get("/api/forward", self.forward)
         app.router.add_post("/api/send", self.send)
+        app.router.add_post("/api/send-forward", self.parity_json)
+        app.router.add_post("/api/temp-chat", self.parity_json)
         app.router.add_post("/api/poke", self.poke)
         app.router.add_post("/api/message/emoji-like", self.face_reply)
+        app.router.add_get("/api/message/emoji-likes", self.parity_json)
+        app.router.add_post("/api/message/revoke", self.parity_json)
         app.router.add_post("/api/mark-read", self.mark_read)
         app.router.add_post("/api/send-file", self.send_file)
         app.router.add_post("/api/send-image", self.send_image)
@@ -51,6 +56,26 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post("/api/groups/{group_id}/actions", self.group_action)
         app.router.add_post("/api/groups/{group_id}/albums/upload", self.group_album_upload)
         app.router.add_put("/api/friends/{user_id}/remark", self.friend_remark)
+        app.router.add_get("/api/friends", self.parity_json)
+        app.router.add_delete("/api/friends/{user_id}", self.parity_json)
+        app.router.add_get("/api/profile", self.parity_json)
+        app.router.add_put("/api/profile", self.parity_json)
+        app.router.add_post("/api/profile/avatar", self.parity_upload)
+        app.router.add_get("/api/contact-requests", self.parity_json)
+        app.router.add_post("/api/contact-requests/{request_id}/action", self.parity_json)
+        app.router.add_get("/api/contact-settings", self.parity_json)
+        app.router.add_put("/api/contact-settings", self.parity_json)
+        app.router.add_get("/api/plugins", self.parity_json)
+        app.router.add_post("/api/plugins/refresh", self.parity_json)
+        app.router.add_post("/api/plugins/{plugin_id}/enable", self.parity_json)
+        app.router.add_post("/api/plugins/{plugin_id}/disable", self.parity_json)
+        app.router.add_post("/api/plugins/{plugin_id}/restart", self.parity_json)
+        app.router.add_get("/api/plugins/{plugin_id}/config", self.parity_json)
+        app.router.add_put("/api/plugins/{plugin_id}/config", self.parity_json)
+        app.router.add_post("/api/plugins/{plugin_id}/portal-message", self.parity_json)
+        app.router.add_post("/api/background-image", self.parity_upload)
+        app.router.add_delete("/api/background-image", self.parity_json)
+        app.router.add_get("/api/background-image", self.background_image)
         app.router.add_get("/api/file", self.download)
         app.router.add_get("/ws", self.websocket)
         self.runner = web.AppRunner(app)
@@ -224,6 +249,48 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
             "nickname": "Alice", "name": body.get("remark") or "Alice",
         })
 
+    async def parity_upload(self, request):
+        reader = await request.multipart()
+        fields = {}
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            fields[part.name] = await part.read() if part.name == "file" else await part.text()
+        self.parity_requests.append((request.method, request.path, fields))
+        return web.json_response({"ok": True})
+
+    async def background_image(self, request):
+        self.parity_requests.append((request.method, request.path, dict(request.query)))
+        return web.Response(body=b"image", content_type="image/png")
+
+    async def parity_json(self, request):
+        body = await request.json() if request.can_read_body else dict(request.query)
+        self.parity_requests.append((request.method, request.path, body))
+        path = request.path
+        if path == "/api/temp-chat":
+            return web.json_response({"ok": True, "chat_id": "private_42", "name": "Alice"})
+        if path == "/api/message/emoji-likes":
+            return web.json_response({"reactions": [{"emoji_id": "14", "count": 1, "users": [{"user_id": "42"}]}]})
+        if path == "/api/friends" and request.method == "GET":
+            return web.json_response({"ok": True, "categories": [{"name": "Work", "friends": [{"user_id": 42}]}]})
+        if path == "/api/profile" and request.method == "GET":
+            return web.json_response({"ok": True, "profile": {"user_id": "1", "nickname": "Me", "personal_note": "Hi"}})
+        if path == "/api/contact-requests":
+            return web.json_response({"ok": True, "requests": [{"id": "r1", "status": "pending"}], "pending_count": 1})
+        if path == "/api/contact-settings" and request.method == "GET":
+            return web.json_response({"ok": True, "auto_approve_requests": False, "pending_count": 1})
+        if path == "/api/contact-settings" and request.method == "PUT":
+            return web.json_response({"ok": True, "auto_approve_requests": bool(body.get("auto_approve_requests")), "pending_count": 1})
+        plugins = [{"id": "echo", "enabled": True, "loaded": True, "portal_receiver": True}]
+        if path == "/api/plugins":
+            return web.json_response({"plugins": plugins})
+        if path == "/api/plugins/refresh":
+            return web.json_response({"ok": True, "plugins": plugins})
+        if path.endswith("/config") and request.method == "GET":
+            return web.json_response({"ok": True, "text": "{}", "config": {}})
+        return web.json_response({"ok": True, "message": {"message_id": "1", "recalled": True}})
+
     async def download(self, request):
         return web.Response(body=b"attachment body")
 
@@ -312,6 +379,38 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         result = await self.client.update_friend_remark("42", "Work")
         self.assertEqual(result["user_id"], "42")
         self.assertEqual(result["name"], "Work")
+
+    async def test_tui_parity_endpoints(self):
+        await self.client.login()
+        await self.client.send_forward("group_1", [{"message_id": "1"}])
+        temp = await self.client.start_temp_chat("1", "42", "Alice", "Group")
+        self.assertEqual(temp["chat_id"], "private_42")
+        await self.client.revoke_message("group_1", "1")
+        reactions = await self.client.reaction_details("group_1", "1", "14")
+        self.assertEqual(reactions[0]["users"][0]["user_id"], "42")
+        self.assertEqual((await self.client.friends())["categories"][0]["name"], "Work")
+        await self.client.delete_friend("42")
+        self.assertEqual((await self.client.profile())["nickname"], "Me")
+        await self.client.update_profile("New", "Note")
+        self.assertEqual((await self.client.contact_requests())["pending_count"], 1)
+        await self.client.act_on_contact_request("r1", True, remark="Work")
+        await self.client.update_contact_settings(True)
+        self.assertEqual((await self.client.plugins())[0]["id"], "echo")
+        await self.client.refresh_plugins()
+        await self.client.plugin_action("echo", "restart")
+        self.assertEqual((await self.client.plugin_config("echo"))["text"], "{}")
+        await self.client.update_plugin_config("echo", '{"enabled": true}')
+        await self.client.send_portal_message("echo", "group_1", "hello", "1")
+
+        image = Path(self.tmp.name) / "image.png"
+        image.write_bytes(b"image")
+        await self.client.upload_profile_avatar(image)
+        await self.client.upload_background(image)
+        data, content_type = await self.client.fetch_bytes("/api/background-image")
+        self.assertEqual(data, b"image")
+        self.assertEqual(content_type, "image/png")
+        await self.client.clear_background()
+        self.assertIn(("POST", "/api/send-forward", {"chat_id": "group_1", "nodes": [{"message_id": "1"}]}), self.parity_requests)
 
     async def test_upload_download_and_websocket(self):
         await self.client.login()

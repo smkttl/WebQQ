@@ -9,6 +9,23 @@ from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_SERVER_URL = "http://localhost:8080"
 LOCAL_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+TUI_PREFERENCES_PATH = Path.home() / ".config" / "webqq" / "tui.json"
+
+
+def load_tui_preferences(path: Path = TUI_PREFERENCES_PATH) -> Mapping[str, object]:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except (OSError, TypeError, json.JSONDecodeError):
+        return {}
+
+
+def save_tui_preferences(preferences: Mapping[str, object], path: Path = TUI_PREFERENCES_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(dict(preferences), indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def local_server_url(config_path: Path = LOCAL_CONFIG_PATH) -> str:
