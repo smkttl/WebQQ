@@ -162,10 +162,19 @@ class MessageListView(NavigableListView):
     class LoadOlder(TextualMessage):
         pass
 
-    BINDINGS = NavigableListView.BINDINGS + [Binding("pageup", "load_older", show=False)]
+    class Revoke(TextualMessage):
+        pass
+
+    BINDINGS = NavigableListView.BINDINGS + [
+        Binding("pageup", "load_older", show=False),
+        Binding("x", "revoke", show=False),
+    ]
 
     def action_load_older(self) -> None:
         self.post_message(self.LoadOlder())
+
+    def action_revoke(self) -> None:
+        self.post_message(self.Revoke())
 
     def action_select_cursor(self) -> None:
         item = self.highlighted_child
@@ -282,6 +291,7 @@ class AttachmentPicker(ModalScreen):
 
 
 class FaceReplyPicker(ModalScreen):
+    INITIAL_RESULT_LIMIT = 120
     BINDINGS = [Binding("escape", "cancel", show=False)]
     CSS = """
     FaceReplyPicker { align: center middle; background: $background 70%; }
@@ -312,14 +322,19 @@ class FaceReplyPicker(ModalScreen):
         item = self.query_one("#face_list", ListView).highlighted_child
         if isinstance(item, FaceListItem):
             self.dismiss(item.emoji_id)
+        elif event.value.strip().isdigit():
+            self.dismiss(event.value.strip())
 
     async def _render_faces(self, query: str) -> None:
         query = query.strip().casefold()
-        matches = [
-            FaceListItem(emoji_id, name)
+        entries = [
+            (emoji_id, name)
             for emoji_id, name in reaction_emoji_entries()
             if not query or query in emoji_id.casefold() or query in name.casefold()
         ]
+        if not query:
+            entries = entries[:self.INITIAL_RESULT_LIMIT]
+        matches = [FaceListItem(emoji_id, name) for emoji_id, name in entries]
         view = self.query_one("#face_list", ListView)
         await view.clear()
         if matches:
@@ -1357,6 +1372,7 @@ HELP_KEY_GROUPS = (
         ("Space", "Select or unselect a message for combined forwarding"),
         ("r", "Reply to the selected message"),
         ("e", "React to the selected message"),
+        ("x", "Revoke the selected message"),
         ("p", "Poke the selected sender"),
         ("c", "Copy the selected message"),
         ("v", "Preview the selected image"),
@@ -1973,6 +1989,9 @@ class WebQQTui(App):
 
     async def on_message_list_view_load_older(self, event: MessageListView.LoadOlder) -> None:
         await self._load_older()
+
+    def on_message_list_view_revoke(self, event: MessageListView.Revoke) -> None:
+        self.action_revoke()
 
     async def on_composer_submit(self, event: Composer.Submit) -> None:
         await self._send_draft()

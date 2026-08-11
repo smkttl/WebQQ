@@ -9,7 +9,7 @@ from textual.widgets import Button, Input, ListView, Static
 from PIL import Image
 
 from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, MessageListItem, OnlineTransferManager, RichMediaDialog, WebQQTui
-from webqq_tui_app.management import ActionPalette, ContactsManager, ForwardComposer, PluginManagerScreen
+from webqq_tui_app.management import ActionPalette, ConfirmDialog, ContactsManager, ForwardComposer, PluginManagerScreen
 from webqq_tui_app.models import Chat, Message
 
 
@@ -798,10 +798,57 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("e")
             await pilot.pause(0.05)
             self.assertIsInstance(app.screen, FaceReplyPicker)
+            face_filter = app.screen.query_one("#face_filter", Input)
+            face_filter.value = "478"
+            matching_face = None
+            for _ in range(30):
+                matching_face = app.screen.query_one("#face_list", ListView).highlighted_child
+                if matching_face is not None and matching_face.emoji_id == "478":
+                    break
+                await pilot.pause(0.05)
+            self.assertEqual(matching_face.emoji_id, "478")
+            await pilot.press("enter")
+            for _ in range(20):
+                if not isinstance(app.screen, FaceReplyPicker) and len(client.reactions) == 2:
+                    break
+                await pilot.pause(0.05)
+            self.assertEqual(client.reactions[-1], ("group_1", "1", "478"))
+
+            app.query_one("#message_list", ListView).focus()
+            await pilot.press("e")
+            await pilot.pause(0.05)
+            self.assertIsInstance(app.screen, FaceReplyPicker)
             await pilot.press("escape")
             await pilot.pause(0.05)
             self.assertNotIsInstance(app.screen, FaceReplyPicker)
-            self.assertEqual(client.reactions, [("group_1", "1", "14")])
+            self.assertEqual(len(client.reactions), 2)
+
+    async def test_x_revokes_selected_message_but_remains_typable_in_composer(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+
+            composer = app.query_one("#composer", Composer)
+            composer.focus()
+            await pilot.press("x")
+            self.assertEqual(composer.text, "x")
+            self.assertFalse(client.revoked)
+
+            composer.load_text("")
+            app.query_one("#message_list", ListView).focus()
+            await pilot.press("x")
+            await pilot.pause(0.05)
+            self.assertIsInstance(app.screen, ConfirmDialog)
+            await pilot.press("y")
+            for _ in range(20):
+                if client.revoked:
+                    break
+                await pilot.pause(0.05)
+            self.assertEqual(client.revoked, [("group_1", "1")])
+            self.assertTrue(app.messages[0].recalled)
 
     async def test_enter_opens_and_lazy_loads_forward_on_small_terminal(self):
         client = FakeClient()
