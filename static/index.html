@@ -200,6 +200,8 @@ const loadedGroupMembersByChat = new Map();
 const faceManifestUrl = 'https://koishi.js.org/QFace/assets/qq_emoji/_index.json';
 const faceAssetBaseUrl = 'https://koishi.js.org/QFace/';
 const revokeWindowSeconds = 120;
+const longMessageCharacterLimit = 800;
+const longMessageLineLimit = 10;
 const fallbackReactionFaceIds = [
   '0','1','2','4','5','8','9','11','13','14','20','21','23','24','26','28','30','32','33','34',
   '66','79','111','114','118','144','147','173','182','187','266','283','289','294','297',
@@ -1567,6 +1569,33 @@ function renderContent(text, mentions) {
     return faceHtml(id);
   });
   return html;
+}
+
+function appendMessageText(bubble, text, mentions, collapsible = true) {
+  if (!text) return;
+  const content = document.createElement('div');
+  content.className = 'message-text';
+  content.innerHTML = renderContent(text, mentions);
+  bubble.appendChild(content);
+
+  const lineCount = String(text).split(/\r?\n/).length;
+  const isLong = collapsible && (Array.from(String(text)).length > longMessageCharacterLimit || lineCount > longMessageLineLimit);
+  if (!isLong) return;
+
+  content.classList.add('collapsed');
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'message-fold-toggle';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.textContent = 'Show full message';
+  toggle.addEventListener('click', event => {
+    event.stopPropagation();
+    const expanded = content.classList.toggle('expanded');
+    content.classList.toggle('collapsed', !expanded);
+    toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    toggle.textContent = expanded ? 'Collapse message' : 'Show full message';
+  });
+  bubble.appendChild(toggle);
 }
 
 function faceInfo(id) {
@@ -3701,7 +3730,7 @@ function renderMessageElement(div, m) {
   sender.textContent = senderLabel;
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.innerHTML = renderContent(rendered.content, m.mentions);
+  appendMessageText(bubble, rendered.content, m.mentions, !m.system);
   const time = document.createElement('div');
   time.className = 'ts';
   time.textContent = ts;

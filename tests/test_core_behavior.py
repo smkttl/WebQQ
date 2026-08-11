@@ -1073,6 +1073,18 @@ class WebBackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("var(--web-background-image)", css)
         self.assertIn("backgroundButton", html)
 
+    def test_web_assets_fold_long_text_without_hiding_attachments(self):
+        html = Path("static/index.html").read_text(encoding="utf-8")
+        css = Path("static/app.css").read_text(encoding="utf-8")
+        self.assertIn("longMessageCharacterLimit = 800", html)
+        self.assertIn("longMessageLineLimit = 10", html)
+        self.assertIn("appendMessageText(bubble, rendered.content", html)
+        self.assertIn("Show full message", html)
+        self.assertIn("Collapse message", html)
+        self.assertLess(html.index("appendMessageText(bubble, rendered.content"), html.index("appendImages(bubble, m.images)"))
+        self.assertIn(".message-text.collapsed", css)
+        self.assertIn(".message-fold-toggle", css)
+
 
 class ApiExtractionTests(unittest.TestCase):
     def test_json_body_helper_is_available_to_api_handlers(self):

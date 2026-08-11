@@ -14,7 +14,7 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message as TextualMessage
 from textual.screen import ModalScreen
-from textual.widgets import Input, ListItem, ListView, Static, TextArea
+from textual.widgets import Button, Input, ListItem, ListView, Static, TextArea
 
 from .client import AuthenticationError, WebQQClient, WebQQClientError
 from .emoji import reaction_emoji_entries
@@ -26,6 +26,7 @@ from .models import (
     display_content,
     format_chat,
     format_message,
+    message_body_is_long,
     forward_nodes,
     forward_status_label,
     human_size,
@@ -40,9 +41,50 @@ class ChatListItem(ListItem):
 
 
 class MessageListItem(ListItem):
-    def __init__(self, message: Message, compact: bool = False, search: str = ""):
-        super().__init__(Static(format_message(message, compact=compact, search=search), markup=False))
+    class FoldChanged(TextualMessage):
+        def __init__(self, item: "MessageListItem"):
+            self.item = item
+            super().__init__()
+
+    def __init__(
+        self, message: Message, compact: bool = False, search: str = "", expanded: bool = False,
+    ):
         self.message = message
+        self.compact = compact
+        self.search = search
+        self.is_long = not bool(search) and message_body_is_long(message)
+        self.expanded = bool(expanded and self.is_long)
+        children = [Static(self._render_text(), markup=False)]
+        if self.is_long:
+            children.append(Button(self._button_label(), classes="message-fold-button"))
+        super().__init__(*children)
+
+    def _render_text(self) -> Text:
+        return format_message(
+            self.message, compact=self.compact, search=self.search,
+            fold_long=self.is_long, expanded=self.expanded,
+        )
+
+    def _button_label(self) -> str:
+        return "Collapse message" if self.expanded else "Show full message"
+
+    def toggle_expanded(self) -> None:
+        if not self.is_long:
+            return
+        self.expanded = not self.expanded
+        self.query_one(Static).update(self._render_text())
+        self.query_one(".message-fold-button", Button).label = self._button_label()
+
+    def refresh_message(self, message: Optional[Message] = None) -> None:
+        if message is not None:
+            self.message = message
+        self.query_one(Static).update(self._render_text())
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.has_class("message-fold-button"):
+            event.stop()
+            self.toggle_expanded()
+            self.post_message(self.FoldChanged(self))
 
 
 class MemberListItem(ListItem):
@@ -92,6 +134,14 @@ class MessageListView(NavigableListView):
 
     def action_load_older(self) -> None:
         self.post_message(self.LoadOlder())
+
+    def action_select_cursor(self) -> None:
+        item = self.highlighted_child
+        if isinstance(item, MessageListItem) and item.is_long and not item.message.forwards:
+            item.toggle_expanded()
+            item.post_message(MessageListItem.FoldChanged(item))
+            return
+        super().action_select_cursor()
 
 
 class Composer(TextArea):
@@ -1124,6 +1174,7 @@ HELP_KEY_GROUPS = (
         ("F5", "Open group management"),
     )),
     ("Messages", (
+        ("Enter / fold button", "Expand or collapse a long message"),
         ("r", "Reply to the selected message"),
         ("e", "React to the selected message"),
         ("p", "Poke the selected sender"),
@@ -1214,6 +1265,8 @@ class WebQQTui(App):
     #chat_list, #message_list { height: 1fr; background: transparent; }
     #chat_list > ListItem { height: 3; padding: 0 1; }
     #message_list > ListItem { height: auto; min-height: 3; padding: 0 1 1 1; }
+    #message_list .message-fold-button { width: auto; min-width: 18; height: 1; min-height: 1; margin: 0; padding: 0 1; border: none; background: transparent; color: #45a3c7; }
+    #message_list .message-fold-button:hover { background: #2b3138; color: #8ab4c4; }
     ListView > ListItem.--highlight { background: #2b3138; }
     #conversation { width: 1fr; }
     #message_search, #file_path, #image_path { display: none; }
@@ -1245,6 +1298,7 @@ class WebQQTui(App):
         self._rendering = False
         self._running = True
         self._tasks: Set[asyncio.Task] = set()
+        self._expanded_message_ids: Set[str] = set()
         self._load_token = 0
         self._match_indexes: List[int] = []
         self._match_position = -1
@@ -1518,7 +1572,13 @@ class WebQQTui(App):
         try:
             await view.clear()
             if self.messages:
-                await view.extend(MessageListItem(message, compact=self.short, search=search) for message in self.messages)
+                await view.extend(
+                    MessageListItem(
+                        message, compact=self.short, search=search,
+                        expanded=self._message_expansion_key(message) in self._expanded_message_ids,
+                    )
+                    for message in self.messages
+                )
                 if select_last:
                     index = len(self.messages) - 1
                 else:
@@ -1541,7 +1601,18 @@ class WebQQTui(App):
             return
         for child in view.children:
             if isinstance(child, MessageListItem) and child.message is message and child.is_mounted:
-                child.query_one(Static).update(format_message(message, compact=self.short, search=search))
+                child.refresh_message()
+
+    @staticmethod
+    def _message_expansion_key(message: Message) -> str:
+        return "{}:{}".format(message.chat_id, message.stable_id)
+
+    def _remember_message_expansion(self, item: MessageListItem) -> None:
+        key = self._message_expansion_key(item.message)
+        if item.expanded:
+            self._expanded_message_ids.add(key)
+        else:
+            self._expanded_message_ids.discard(key)
 
     async def _hydrate_forwards(self, chat_id: str, token: int) -> None:
         pending = {}
@@ -1610,9 +1681,12 @@ class WebQQTui(App):
 
                 def refresh_item(_: Any) -> None:
                     if item.is_mounted:
-                        item.query_one(Static).update(format_message(item.message, compact=self.short))
+                        item.refresh_message()
 
                 self.push_screen(ForwardViewer(self.client, item.message.forwards[0]), refresh_item)
+
+    def on_message_list_item_fold_changed(self, event: MessageListItem.FoldChanged) -> None:
+        self._remember_message_expansion(event.item)
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         if event.list_view.id == "chat_list" and isinstance(event.item, ChatListItem):

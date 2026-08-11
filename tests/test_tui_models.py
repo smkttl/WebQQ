@@ -13,8 +13,10 @@ from webqq_tui_app.models import (
     display_content,
     format_chat,
     format_message,
+    folded_message_body,
     forward_status_label,
     human_size,
+    message_body_is_long,
     message_matches,
 )
 
@@ -110,6 +112,24 @@ class TuiModelTests(unittest.TestCase):
         rendered = format_message(message, compact=True).plain
         self.assertIn("archive.zip", rendered)
         self.assertIn("forward: Thread - 1 message", rendered)
+
+    def test_long_message_body_folds_without_hiding_attachments(self):
+        body = "Long content " * 100
+        message = Message.from_json({
+            "chat_id": "private_1", "sender_name": "A", "content": body,
+            "files": [{"name": "visible.txt", "size": 100, "id": "x"}],
+        })
+        self.assertTrue(message_body_is_long(message))
+        self.assertLess(len(folded_message_body(message)), len(body))
+        collapsed = format_message(message, fold_long=True).plain
+        expanded = format_message(message, fold_long=True, expanded=True).plain
+        self.assertIn("...", collapsed)
+        self.assertNotEqual(collapsed, expanded)
+        self.assertIn("visible.txt", collapsed)
+        self.assertIn(body.strip(), expanded)
+
+        lines = Message.from_json({"content": "\n".join("line {}".format(index) for index in range(11))})
+        self.assertTrue(message_body_is_long(lines))
 
     def test_structured_cards_and_additional_media_are_rendered_and_searchable(self):
         message = Message.from_json({

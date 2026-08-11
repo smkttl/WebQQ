@@ -193,6 +193,8 @@ MENTION_RE = re.compile(r"@\[(\d+)\](?:\(([^)\r\n]*)\))?")
 REPLY_RE = re.compile(r"\[reply:([^\]]+)\]")
 MEDIA_TOKEN_RE = re.compile(r"\[(?:image|file|video|voice|forward|onlinefile|flashtransfer)\]")
 FACE_RE = re.compile(r"\[face:(\d+)\]")
+LONG_MESSAGE_CHARACTER_LIMIT = 800
+LONG_MESSAGE_LINE_LIMIT = 10
 
 
 def display_content(message: Message) -> str:
@@ -210,6 +212,21 @@ def display_content(message: Message) -> str:
         if label:
             content = content.replace(label, "", 1)
     return content.strip()
+
+
+def message_body_is_long(message: Message) -> bool:
+    body = display_content(message)
+    return len(body) > LONG_MESSAGE_CHARACTER_LIMIT or len(body.splitlines()) > LONG_MESSAGE_LINE_LIMIT
+
+
+def folded_message_body(message: Message, compact: bool = False) -> str:
+    body = display_content(message)
+    character_limit = 120 if compact else 480
+    line_limit = 4 if compact else 8
+    preview = "\n".join(body.splitlines()[:line_limit])
+    if len(preview) > character_limit:
+        preview = preview[:character_limit]
+    return preview.rstrip() + "..."
 
 
 def extra_segment_summary(segment: Mapping[str, Any], compact: bool = False) -> str:
@@ -284,7 +301,10 @@ def format_chat(chat: Chat, compact: bool = False) -> Text:
     return text
 
 
-def format_message(message: Message, compact: bool = False, search: str = "") -> Text:
+def format_message(
+    message: Message, compact: bool = False, search: str = "",
+    fold_long: bool = False, expanded: bool = False,
+) -> Text:
     text = Text()
     stamp = format_timestamp(message.timestamp)
     sender_style = "bold cyan" if message.self_sent else "bold green"
@@ -299,6 +319,8 @@ def format_message(message: Message, compact: bool = False, search: str = "") ->
         text.append("  SEND FAILED", style="bold red")
 
     body = display_content(message)
+    if body and fold_long and not expanded and message_body_is_long(message):
+        body = folded_message_body(message, compact=compact)
     if body:
         text.append("\n")
         _append_highlighted(text, body, search)

@@ -16,6 +16,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Group lifecycle notices and recall tags are shown in chat history
 - Images, files, video, voice, merged forwards, JSON cards, music, contacts, locations, and other structured messages render in web and terminal clients
 - Browse and send QQ custom faces, browse/create QQ collections, save message snapshots, and send Bilibili/Weibo/custom mini-app cards
+- Long text messages fold automatically in both WebUI and TUI while leaving attachments visible
 - The web client and plugins can combine existing messages or authored text nodes into merged forwards
 
 ## Requirements

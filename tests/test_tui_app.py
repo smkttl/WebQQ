@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from textual.widgets import Input, ListView, Static
+from textual.widgets import Button, Input, ListView, Static
 
-from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, MessageListItem, RichMediaDialog, WebQQTui
 from webqq_tui_app.models import Chat, Message
 
 
@@ -257,6 +257,54 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("f1")
             self.assertIsInstance(app.screen, HelpPanel)
             await pilot.press("escape")
+
+    async def test_long_message_folds_and_toggles_at_minimum_size(self):
+        app = WebQQTui(FakeClient())
+        async with app.run_test(size=(32, 10)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            long_body = "Long content " * 100
+            app.messages = [Message.from_json({
+                "chat_id": "group_1", "message_id": 77, "time": 1,
+                "sender_id": 2, "sender_name": "Alice", "content": long_body,
+                "files": [{"name": "visible.txt", "size": 10, "id": "f"}],
+            })]
+            await app._render_messages(select_last=True)
+            item = app.query_one("#message_list", ListView).highlighted_child
+            self.assertIsInstance(item, MessageListItem)
+            self.assertTrue(item.is_long)
+            self.assertFalse(item.expanded)
+            self.assertIn("visible.txt", item.query_one(Static).render().plain)
+            self.assertNotIn(long_body.strip(), item.query_one(Static).render().plain)
+
+            fold_button = item.query_one(Button)
+            fold_button.scroll_visible(animate=False)
+            await pilot.pause(0.05)
+            clicked = await pilot.click(fold_button)
+            self.assertTrue(clicked)
+            await pilot.pause(0.1)
+            self.assertTrue(item.expanded)
+            self.assertIn(long_body.strip(), item.query_one(Static).render().plain)
+            self.assertEqual(str(item.query_one(Button).label), "Collapse message")
+
+            await app._render_messages()
+            view = app.query_one("#message_list", ListView)
+            item = view.highlighted_child
+            self.assertTrue(item.expanded)
+            view.focus()
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertFalse(item.expanded)
+            self.assertEqual(str(item.query_one(Button).label), "Show full message")
+
+            search = app.query_one("#message_search", Input)
+            search.value = "Long content"
+            await pilot.pause(0.2)
+            item = app.query_one("#message_list", ListView).highlighted_child
+            self.assertFalse(item.is_long)
+            self.assertIn(long_body.strip(), item.query_one(Static).render().plain)
+            self.assertEqual(len(item.query(Button)), 0)
 
     async def test_escape_and_refresh_preserve_chat_selection(self):
         app = WebQQTui(FakeClient())
