@@ -461,6 +461,50 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.query_one("#sidebar").styles.display, "block")
             self.assertEqual(app.query_one("#conversation").styles.display, "none")
 
+    async def test_new_message_only_follows_when_view_is_at_bottom(self):
+        app = WebQQTui(FakeClient())
+        async with app.run_test(size=(60, 20)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            app.messages = [Message.from_json({
+                "chat_id": "group_1", "message_id": index, "time": index,
+                "sender_name": "Alice", "content": "message {}".format(index),
+            }) for index in range(1, 31)]
+            await app._render_messages(select_last=True)
+            await pilot.pause(0.1)
+
+            view = app.query_one("#message_list", ListView)
+            view.scroll_to(y=0, animate=False, immediate=True)
+            await pilot.pause(0.05)
+            self.assertFalse(app._message_view_follows_latest())
+
+            await app._handle_socket_event({
+                "type": "new_message",
+                "data": {
+                    "chat_id": "group_1", "message_id": 31, "time": 31,
+                    "sender_name": "Alice", "content": "message 31",
+                },
+            })
+            await pilot.pause(0.1)
+            self.assertEqual(view.scroll_y, 0)
+            self.assertEqual(view.highlighted_child.message.message_id, "30")
+
+            view.index = len(view.children) - 1
+            view.scroll_to(y=view.max_scroll_y, animate=False, immediate=True)
+            await pilot.pause(0.05)
+            self.assertTrue(app._message_view_follows_latest())
+            await app._handle_socket_event({
+                "type": "new_message",
+                "data": {
+                    "chat_id": "group_1", "message_id": 32, "time": 32,
+                    "sender_name": "Alice", "content": "message 32",
+                },
+            })
+            await pilot.pause(0.1)
+            self.assertEqual(view.highlighted_child.message.message_id, "32")
+            self.assertTrue(view.is_vertical_scroll_end)
+
     async def test_stale_history_load_does_not_modify_new_chat(self):
         client = SlowHistoryClient()
         app = WebQQTui(client)

@@ -1658,8 +1658,9 @@ class WebQQTui(App):
         if event_type == "new_message":
             message = Message.from_json(data)
             if self.current_chat and message.chat_id == self.current_chat.chat_id:
+                follow_latest = self._message_view_follows_latest()
                 self.messages = deduplicate_messages(self.messages + [message])
-                await self._render_messages(select_last=True)
+                await self._render_messages(select_last=follow_latest, preserve_scroll=not follow_latest)
         elif event_type == "message_update":
             await self._apply_message_update(data)
         elif event_type == "emoji_like":
@@ -1816,10 +1817,11 @@ class WebQQTui(App):
                 if child.is_mounted and token == self._load_token:
                     target.update("Image preview unavailable: {}".format(error))
 
-    async def _render_messages(self, select_last: bool = False) -> None:
+    async def _render_messages(self, select_last: bool = False, preserve_scroll: bool = False) -> None:
         if not self.is_mounted:
             return
         view = self.query_one("#message_list", ListView)
+        scroll_y = view.scroll_y
         selected = self._selected_message()
         selected_id = selected.stable_id if selected else ""
         search = self.query_one("#message_search", Input).value.strip()
@@ -1845,7 +1847,12 @@ class WebQQTui(App):
                         len(self.messages) - 1,
                     )
                 view.index = max(0, index)
-                view.scroll_to_widget(view.children[view.index], animate=False)
+                if preserve_scroll:
+                    # ListView defers its own highlight scroll until after layout.
+                    # Queue this one level later so the preserved viewport wins.
+                    view.call_after_refresh(view.scroll_to, y=scroll_y, animate=False)
+                else:
+                    view.scroll_to_widget(view.children[view.index], animate=False)
         finally:
             self._rendering = False
         if self.messages and not self.narrow and not self.short:
@@ -1862,6 +1869,18 @@ class WebQQTui(App):
         for child in view.children:
             if isinstance(child, MessageListItem) and child.message is message and child.is_mounted:
                 child.refresh_message()
+
+    def _message_view_follows_latest(self) -> bool:
+        if not self.is_mounted:
+            return True
+        view = self.query_one("#message_list", ListView)
+        if not view.children:
+            return True
+        return (
+            view.index == len(view.children) - 1
+            and view.is_vertical_scroll_end
+            and view.scroll_target_y >= view.max_scroll_y
+        )
 
     @staticmethod
     def _message_expansion_key(message: Message) -> str:
