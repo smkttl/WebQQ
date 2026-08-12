@@ -5,10 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from textual import events
 from textual.widgets import Button, Input, ListView, Static
 from PIL import Image
 
-from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, MessageListItem, OnlineTransferManager, RichMediaDialog, WebQQTui
+from webqq_tui_app.app import CollectionBrowser, Composer, CustomFacePicker, FaceReplyPicker, ForwardViewer, FriendRemarkDialog, GroupFileManager, GroupManager, HelpPanel, MemberPicker, MessageListItem, MessageListView, OnlineTransferManager, RichMediaDialog, WebQQTui
 from webqq_tui_app.management import ActionPalette, ConfirmDialog, ContactsManager, ForwardComposer, PluginManagerScreen
 from webqq_tui_app.models import Chat, Message
 
@@ -260,6 +261,26 @@ class SlowHistoryClient(FakeClient):
                 "content": "older",
             })]
         return await super().messages(chat_id, limit=limit, before=before)
+
+
+class PagedHistoryClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.history_before = []
+
+    async def messages(self, chat_id, limit=50, before=None):
+        if before is None:
+            values = range(101, 151)
+        elif before > 51:
+            self.history_before.append(before)
+            values = range(51, 101)
+        else:
+            self.history_before.append(before)
+            values = range(1, 21)
+        return [Message.from_json({
+            "chat_id": chat_id, "message_id": value, "time": value,
+            "sender_id": 2, "sender_name": "Alice", "content": "message {}".format(value),
+        }) for value in values]
 
 
 class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
@@ -523,6 +544,37 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.current_chat.chat_id, "private_2")
             self.assertTrue(app.messages)
             self.assertTrue(all(message.chat_id == "private_2" for message in app.messages))
+
+    async def test_scrolling_above_loaded_messages_fetches_earlier_history(self):
+        client = PagedHistoryClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(60, 20)) as pilot:
+            await self.wait_loaded(pilot, app)
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            view = app.query_one("#message_list", MessageListView)
+
+            view.index = 0
+            view.focus()
+            await pilot.press("k")
+            for _ in range(30):
+                if len(app.messages) == 100:
+                    break
+                await pilot.pause(0.05)
+            self.assertEqual(len(app.messages), 100)
+            self.assertEqual(view.highlighted_child.message.message_id, "101")
+
+            view.scroll_to(y=0, animate=False, immediate=True)
+            view.post_message(events.MouseScrollUp(
+                view, 1, 1, 0, -1, 0, False, False, False,
+            ))
+            for _ in range(30):
+                if len(app.messages) == 120 and view.highlighted_child is not None:
+                    break
+                await pilot.pause(0.05)
+            self.assertEqual(len(app.messages), 120)
+            self.assertEqual(view.highlighted_child.message.message_id, "51")
+            self.assertEqual(len(client.history_before), 2)
 
     async def test_open_send_reply_filter_and_back(self):
         client = FakeClient()

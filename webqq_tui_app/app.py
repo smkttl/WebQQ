@@ -176,6 +176,20 @@ class MessageListView(NavigableListView):
     def action_revoke(self) -> None:
         self.post_message(self.Revoke())
 
+    def action_cursor_up(self) -> None:
+        if self.index == 0:
+            self.post_message(self.LoadOlder())
+            return
+        super().action_cursor_up()
+
+    def _on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        at_top = self.scroll_y <= 0
+        super()._on_mouse_scroll_up(event)
+        if at_top:
+            if self.children:
+                self.index = 0
+            self.post_message(self.LoadOlder())
+
     def action_select_cursor(self) -> None:
         item = self.highlighted_child
         if isinstance(item, MessageListItem) and item.is_long and not item.message.forwards:
