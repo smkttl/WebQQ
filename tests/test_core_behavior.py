@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from webqq_app.app import configured_web_port
-from webqq_app.auth import BanTracker
+from webqq_app.auth import BanTracker, check_auth
 import webqq_app.api as api
 from webqq_app.common import (
     PublicAddressResolver,
@@ -350,6 +350,24 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             ("send_poke", {"user_id": 10002}, 10),
             ("send_poke", {"user_id": 10003, "group_id": 123}, 10),
         ])
+
+    async def test_window_vibration_sends_onebot_shake_segment(self):
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_window_vibration("private_10002")
+
+        self.assertEqual(calls, [(
+            "send_private_msg",
+            {"user_id": 10002, "message": [{"type": "shake", "data": {}}]},
+            10,
+        )])
 
     async def test_qzone_actions_backport_41818_through_get_cookies(self):
         calls = []
@@ -1087,6 +1105,56 @@ class BanTrackerTests(unittest.TestCase):
         self.assertTrue(tracker.is_banned("1.2.3.4", now=104))
         self.assertFalse(tracker.is_banned("1.2.3.4", now=107))
 
+    def test_check_auth_accepts_bearer_token_for_embedded_webui(self):
+        request = SimpleNamespace(
+            app={"config": {"web_token": "secret"}},
+            headers={"Authorization": "Bearer secret"},
+            query={},
+            cookies={},
+        )
+        self.assertTrue(check_auth(request))
+
+    def test_check_auth_can_probe_without_recording_failure(self):
+        tracker = BanTracker(max_failures=1, window_seconds=10, ban_seconds=5)
+        request = SimpleNamespace(
+            app={"config": {"web_token": "secret"}, "ban_tracker": tracker},
+            headers={"Authorization": "Bearer stale"},
+            query={},
+            cookies={},
+            remote="1.2.3.4",
+        )
+        self.assertFalse(check_auth(request, record_failure=False))
+        self.assertFalse(tracker.is_banned("1.2.3.4"))
+
+    def test_check_auth_accepts_active_login_session(self):
+        request = SimpleNamespace(
+            app={
+                "config": {"web_token": "secret"},
+                "auth_sessions": {"session-id": time.time() + 60},
+            },
+            headers={"Authorization": "Bearer session-id"},
+            query={},
+            cookies={},
+        )
+        self.assertTrue(check_auth(request))
+
+
+class IframeCookieTests(unittest.TestCase):
+    def test_https_login_cookie_is_cross_site_and_partitioned(self):
+        response = api.web.json_response({"ok": True})
+        api._set_login_cookie(response, "secret", secure=True)
+        cookie = response.headers.get("Set-Cookie", "")
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=None", cookie)
+        self.assertIn("Secure", cookie)
+        self.assertIn("Partitioned", cookie)
+
+    def test_http_login_cookie_remains_usable_for_local_clients(self):
+        response = api.web.json_response({"ok": True})
+        api._set_login_cookie(response, "secret", secure=False)
+        self.assertEqual(response.cookies["token"].value, "secret")
+        self.assertEqual(response.cookies["token"]["samesite"], "Lax")
+
 
 class ConfiguredWebPortTests(unittest.TestCase):
     def test_config_port_is_default(self):
@@ -1226,6 +1294,19 @@ class WebBackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("var(--web-background-image)", css)
         self.assertIn("backgroundButton", html)
 
+    def test_web_assets_keep_iframe_authentication_without_cookies(self):
+        html = Path("static/index.html").read_text(encoding="utf-8")
+        self.assertIn("sessionStorage.getItem(authSessionKey)", html)
+        self.assertIn("rememberAuthToken(d.session_token || token)", html)
+        self.assertIn("headers.set('Authorization', `Bearer ${authToken}`)", html)
+        self.assertIn("fetch(authenticatedUrl(path), {...opts, headers})", html)
+        self.assertIn("api('/api/auth-status')", html)
+        self.assertIn("new WebSocket(`${proto}//${location.host}/ws${authToken", html)
+        self.assertIn("authenticatedUrl(`/api/avatar", html)
+        self.assertIn("authenticatedUrl(`/api/image?", html)
+        self.assertIn("authenticatedUrl(`/api/background-image", html)
+        self.assertNotIn("document.cookie.match", html)
+
     def test_web_assets_fold_long_text_without_hiding_attachments(self):
         html = Path("static/index.html").read_text(encoding="utf-8")
         css = Path("static/app.css").read_text(encoding="utf-8")
@@ -1278,10 +1359,10 @@ class FaceManifestTests(unittest.TestCase):
 
 
 class MessageStoreTests(unittest.TestCase):
-    def test_incoming_poke_uses_window_vibration_preview_and_structured_segment(self):
+    def test_incoming_poke_and_shake_remain_distinct(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = MessageStore(maxlen=10, data_dir=tmp)
-            simplified = store.add({
+            poke = store.add({
                 "post_type": "message",
                 "message_type": "private",
                 "user_id": 42,
@@ -1290,10 +1371,17 @@ class MessageStoreTests(unittest.TestCase):
                 "message": [{"type": "poke", "data": {"type": "0", "id": "0"}}],
                 "sender": {"user_id": 42, "nickname": "Alice"},
             })
+            shake = store.add({
+                "post_type": "message", "message_type": "private", "user_id": 42,
+                "message_id": 100, "time": 101,
+                "message": [{"type": "shake", "data": {}}],
+                "sender": {"user_id": 42, "nickname": "Alice"},
+            })
 
-            self.assertEqual(simplified["content"], "Window vibration")
-            self.assertEqual(simplified["extra_segments"][0]["type"], "poke")
-            self.assertEqual(simplified["extra_segments"][0]["label"], "Window vibration")
+            self.assertEqual(poke["content"], "Poke")
+            self.assertEqual(poke["extra_segments"][0]["label"], "Poke")
+            self.assertEqual(shake["content"], "Window vibration")
+            self.assertEqual(shake["extra_segments"][0]["type"], "shake")
             self.assertEqual(store.get_chats()[0]["last_text"], "Window vibration")
 
     def test_legacy_poke_history_is_normalized_on_load(self):
@@ -1311,9 +1399,9 @@ class MessageStoreTests(unittest.TestCase):
             store.load_all()
 
             message = store.get_messages("private_42")[0]
-            self.assertEqual(message["content"], "Window vibration")
-            self.assertEqual(message["extra_segments"][0]["label"], "Window vibration")
-            self.assertEqual(store.get_chats()[0]["last_text"], "Window vibration")
+            self.assertEqual(message["content"], "Poke")
+            self.assertEqual(message["extra_segments"][0]["label"], "Poke")
+            self.assertEqual(store.get_chats()[0]["last_text"], "Poke")
 
     def test_structured_segments_preserve_card_and_media_details(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1807,6 +1895,44 @@ class PokeHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 500)
         self.assertEqual(payload["error"], "poke unavailable")
+
+
+class WindowVibrationHandlerTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def request(body, send_window_vibration, self_id="10001"):
+        async def request_json():
+            return body
+
+        return SimpleNamespace(
+            app={
+                "config": {"web_token": ""},
+                "store": SimpleNamespace(_self_user={"user_id": self_id}),
+                "napcat": SimpleNamespace(send_window_vibration=send_window_vibration),
+            },
+            query={}, cookies={}, headers={}, remote="", json=request_json,
+        )
+
+    async def test_private_window_vibration_sends_shake(self):
+        calls = []
+
+        async def send_window_vibration(chat_id):
+            calls.append(chat_id)
+            return {"status": "ok", "data": {}}
+
+        response = await api.handle_window_vibration(self.request(
+            {"chat_id": "private_10002"}, send_window_vibration,
+        ))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(calls, ["private_10002"])
+
+    async def test_group_window_vibration_is_rejected(self):
+        async def send_window_vibration(chat_id):
+            raise AssertionError("group vibration reached NapCat")
+
+        response = await api.handle_window_vibration(self.request(
+            {"chat_id": "group_123"}, send_window_vibration,
+        ))
+        self.assertEqual(response.status, 400)
 
 
 class ForwardHandlerTests(unittest.IsolatedAsyncioTestCase):

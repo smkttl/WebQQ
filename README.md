@@ -49,7 +49,7 @@ python3 webqq_tui.py
 
 For a local server, the client reads `web_port` from this repository's `config.json`. Use `--url` or `WEBQQ_URL` to connect to a different server. Use `--token`, or the `WEBQQ_TOKEN` environment variable, when web authentication is enabled; if neither is supplied, the client prompts without echoing the token. `--download-dir` selects where attachments are saved.
 
-The main controls are `Tab` / `Shift+Tab` to move focus, arrow keys or `j` / `k` to navigate, `Enter` to open a chat, open a merged forward, or send, `Ctrl+J` to insert a newline, `Esc` to return, `Ctrl+F` to filter or search, `r` to reply, `e` to react with a face, `x` to revoke, `p` to poke the selected sender, `Ctrl+I` to send an inline image, `Ctrl+O` to upload a file, `d` to download an attachment, and `q` to quit. Press `Ctrl+P` for the searchable action palette and `F1` or `?` outside the composer for complete keyboard help. `Space` selects messages for combined forwarding; the action palette also exposes custom forwards, temporary chats, clipboard actions, reaction details, QQ-face insertion, plugin send targets, contacts/profile, plugin administration, themes, backgrounds, and media/avatar previews.
+The main controls are `Tab` / `Shift+Tab` to move focus, arrow keys or `j` / `k` to navigate, `Enter` to open a chat, open a merged forward, or send, `Ctrl+J` to insert a newline, `Esc` to return, `Ctrl+F` to filter or search, `r` to reply, `e` to react with a face, `x` to revoke, `p` to poke the selected sender, `s` to send a private-chat window vibration, `Ctrl+I` to send an inline image, `Ctrl+O` to upload a file, `d` to download an attachment, and `q` to quit. Press `Ctrl+P` for the searchable action palette and `F1` or `?` outside the composer for complete keyboard help. `Space` selects messages for combined forwarding; the action palette also exposes custom forwards, temporary chats, clipboard actions, reaction details, QQ-face insertion, plugin send targets, contacts/profile, plugin administration, themes, backgrounds, and media/avatar previews.
 
 Image previews use color terminal cells and fall back to attachment metadata when an image cannot be loaded. Audio and video can be downloaded and opened explicitly with the system viewer. The TUI can upload, preview, or clear the WebUI conversation background, but terminals cannot place that image behind interactive text. Terminals below 80 columns and portrait terminals use a mobile-style one-pane flow; the minimum supported terminal size is 32 columns by 10 rows.
 
@@ -91,6 +91,7 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | POST   | `/api/send`                        | Send a message           |
 | POST   | `/api/send-forward`                | Send a merged forward    |
 | POST   | `/api/poke`                        | Poke a chat participant  |
+| POST   | `/api/window-vibration`            | Send a private window vibration |
 | GET    | `/api/custom-faces`                | Browse QQ custom faces   |
 | POST   | `/api/send-custom-face`            | Send a QQ custom face    |
 | GET/POST | `/api/collections`               | Browse or create QQ collections |

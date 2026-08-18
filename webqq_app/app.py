@@ -55,6 +55,7 @@ async def main():
     app["napcat"] = napcat
     app["request_store"] = request_store
     app["plugins"] = plugins
+    app["auth_sessions"] = {}
     app["ban_tracker"] = BanTracker(
         max_failures=config.get("fail2ban_max_failures", DEFAULT_CONFIG["fail2ban_max_failures"]),
         window_seconds=config.get("fail2ban_window_seconds", DEFAULT_CONFIG["fail2ban_window_seconds"]),
@@ -63,12 +64,14 @@ async def main():
     app.on_shutdown.append(flush_on_shutdown)
 
     app.router.add_post("/api/login", handle_login)
+    app.router.add_get("/api/auth-status", handle_auth_status)
     app.router.add_get("/api/chats", handle_chats)
     app.router.add_get("/api/messages", handle_messages)
     app.router.add_post("/api/temp-chat", handle_temp_chat)
     app.router.add_post("/api/send", handle_send)
     app.router.add_post("/api/send-forward", handle_send_forward)
     app.router.add_post("/api/poke", handle_poke)
+    app.router.add_post("/api/window-vibration", handle_window_vibration)
     app.router.add_get("/api/forward", handle_forward)
     app.router.add_post("/api/send-file", handle_send_file)
     app.router.add_get("/api/online-files", handle_online_files)
@@ -135,7 +138,10 @@ async def main():
     app.router.add_delete("/api/background-image", handle_background_image_clear)
     app.router.add_get("/api/file", handle_file_proxy)
     app.router.add_get("/ws", handle_ws_browser)
-    app.router.add_get("/", lambda r: web.FileResponse(STATIC_DIR / "index.html"))
+    app.router.add_get("/", lambda r: web.FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-store"},
+    ))
     app.router.add_static("/", path=str(STATIC_DIR), name="static")
 
     asyncio.create_task(napcat.start())

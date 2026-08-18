@@ -20,6 +20,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.group_file_requests = []
         self.group_management_requests = []
         self.pokes = []
+        self.vibrations = []
         self.reactions = []
         self.forward_ids = []
         self.parity_requests = []
@@ -35,6 +36,7 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         app.router.add_post("/api/send-forward", self.parity_json)
         app.router.add_post("/api/temp-chat", self.parity_json)
         app.router.add_post("/api/poke", self.poke)
+        app.router.add_post("/api/window-vibration", self.window_vibration)
         app.router.add_post("/api/message/emoji-like", self.face_reply)
         app.router.add_get("/api/message/emoji-likes", self.parity_json)
         app.router.add_post("/api/message/revoke", self.parity_json)
@@ -141,6 +143,11 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
     async def poke(self, request):
         body = await request.json()
         self.pokes.append(body)
+        return web.json_response({"ok": True})
+
+    async def window_vibration(self, request):
+        body = await request.json()
+        self.vibrations.append(body)
         return web.json_response({"ok": True})
 
     async def face_reply(self, request):
@@ -352,6 +359,8 @@ class WebQQClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent["data"]["reply_to"], "1")
         await self.client.poke("group_1", "2")
         self.assertEqual(self.pokes, [{"chat_id": "group_1", "user_id": "2"}])
+        await self.client.window_vibration("private_2")
+        self.assertEqual(self.vibrations, [{"chat_id": "private_2"}])
         reaction = await self.client.send_face_reply("group_1", "1", "14")
         self.assertEqual(self.reactions, [{"chat_id": "group_1", "message_id": "1", "emoji_id": "14"}])
         self.assertEqual(reaction["reactions"][0]["emoji_id"], "14")

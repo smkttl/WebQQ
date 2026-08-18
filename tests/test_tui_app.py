@@ -27,6 +27,7 @@ class FakeClient:
         self.config = SimpleNamespace(server_url="http://test", download_dir=Path("/tmp"))
         self.sent = []
         self.poked = []
+        self.vibrations = []
         self.reactions = []
         self.forward_ids = []
         self.read = []
@@ -216,6 +217,10 @@ class FakeClient:
 
     async def poke(self, chat_id, user_id):
         self.poked.append((chat_id, user_id))
+        return {"ok": True}
+
+    async def window_vibration(self, chat_id):
+        self.vibrations.append(chat_id)
         return {"ok": True}
 
     async def send_face_reply(self, chat_id, message_id, emoji_id):

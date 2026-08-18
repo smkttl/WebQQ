@@ -6,7 +6,8 @@ EXTRA_SEGMENT_LABELS = {
     "markdown": "[markdown]",
     "music": "[music]",
     "xml": "[xml]",
-    "poke": "Window vibration",
+    "poke": "Poke",
+    "shake": "Window vibration",
     "dice": "[dice]",
     "rps": "[rps]",
     "miniapp": "[mini app]",
@@ -119,12 +120,12 @@ class MessageStore:
             isinstance(segment, dict) and segment.get("type") == "poke" for segment in extras
         ):
             normalized["extra_segments"] = [
-                {**segment, "label": "Window vibration"}
+                {**segment, "label": "Poke"}
                 if isinstance(segment, dict) and segment.get("type") == "poke" else segment
                 for segment in extras
             ]
             if str(normalized.get("content") or "").strip() in ("[poke]", "Window vibration"):
-                normalized["content"] = "Window vibration"
+                normalized["content"] = "Poke"
         source_parsed = parse_chat_id(source_chat_id)
         original_chat_id = normalized.get("chat_id") or source_chat_id
         parsed = parse_chat_id(original_chat_id) or source_parsed
@@ -947,7 +948,7 @@ class MessageStore:
                         file_item["kind"] = t
                         files.append(file_item)
                     parts.append(f"[{t}]")
-                elif t in ("json", "markdown", "music", "xml", "poke", "dice", "rps", "miniapp", "contact", "location"):
+                elif t in ("json", "markdown", "music", "xml", "poke", "shake", "dice", "rps", "miniapp", "contact", "location"):
                     extra = self._simplify_extra_segment(t, d)
                     extra_segments.append(extra)
                     parts.append(extra["label"])

@@ -66,14 +66,29 @@ async def ban_middleware(request, handler):
     return await handler(request)
 
 
-def check_auth(request):
+def check_auth(request, *, record_failure=True):
     cfg = request.app["config"]
     auth_token = cfg.get("web_token", "")
     if not auth_token:
         return True
-    req_token = request.query.get("token") or request.cookies.get("token") or ""
+    authorization = request.headers.get("Authorization", "").strip()
+    bearer_token = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+    req_token = (
+        bearer_token
+        or request.headers.get("X-WebQQ-Token", "").strip()
+        or request.query.get("token")
+        or request.cookies.get("token")
+        or ""
+    )
     ok = hmac.compare_digest(req_token, auth_token)
     if not ok and req_token:
+        sessions = request.app.get("auth_sessions", {})
+        expires_at = sessions.get(req_token, 0)
+        if expires_at > time.time():
+            ok = True
+        elif expires_at:
+            sessions.pop(req_token, None)
+    if not ok and req_token and record_failure:
         record_auth_failure(request)
     return ok
 

@@ -1388,6 +1388,7 @@ HELP_KEY_GROUPS = (
         ("e", "React to the selected message"),
         ("x", "Revoke the selected message"),
         ("p", "Poke the selected sender"),
+        ("s", "Window vibration in a private chat"),
         ("c", "Copy the selected message"),
         ("v", "Preview the selected image"),
         ("d", "Download an attachment"),
@@ -1461,6 +1462,7 @@ class WebQQTui(App):
         Binding("shift+n", "previous_match", show=False),
         Binding("r", "reply", show=False),
         Binding("p", "poke", show=False),
+        Binding("s", "window_vibration", show=False),
         Binding("e", "face_reply", show=False),
         Binding("d", "download", show=False),
         Binding("ctrl+o", "send_file", show=False),
@@ -2482,6 +2484,31 @@ class WebQQTui(App):
             self._set_notice("Select a chat first")
             return
         self._spawn(self._poke(self.current_chat.chat_id, message))
+
+    def action_window_vibration(self) -> None:
+        if isinstance(self.focused, (Composer, Input)):
+            return
+        message = self._selected_message()
+        chat_id = self.current_chat.chat_id if self.current_chat else ""
+        if (
+            not message
+            or message.self_sent
+            or bool(message.raw.get("system"))
+            or not message.sender_id.isdigit()
+            or (self._self_user_id and message.sender_id == self._self_user_id)
+            or not chat_id.startswith("private_")
+        ):
+            self._set_notice("Select another user's message in a private chat")
+            return
+        self._spawn(self._window_vibration(chat_id, message))
+
+    async def _window_vibration(self, chat_id: str, message: Message) -> None:
+        self._set_notice("Sending window vibration...", seconds=120)
+        try:
+            await self.client.window_vibration(chat_id)
+            self._set_notice("Window vibration sent")
+        except Exception as exc:
+            self._set_notice("Window vibration failed: {}".format(exc))
 
     async def _poke(self, chat_id: str, message: Message) -> None:
         self._set_notice("Poking {}...".format(message.sender_name), seconds=120)

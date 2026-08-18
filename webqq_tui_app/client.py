@@ -161,6 +161,15 @@ class WebQQClient:
         self._require_ok(payload, "poke failed")
         return payload
 
+    async def window_vibration(self, chat_id: str) -> Mapping[str, Any]:
+        payload = await self._request_json(
+            "POST",
+            "/api/window-vibration",
+            json_body={"chat_id": chat_id},
+        )
+        self._require_ok(payload, "window vibration failed")
+        return payload
+
     async def send_face_reply(self, chat_id: str, message_id: str, emoji_id: str) -> Mapping[str, Any]:
         payload = await self._request_json(
             "POST",

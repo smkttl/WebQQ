@@ -231,6 +231,8 @@ def folded_message_body(message: Message, compact: bool = False) -> str:
 
 def extra_segment_summary(segment: Mapping[str, Any], compact: bool = False) -> str:
     if str(segment.get("type") or "") == "poke":
+        return "[Poke]"
+    if str(segment.get("type") or "") == "shake":
         return "[Window vibration]"
     label = str(segment.get("label") or "[{}]".format(segment.get("type") or "unknown"))
     title = str(segment.get("title") or "").strip()
@@ -355,7 +357,7 @@ def format_message(
             if len(nodes) > 3:
                 text.append("\n  ... {} more".format(len(nodes) - 3), style="dim")
     for segment in message.extra_segments:
-        style = "bold yellow" if str(segment.get("type") or "") == "poke" else "magenta"
+        style = "bold yellow" if str(segment.get("type") or "") in ("poke", "shake") else "magenta"
         text.append("\n" + extra_segment_summary(segment, compact=compact), style=style)
 
     if message.reactions:

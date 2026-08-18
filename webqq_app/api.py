@@ -1,7 +1,9 @@
 from .common import *
 import hashlib
 import imghdr
+import secrets
 import shutil
+from http.cookies import SimpleCookie
 from .auth import check_auth, record_auth_failure, client_ip, read_json_body
 from .messaging import send_forward_and_register, send_text_and_register
 
@@ -199,6 +201,35 @@ async def handle_delete_qzone_post(request):
         return web.json_response({"ok": False, "error": _qzone_error(result, "Qzone deletion failed")}, status=500)
     return web.json_response({"ok": True})
 
+
+def _request_uses_https(request):
+    if request.secure:
+        return True
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+    if forwarded_proto == "https":
+        return True
+    forwarded = request.headers.get("Forwarded", "").lower()
+    if "proto=https" in forwarded:
+        return True
+    cf_visitor = request.headers.get("CF-Visitor", "").lower().replace(" ", "")
+    return '"scheme":"https"' in cf_visitor
+
+
+def _set_login_cookie(response, token, secure):
+    if not secure:
+        response.set_cookie("token", token, max_age=86400 * 30, httponly=True, samesite="Lax")
+        return
+    cookie = SimpleCookie()
+    cookie["token"] = token
+    morsel = cookie["token"]
+    morsel["path"] = "/"
+    morsel["max-age"] = str(86400 * 30)
+    morsel["httponly"] = True
+    morsel["secure"] = True
+    morsel["samesite"] = "None"
+    response.headers.add("Set-Cookie", morsel.OutputString() + "; Partitioned")
+
+
 async def handle_login(request):
     cfg = request.app["config"]
     auth_token = cfg.get("web_token", "")
@@ -213,11 +244,17 @@ async def handle_login(request):
         tracker = request.app.get("ban_tracker")
         if tracker:
             tracker.clear(client_ip(request))
-        resp = web.json_response({"ok": True})
-        resp.set_cookie("token", auth_token, max_age=86400 * 30, httponly=True)
+        session_token = secrets.token_urlsafe(32)
+        request.app.setdefault("auth_sessions", {})[session_token] = time.time() + 86400 * 30
+        resp = web.json_response({"ok": True, "session_token": session_token})
+        _set_login_cookie(resp, session_token, _request_uses_https(request))
         return resp
     record_auth_failure(request)
     return web.json_response({"ok": False, "error": "invalid token"}, status=401)
+
+
+async def handle_auth_status(request):
+    return web.json_response({"authenticated": check_auth(request, record_failure=False)})
 
 
 async def handle_chats(request):
@@ -364,6 +401,28 @@ async def handle_poke(request):
         err = data.get("errMsg") or data.get("message") or result.get("wording") or "poke was not accepted by QQ"
         return web.json_response({"ok": False, "error": err}, status=500)
     return web.json_response({"ok": True, "data": data})
+
+
+async def handle_window_vibration(request):
+    if not check_auth(request):
+        return web.json_response({"error": "unauthorized"}, status=401)
+    body = await read_json_body(request)
+    chat_id = body.get("chat_id")
+    parsed_chat = parse_chat_id(chat_id)
+    if not parsed_chat or parsed_chat["type"] not in ("private", "temp"):
+        return web.json_response({"ok": False, "error": "window vibration is only available in private chats"}, status=400)
+    self_id = str(request.app["store"]._self_user.get("user_id") or "")
+    peer_id = str(parsed_chat.get("private_id") or parsed_chat.get("user_id") or "")
+    if peer_id and peer_id == self_id:
+        return web.json_response({"ok": False, "error": "cannot vibrate yourself"}, status=400)
+    try:
+        result = await request.app["napcat"].send_window_vibration(chat_id)
+    except Exception as error:
+        return web.json_response({"ok": False, "error": str(error)}, status=500)
+    if not result or result.get("status") != "ok":
+        error = result.get("wording", result.get("message", "window vibration failed")) if result else "not connected"
+        return web.json_response({"ok": False, "error": error}, status=500)
+    return web.json_response({"ok": True, "data": result.get("data")})
 
 
 async def handle_forward(request):

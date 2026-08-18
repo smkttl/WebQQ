@@ -11,7 +11,7 @@ try {
   document.documentElement.dataset.theme = savedTheme || preferredTheme;
 } catch {}
 </script>
-<link rel="stylesheet" href="/app.css?v=20260809-2">
+<link rel="stylesheet" href="/app.css?v=20260817-1">
 </head>
 <body>
 
@@ -153,6 +153,7 @@ try {
   <button type="button" id="msgMenuCopy">Copy</button>
   <button type="button" id="msgMenuReply">Reply</button>
   <button type="button" id="msgMenuPoke">Poke</button>
+  <button type="button" id="msgMenuVibration">Window vibration</button>
   <button type="button" id="msgMenuRevoke">Revoke</button>
   <button type="button" id="msgMenuTempChat">Temp Chat</button>
   <button type="button" id="msgMenuFaceReply">Face Reply</button>
@@ -161,9 +162,42 @@ try {
 </div>
 
 <script>
+const authSessionKey = 'webqq.authToken';
+
+function initialAuthToken() {
+  const queryToken = new URLSearchParams(location.search).get('token') || '';
+  if (queryToken) return queryToken;
+  try {
+    return sessionStorage.getItem(authSessionKey) || '';
+  } catch {
+    return '';
+  }
+}
+
+function rememberAuthToken(token) {
+  authToken = String(token || '');
+  try {
+    if (authToken) sessionStorage.setItem(authSessionKey, authToken);
+    else sessionStorage.removeItem(authSessionKey);
+  } catch {}
+}
+
+function authenticatedUrl(path) {
+  if (!path || !authToken) return path;
+  try {
+    const url = new URL(path, location.href);
+    if (url.origin !== location.origin) return path;
+    url.searchParams.set('token', authToken);
+    return url.href;
+  } catch {
+    return path;
+  }
+}
+
 let currentChat = null;
 let ws = null;
 let authed = false;
+let authToken = initialAuthToken();
 let initialized = false;
 let nicknames = {};
 let atSearch = null;
@@ -630,7 +664,7 @@ function applyBackgroundState(enabled, revision = '') {
   backgroundRevision = revision || '';
   if (enabled) {
     const cacheKey = encodeURIComponent(backgroundRevision || Date.now());
-    root.style.setProperty('--web-background-image', `url("/api/background-image?v=${cacheKey}")`);
+    root.style.setProperty('--web-background-image', `url("${authenticatedUrl(`/api/background-image?v=${cacheKey}`)}")`);
   } else {
     root.style.removeProperty('--web-background-image');
   }
@@ -1037,9 +1071,10 @@ function renderContactFriends(overlay) {
       const row = document.createElement('div');
       row.className = 'contact-friend-row';
       row.innerHTML = `
-        <div class="contact-friend-avatar"><span>${esc(friend.name.slice(0, 1).toUpperCase())}</span><img src="/api/avatar?type=user&id=${encodeURIComponent(friend.userId)}" alt=""></div>
+        <div class="contact-friend-avatar"><span>${esc(friend.name.slice(0, 1).toUpperCase())}</span><img src="" alt=""></div>
         <div class="contact-friend-copy"><strong>${esc(friend.name)}</strong><span>${esc(friend.userId)}${friend.remark && friend.nickname ? ` · ${esc(friend.nickname)}` : ''}</span></div>
         <div class="contact-row-actions"><button type="button" data-friend-edit>Edit</button><button type="button" class="danger-quiet" data-friend-delete>Delete</button></div>`;
+      row.querySelector('img').src = authenticatedUrl(`/api/avatar?type=user&id=${encodeURIComponent(friend.userId)}`);
       row.querySelector('[data-friend-edit]').addEventListener('click', () => editContactFriend(overlay, friend));
       row.querySelector('[data-friend-delete]').addEventListener('click', () => deleteContactFriend(overlay, friend));
       section.appendChild(row);
@@ -1095,7 +1130,8 @@ async function loadContactProfile(overlay) {
     form.querySelector('#contactProfileNote').value = profile.personal_note || '';
     form.querySelector('#contactProfileId').textContent = profile.user_id || '';
     const image = form.querySelector('#contactProfileAvatar');
-    image.src = `${profile.avatar_url || `/api/avatar?type=user&id=${encodeURIComponent(profile.user_id || '')}`}&v=${Date.now()}`;
+    const avatarSource = profile.avatar_url || `/api/avatar?type=user&id=${encodeURIComponent(profile.user_id || '')}`;
+    image.src = authenticatedUrl(`${avatarSource}${avatarSource.includes('?') ? '&' : '?'}v=${Date.now()}`);
   } catch (error) {
     overlay.querySelector('#contactProfileError').textContent = error.message || String(error);
   } finally { form.classList.remove('loading'); }
@@ -1248,7 +1284,9 @@ function showReactionUsers(reaction) {
 }
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, opts);
+  const headers = new Headers(opts.headers || {});
+  if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
+  const r = await fetch(authenticatedUrl(path), {...opts, headers});
   return r;
 }
 
@@ -1271,6 +1309,7 @@ async function doLogin() {
   });
   const d = await r.json();
   if (d.ok) {
+    rememberAuthToken(d.session_token || token);
     authed = true;
     $('loginOverlay').style.display = 'none';
     init();
@@ -1280,9 +1319,14 @@ async function doLogin() {
 }
 
 async function checkAuth() {
-  const r = await api('/api/chats');
-  if (r.status === 401) return false;
-  return true;
+  try {
+    const r = await api('/api/auth-status');
+    if (!r.ok) return false;
+    const d = await readJsonResponse(r);
+    return Boolean(d.authenticated);
+  } catch {
+    return false;
+  }
 }
 
 async function loadNicknames() {
@@ -1566,9 +1610,7 @@ function currentGroupId() {
 function avatarUrl(type, id) {
   id = normalizeMessageId(id);
   if (!id || !/^\d+$/.test(id) || !['user', 'group'].includes(type)) return '';
-  const token = document.cookie.match(/(?:^|;\s*)token=([^;]*)/)?.[1] || '';
-  const auth = token ? `&token=${encodeURIComponent(token)}` : '';
-  return `/api/avatar?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}${auth}`;
+  return authenticatedUrl(`/api/avatar?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}`);
 }
 
 function avatarUrlForChat(chatId) {
@@ -1598,7 +1640,7 @@ function createAvatar(className, src, label) {
     img.alt = '';
     img.loading = 'lazy';
     img.referrerPolicy = 'no-referrer';
-    img.src = src;
+    img.src = authenticatedUrl(src);
     img.addEventListener('load', () => { fallback.style.display = 'none'; });
     img.addEventListener('error', () => { img.remove(); fallback.style.display = ''; });
     avatar.appendChild(img);
@@ -2102,9 +2144,11 @@ function appendImages(bubble, images) {
       continue;
     }
     const file = image && image.file;
-    const thumbProxyUrl = `/api/image?url=${encodeURIComponent(thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
-    const refreshedThumbProxyUrl = `${thumbProxyUrl}&refresh=1`;
-    const fullProxyUrl = `/api/image/full?url=${encodeURIComponent(url || thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
+    const proxyQuery = `url=${encodeURIComponent(thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
+    const fullProxyQuery = `url=${encodeURIComponent(url || thumbnailUrl)}${file ? '&file=' + encodeURIComponent(file) : ''}`;
+    const thumbProxyUrl = authenticatedUrl(`/api/image?${proxyQuery}`);
+    const refreshedThumbProxyUrl = authenticatedUrl(`/api/image?${proxyQuery}&refresh=1`);
+    const fullProxyUrl = authenticatedUrl(`/api/image/full?${fullProxyQuery}`);
     const frame = document.createElement('div');
     frame.className = 'msg-image-frame';
     applyImageFrameSize(frame, image);
@@ -2156,8 +2200,7 @@ function humanFileSize(size) {
 function fileDownloadUrl(file) {
   const params = new URLSearchParams();
   if (currentChat) params.set('chat_id', currentChat);
-  const token = document.cookie.match(/(?:^|;\s*)token=([^;]*)/)?.[1] || '';
-  if (token) params.set('token', token);
+  if (authToken) params.set('token', authToken);
   if (file && file.file_id && !file.id) params.set('id', String(file.file_id));
   if (file && file.fileName && !file.name) params.set('name', String(file.fileName));
   if (file && file.msgId && !file.id) params.set('id', String(file.msgId));
@@ -2331,8 +2374,9 @@ function appendExtraSegments(bubble, segments) {
     const type = String(segment.type || 'segment').replace(/[^a-z0-9_-]/gi, '').toLowerCase();
     item.className = `extra-segment extra-${type || 'segment'}`;
 
-    if (type === 'poke') {
-      item.innerHTML = '<svg aria-hidden="true"><use href="#icon-vibrate"/></svg><span>Window vibration</span>';
+    if (type === 'poke' || type === 'shake') {
+      const label = type === 'shake' ? 'Window vibration' : 'Poke';
+      item.innerHTML = `<svg aria-hidden="true"><use href="#icon-vibrate"/></svg><span>${label}</span>`;
       wrap.appendChild(item);
       continue;
     }
@@ -2569,6 +2613,7 @@ function showMessageMenu(message, x, y) {
   selectedMenuMessage = message;
   const menu = $('msgMenu');
   $('msgMenuPoke').style.display = canPokeMessage(message) ? 'block' : 'none';
+  $('msgMenuVibration').style.display = canWindowVibrationMessage(message) ? 'block' : 'none';
   $('msgMenuTempChat').style.display = canStartTempChat(message) ? 'block' : 'none';
   $('msgMenuRevoke').style.display = canRevokeMessage(message) ? 'block' : 'none';
   $('msgMenuSelect').style.display = canSelectMessage(message) ? 'block' : 'none';
@@ -2708,6 +2753,18 @@ function canPokeMessage(message) {
   const userId = normalizeMessageId(message && message.sender_id);
   const selfId = normalizeMessageId(selfUser && selfUser.user_id);
   return !!message
+    && !message.self
+    && !message.system
+    && /^\d+$/.test(userId)
+    && (!selfId || userId !== selfId);
+}
+
+function canWindowVibrationMessage(message) {
+  const userId = normalizeMessageId(message && message.sender_id);
+  const selfId = normalizeMessageId(selfUser && selfUser.user_id);
+  const chatId = String((message && message.chat_id) || currentChat || '');
+  return !!message
+    && chatId.startsWith('private_')
     && !message.self
     && !message.system
     && /^\d+$/.test(userId)
@@ -2869,6 +2926,28 @@ async function pokeSelectedMessage() {
     showToast(`Poked ${senderName}`);
   } catch (e) {
     showModal(e.message || 'Poke failed');
+  }
+}
+
+async function windowVibrationSelectedMessage() {
+  const message = selectedMenuMessage;
+  if (!canWindowVibrationMessage(message)) {
+    hideMessageMenu();
+    showToast('Window vibration is only available in private chats');
+    return;
+  }
+  hideMessageMenu();
+  try {
+    const r = await api('/api/window-vibration', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({chat_id: message.chat_id || currentChat || ''})
+    });
+    const d = await readJsonResponse(r);
+    if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    showToast('Window vibration sent');
+  } catch (e) {
+    showModal(e.message || 'Window vibration failed');
   }
 }
 
@@ -4467,6 +4546,7 @@ $('sendInput').addEventListener('keyup', e => {
 $('msgMenuCopy').addEventListener('click', copySelectedMessage);
 $('msgMenuReply').addEventListener('click', replyToSelectedMessage);
 $('msgMenuPoke').addEventListener('click', pokeSelectedMessage);
+$('msgMenuVibration').addEventListener('click', windowVibrationSelectedMessage);
 $('msgMenuRevoke').addEventListener('click', revokeSelectedMessage);
 $('msgMenuTempChat').addEventListener('click', startTempChatFromSelectedMessage);
 $('msgMenuFaceReply').addEventListener('click', showFaceReplyPicker);
@@ -4589,8 +4669,7 @@ updateComposerState();
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = document.cookie.match(/(?:^|;\s*)token=([^;]*)/)?.[1] || '';
-  ws = new WebSocket(`${proto}//${location.host}/ws${token ? '?token=' + encodeURIComponent(token) : ''}`);
+  ws = new WebSocket(`${proto}//${location.host}/ws${authToken ? '?token=' + encodeURIComponent(authToken) : ''}`);
   ws.onmessage = e => {
     try {
       const d = JSON.parse(e.data);
