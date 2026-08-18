@@ -199,6 +199,8 @@ let ws = null;
 let authed = false;
 let authToken = initialAuthToken();
 let initialized = false;
+let authInvalidated = false;
+let appTimers = [];
 let nicknames = {};
 let atSearch = null;
 let loadingOlder = false;
@@ -1287,7 +1289,26 @@ async function api(path, opts = {}) {
   const headers = new Headers(opts.headers || {});
   if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
   const r = await fetch(authenticatedUrl(path), {...opts, headers});
+  if (r.status === 401 && path !== '/api/login') invalidateAuth();
   return r;
+}
+
+function invalidateAuth() {
+  if (authInvalidated) return;
+  authInvalidated = true;
+  authed = false;
+  initialized = false;
+  for (const timer of appTimers) clearInterval(timer);
+  appTimers = [];
+  if (ws) {
+    const socket = ws;
+    ws = null;
+    socket.onclose = null;
+    socket.close();
+  }
+  rememberAuthToken('');
+  $('loginOverlay').style.display = 'flex';
+  $('loginError').textContent = 'Session expired. Sign in again.';
 }
 
 async function readJsonResponse(response) {
@@ -1310,6 +1331,7 @@ async function doLogin() {
   const d = await r.json();
   if (d.ok) {
     rememberAuthToken(d.session_token || token);
+    authInvalidated = false;
     authed = true;
     $('loginOverlay').style.display = 'none';
     init();
@@ -1354,9 +1376,9 @@ async function init() {
   updateStatus();
   loadChats();
   connectWS();
-  setInterval(updateStatus, 15000);
-  setInterval(loadChats, 10000);
-  setInterval(loadNicknames, 60000);
+  appTimers.push(setInterval(updateStatus, 15000));
+  appTimers.push(setInterval(loadChats, 10000));
+  appTimers.push(setInterval(loadNicknames, 60000));
 }
 
 async function loadFaceManifest() {
@@ -4668,6 +4690,7 @@ syncThemeControl();
 updateComposerState();
 
 function connectWS() {
+  if (!authed || !authToken || authInvalidated) return;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}/ws${authToken ? '?token=' + encodeURIComponent(authToken) : ''}`);
   ws.onmessage = e => {
@@ -4708,7 +4731,9 @@ function connectWS() {
       }
     } catch {}
   };
-  ws.onclose = () => setTimeout(connectWS, 3000);
+  ws.onclose = () => {
+    if (authed && authToken && !authInvalidated) setTimeout(connectWS, 3000);
+  };
   ws.onerror = () => {};
 }
 

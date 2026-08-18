@@ -254,7 +254,16 @@ async def handle_login(request):
 
 
 async def handle_auth_status(request):
-    return web.json_response({"authenticated": check_auth(request, record_failure=False)})
+    supplied = bool(
+        request.headers.get("Authorization", "").strip()
+        or request.headers.get("X-WebQQ-Token", "").strip()
+        or request.query.get("token", "").strip()
+        or request.cookies.get("token", "").strip()
+    )
+    authenticated = check_auth(request, record_failure=supplied)
+    if supplied and not authenticated:
+        return web.json_response({"authenticated": False, "error": "unauthorized"}, status=401)
+    return web.json_response({"authenticated": authenticated})
 
 
 async def handle_chats(request):

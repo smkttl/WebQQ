@@ -1126,6 +1126,19 @@ class BanTrackerTests(unittest.TestCase):
         self.assertFalse(check_auth(request, record_failure=False))
         self.assertFalse(tracker.is_banned("1.2.3.4"))
 
+    def test_check_auth_records_invalid_authenticated_requests(self):
+        tracker = BanTracker(max_failures=5, window_seconds=10, ban_seconds=5)
+        request = SimpleNamespace(
+            app={"config": {"web_token": "secret"}, "ban_tracker": tracker},
+            headers={"Authorization": "Bearer stale"},
+            query={}, cookies={}, remote="1.2.3.4", method="GET",
+        )
+        for _ in range(4):
+            self.assertFalse(check_auth(request))
+            self.assertFalse(tracker.is_banned("1.2.3.4"))
+        self.assertFalse(check_auth(request))
+        self.assertTrue(tracker.is_banned("1.2.3.4"))
+
     def test_check_auth_accepts_active_login_session(self):
         request = SimpleNamespace(
             app={
@@ -1137,6 +1150,22 @@ class BanTrackerTests(unittest.TestCase):
             cookies={},
         )
         self.assertTrue(check_auth(request))
+
+    def test_auth_status_only_skips_ban_for_credential_free_bootstrap(self):
+        tracker = BanTracker(max_failures=5, window_seconds=10, ban_seconds=5)
+        request = SimpleNamespace(
+            app={"config": {"web_token": "secret"}, "ban_tracker": tracker},
+            headers={}, query={}, cookies={}, remote="1.2.3.4",
+        )
+        response = asyncio.run(api.handle_auth_status(request))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.text), {"authenticated": False})
+
+        request.headers = {"Authorization": "Bearer invalid"}
+        for _ in range(5):
+            response = asyncio.run(api.handle_auth_status(request))
+        self.assertEqual(response.status, 401)
+        self.assertTrue(tracker.is_banned("1.2.3.4"))
 
 
 class IframeCookieTests(unittest.TestCase):
@@ -1301,6 +1330,8 @@ class WebBackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("headers.set('Authorization', `Bearer ${authToken}`)", html)
         self.assertIn("fetch(authenticatedUrl(path), {...opts, headers})", html)
         self.assertIn("api('/api/auth-status')", html)
+        self.assertIn("if (r.status === 401 && path !== '/api/login') invalidateAuth()", html)
+        self.assertIn("if (!authed || !authToken || authInvalidated) return;", html)
         self.assertIn("new WebSocket(`${proto}//${location.host}/ws${authToken", html)
         self.assertIn("authenticatedUrl(`/api/avatar", html)
         self.assertIn("authenticatedUrl(`/api/image?", html)
