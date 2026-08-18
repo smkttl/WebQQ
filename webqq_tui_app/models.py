@@ -233,7 +233,7 @@ def extra_segment_summary(segment: Mapping[str, Any], compact: bool = False) -> 
     if str(segment.get("type") or "") == "poke":
         return "[Poke]"
     if str(segment.get("type") or "") == "shake":
-        return "[Window vibration]"
+        return "[shake]"
     label = str(segment.get("label") or "[{}]".format(segment.get("type") or "unknown"))
     title = str(segment.get("title") or "").strip()
     description = str(segment.get("description") or segment.get("text") or "").strip()

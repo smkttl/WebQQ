@@ -2375,7 +2375,7 @@ function appendExtraSegments(bubble, segments) {
     item.className = `extra-segment extra-${type || 'segment'}`;
 
     if (type === 'poke' || type === 'shake') {
-      const label = type === 'shake' ? 'Window vibration' : 'Poke';
+      const label = type === 'shake' ? 'shake' : 'Poke';
       item.innerHTML = `<svg aria-hidden="true"><use href="#icon-vibrate"/></svg><span>${label}</span>`;
       wrap.appendChild(item);
       continue;

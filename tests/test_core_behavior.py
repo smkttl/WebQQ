@@ -365,7 +365,7 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, [(
             "send_private_msg",
-            {"user_id": 10002, "message": [{"type": "shake", "data": {}}]},
+            {"user_id": 10002, "message": "[CQ:shake]"},
             10,
         )])
 
@@ -1380,9 +1380,9 @@ class MessageStoreTests(unittest.TestCase):
 
             self.assertEqual(poke["content"], "Poke")
             self.assertEqual(poke["extra_segments"][0]["label"], "Poke")
-            self.assertEqual(shake["content"], "Window vibration")
+            self.assertEqual(shake["content"], "shake")
             self.assertEqual(shake["extra_segments"][0]["type"], "shake")
-            self.assertEqual(store.get_chats()[0]["last_text"], "Window vibration")
+            self.assertEqual(store.get_chats()[0]["last_text"], "shake")
 
     def test_legacy_poke_history_is_normalized_on_load(self):
         with tempfile.TemporaryDirectory() as tmp:

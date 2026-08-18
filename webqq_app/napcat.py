@@ -1019,7 +1019,17 @@ class NapCatConnection:
         parsed = parse_chat_id(chat_id)
         if not parsed or parsed["type"] not in ("private", "temp"):
             raise ValueError("window vibration is only available in private chats")
-        return await self.send_segments(chat_id, [{"type": "shake", "data": {}}])
+        if parsed["type"] == "private":
+            params = {"user_id": parsed["private_id"], "message": "[CQ:shake]"}
+            context = self.store.private_send_context(parsed["private_id"])
+            if context.get("group_id"):
+                params["group_id"] = context["group_id"]
+            return await self._request("send_private_msg", params)
+        return await self._request("send_private_msg", {
+            "user_id": parsed["user_id"],
+            "group_id": parsed["group_id"],
+            "message": "[CQ:shake]",
+        })
 
     async def delete_msg(self, message_id):
         return await self._request("delete_msg", {"message_id": int(message_id)}, timeout=10)

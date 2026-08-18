@@ -63,18 +63,18 @@ class TuiModelTests(unittest.TestCase):
         message = Message.from_json({
             "chat_id": "private_42",
             "sender_name": "Alice",
-            "content": "PokeWindow vibration",
+            "content": "Pokeshake",
             "extra_segments": [
                 {"type": "poke", "label": "Poke"},
-                {"type": "shake", "label": "Window vibration"},
+                {"type": "shake", "label": "shake"},
             ],
         })
 
         self.assertEqual(display_content(message), "")
         rendered = format_message(message, compact=True).plain
         self.assertIn("[Poke]", rendered)
-        self.assertIn("[Window vibration]", rendered)
-        self.assertTrue(message_matches(message, "window vibration"))
+        self.assertIn("[shake]", rendered)
+        self.assertTrue(message_matches(message, "shake"))
 
     def test_rich_message_normalization_and_summary(self):
         message = Message.from_json({

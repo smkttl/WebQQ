@@ -7,7 +7,7 @@ EXTRA_SEGMENT_LABELS = {
     "music": "[music]",
     "xml": "[xml]",
     "poke": "Poke",
-    "shake": "Window vibration",
+    "shake": "shake",
     "dice": "[dice]",
     "rps": "[rps]",
     "miniapp": "[mini app]",
