@@ -80,6 +80,13 @@ def _build_reproduction_segments(target):
         segments[0]["data"]["text"] = prefix + segments[0]["data"]["text"]
     else:
         segments.insert(0, {"type": "text", "data": {"text": prefix}})
+    sender_id = str(target.get("sender_id") or "").strip()
+    if sender_id:
+        segments = [
+            {"type": "text", "data": {"text": "Sender: "}},
+            {"type": "at", "data": {"qq": sender_id}},
+            {"type": "text", "data": {"text": " "}},
+        ] + segments
 
     for kind, segments_key, segment_type in (
         ("image", "images", "image"),
@@ -150,11 +157,14 @@ def _build_reproduction_segments(target):
 
 
 def _segments_text(segments):
-    return "".join(
-        str(segment.get("data", {}).get("text") or "")
-        for segment in segments
-        if segment.get("type") == "text"
-    )
+    parts = []
+    for segment in segments:
+        if segment.get("type") == "text":
+            parts.append(str(segment.get("data", {}).get("text") or ""))
+        elif segment.get("type") == "at":
+            qq = str(segment.get("data", {}).get("qq") or "")
+            parts.append(f"@[{qq}]")
+    return "".join(parts)
 
 
 def setup(ctx):
