@@ -442,7 +442,7 @@ class RichMediaDialog(ModalScreen):
     def compose(self) -> ComposeResult:
         with Container():
             yield Static("Send rich media", classes="dialog-title")
-            yield Input(placeholder="dice [1-6] | rps [rock|scissors|paper] | video PATH", id="media_command")
+            yield Input(placeholder="dice | rps | video PATH", id="media_command")
             yield Static("", id="media_error")
             yield Static("collection create {JSON} | collection save | Esc return", classes="hint")
 
@@ -469,14 +469,13 @@ class RichMediaDialog(ModalScreen):
         if kind == "transfers" and len(parts) == 1:
             return {"kind": "transfers"}
         if kind == "dice":
-            if len(parts) > 2 or (len(parts) == 2 and parts[1] not in {"1", "2", "3", "4", "5", "6"}):
-                raise ValueError("Use: dice [1-6]")
-            return {"kind": "dice", "result": parts[1] if len(parts) == 2 else None}
+            if len(parts) != 1:
+                raise ValueError("Forced dice results are not supported; use: dice")
+            return {"kind": "dice", "result": None}
         if kind == "rps":
-            result = parts[1].lower() if len(parts) == 2 else None
-            if len(parts) > 2 or result not in {None, "rock", "scissors", "paper"}:
-                raise ValueError("Use: rps [rock|scissors|paper]")
-            return {"kind": "rps", "result": result}
+            if len(parts) != 1:
+                raise ValueError("Forced RPS results are not supported; use: rps")
+            return {"kind": "rps", "result": None}
         if kind == "contact":
             if len(parts) != 3 or parts[1].lower() not in {"qq", "group"} or not parts[2].isdigit():
                 raise ValueError("Use: contact qq|group ID")

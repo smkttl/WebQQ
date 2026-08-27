@@ -61,6 +61,7 @@ Configuration is stored in `config.json` (gitignored). A template is provided in
 | ---------------- | ------------------------------------------------------ | ------------------------------------------------- |
 | `ws_url`         | `ws://localhost:{port}/?message_post_format=array`     | NapCat WebSocket URL                              |
 | `napcat_token`   | *(empty)*                                              | Token for authenticating with the NapCat WebSocket server                    |
+| `window_vibration_action` | *(empty)*                                      | Optional NapCat action supplied by a plugin for private window vibration; NapCat 4.18.2 leaves this unsupported |
 | `web_port`       | `8080`                                                 | Port for the web UI server                        |
 | `web_token`      | *(empty)*                                              | Password for browser login. Empty = no auth required |
 | `web_background_image` | *(empty)*                                         | WebUI conversation background; HTTP(S) URL or server-local path |

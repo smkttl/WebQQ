@@ -47,6 +47,7 @@ REACTION_FETCH_EMOJI_IDS = ("14", "1", "4", "5", "8", "9", "21", "23", "24", "66
 DEFAULT_CONFIG = {
     "ws_url": "ws://localhost:49341/?message_post_format=array",
     "napcat_token": "",
+    "window_vibration_action": "",
     "web_port": 8080,
     "web_token": "",
     "web_background_image": "",

@@ -163,7 +163,7 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "private chats"):
             await connection.get_online_files("group_42")
 
-    async def test_dice_and_rps_support_random_and_forced_results(self):
+    async def test_dice_and_rps_send_random_results_and_reject_forcing(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace())
         connection.ws = object()
@@ -174,15 +174,16 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
 
         connection._request = request
         await connection.send_game("group_7", "dice")
-        await connection.send_game("group_7", "dice", "6")
         await connection.send_game("group_7", "rps")
-        await connection.send_game("group_7", "rps", "2")
+
+        with self.assertRaisesRegex(ValueError, "do not support forced"):
+            await connection.send_game("group_7", "dice", "6")
+        with self.assertRaisesRegex(ValueError, "do not support forced"):
+            await connection.send_game("group_7", "rps", "2")
 
         self.assertEqual([call[1]["message"] for call in calls], [
             [{"type": "dice", "data": {"result": "0"}}],
-            [{"type": "face", "data": {"id": "358", "resultId": "6"}}],
             [{"type": "rps", "data": {"result": "0"}}],
-            [{"type": "face", "data": {"id": "359", "resultId": "2"}}],
         ])
 
     async def test_rich_media_segments_use_4182_onebot_schema(self):
@@ -351,9 +352,19 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             ("send_poke", {"user_id": 10003, "group_id": 123}, 10),
         ])
 
-    async def test_window_vibration_sends_onebot_shake_segment(self):
-        calls = []
+    async def test_window_vibration_is_rejected_when_napcat_has_no_action(self):
         connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
+        connection.ws = object()
+
+        with self.assertRaisesRegex(RuntimeError, "does not support window vibration"):
+            await connection.send_window_vibration("private_10002")
+
+    async def test_window_vibration_uses_explicit_napcat_action(self):
+        calls = []
+        store = SimpleNamespace(private_send_context=lambda user_id: {})
+        connection = NapCatConnection(
+            "", "", store, config={"window_vibration_action": "send_window_vibration"},
+        )
         connection.ws = object()
 
         async def request(action, params, timeout=10):
@@ -364,8 +375,8 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         await connection.send_window_vibration("private_10002")
 
         self.assertEqual(calls, [(
-            "send_private_msg",
-            {"user_id": 10002, "message": "[CQ:shake]"},
+            "send_window_vibration",
+            {"user_id": 10002},
             10,
         )])
 
@@ -701,7 +712,7 @@ class OnlineFileHandlerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RichMediaHandlerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_game_handler_normalizes_forced_results_and_keeps_random(self):
+    async def test_game_handler_rejects_forced_results_and_keeps_random(self):
         sent = []
 
         async def send_game(chat_id, game, result):
@@ -717,8 +728,8 @@ class RichMediaHandlerTests(unittest.IsolatedAsyncioTestCase):
             return await api.handle_send_game(request)
 
         self.assertEqual((await invoke({"chat_id": "group_1", "game": "dice"})).status, 200)
-        self.assertEqual((await invoke({"chat_id": "private_2", "game": "rps", "result": "scissors"})).status, 200)
-        self.assertEqual(sent, [("group_1", "dice", None), ("private_2", "rps", "2")])
+        self.assertEqual((await invoke({"chat_id": "private_2", "game": "rps", "result": "scissors"})).status, 400)
+        self.assertEqual(sent, [("group_1", "dice", None)])
         self.assertEqual((await invoke({"chat_id": "group_1", "game": "dice", "result": "7"})).status, 400)
         self.assertEqual((await invoke({"chat_id": "group_1", "game": "rps", "result": "lizard"})).status, 400)
 

@@ -543,12 +543,9 @@ class NapCatConnection:
         game = str(game).lower()
         if game not in ("dice", "rps"):
             raise ValueError("game must be dice or rps")
-        if result is None:
-            return await self.send_segments(chat_id, [{"type": game, "data": {"result": "0"}}])
-        face_id = "358" if game == "dice" else "359"
-        return await self.send_segments(chat_id, [{
-            "type": "face", "data": {"id": face_id, "resultId": str(result)},
-        }])
+        if result is not None:
+            raise ValueError("NapCat and QQ do not support forced dice or RPS results")
+        return await self.send_segments(chat_id, [{"type": game, "data": {"result": "0"}}])
 
     async def send_music(self, chat_id, music):
         return await self.send_segments(chat_id, [{"type": "music", "data": dict(music)}], timeout=30)
@@ -1019,17 +1016,27 @@ class NapCatConnection:
         parsed = parse_chat_id(chat_id)
         if not parsed or parsed["type"] not in ("private", "temp"):
             raise ValueError("window vibration is only available in private chats")
+        # NapCat 4.18.2 declares ``shake`` in a few compatibility schemas, but
+        # its message converter has no shake element and raises before sending.
+        # Do not submit a request which can only produce the misleading
+        # "未知的消息类型:shake" error.  A future NapCat plugin can opt in by
+        # providing a dedicated action name and parameter builder here.
+        action = str(self.config.get("window_vibration_action") or "").strip()
+        if not action:
+            raise RuntimeError(
+                "This NapCat version does not support window vibration; upgrade NapCat or install a plugin that provides a window-vibration action"
+            )
         if parsed["type"] == "private":
-            params = {"user_id": parsed["private_id"], "message": "[CQ:shake]"}
+            params = {"user_id": parsed["private_id"]}
             context = self.store.private_send_context(parsed["private_id"])
             if context.get("group_id"):
                 params["group_id"] = context["group_id"]
-            return await self._request("send_private_msg", params)
-        return await self._request("send_private_msg", {
-            "user_id": parsed["user_id"],
-            "group_id": parsed["group_id"],
-            "message": "[CQ:shake]",
-        })
+        else:
+            params = {
+                "user_id": parsed["user_id"],
+                "group_id": parsed["group_id"],
+            }
+        return await self._request(action, params)
 
     async def delete_msg(self, message_id):
         return await self._request("delete_msg", {"message_id": int(message_id)}, timeout=10)

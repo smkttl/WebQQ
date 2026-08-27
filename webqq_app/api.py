@@ -922,6 +922,10 @@ async def handle_send_game(request):
             result = RPS_RESULTS.get(value)
             if not result:
                 return web.json_response({"ok": False, "error": "RPS result must be rock, scissors, or paper"}, status=400)
+        return web.json_response({
+            "ok": False,
+            "error": "NapCat and QQ do not support forced dice or RPS results; choose Random",
+        }, status=400)
     try:
         response = await request.app["napcat"].send_game(chat_id, game, result)
     except Exception as error:

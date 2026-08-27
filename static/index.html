@@ -367,9 +367,9 @@ function showRichMediaPanel(initialView = 'send') {
     } else if (kind.value === 'online-folder') {
       fields.innerHTML = '<label>Online folder<input id="richMediaFolder" type="file" webkitdirectory multiple required></label>';
     } else if (kind.value === 'dice') {
-      fields.innerHTML = '<label>Result<select id="gameResult"><option value="">Random (fair)</option><option value="1">Force 1</option><option value="2">Force 2</option><option value="3">Force 3</option><option value="4">Force 4</option><option value="5">Force 5</option><option value="6">Force 6</option></select></label>';
+      fields.innerHTML = '<label>Result<select id="gameResult"><option value="">Random (QQ determined)</option></select></label>';
     } else if (kind.value === 'rps') {
-      fields.innerHTML = '<label>Result<select id="gameResult"><option value="">Random (fair)</option><option value="rock">Force rock</option><option value="scissors">Force scissors</option><option value="paper">Force paper</option></select></label>';
+      fields.innerHTML = '<label>Result<select id="gameResult"><option value="">Random (QQ determined)</option></select></label>';
     } else if (kind.value === 'contact') {
       fields.innerHTML = `<div class="rich-media-row"><label>Contact type<select id="richContactType"><option value="qq">QQ user</option><option value="group">QQ group</option></select></label><label>QQ ID<input id="richContactId" inputmode="numeric" pattern="[0-9]+" required></label></div>`;
     } else if (kind.value === 'music') {
