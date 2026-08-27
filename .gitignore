@@ -1,6 +1,7 @@
 config.json
 data/
 napcat/
+scripts/
 __pycache__/
 *.pyc
 .env
@@ -8,5 +9,8 @@ plugins/*/
 !plugins/echo/
 !plugins/llm/
 !plugins/td/
+!plugins/anti-revoke/
+plugins/anti-revoke/state.json
+plugins/anti-revoke/state.tmp
 plugins/*/config.json
 !plugins/*/config.json.example

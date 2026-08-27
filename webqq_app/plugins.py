@@ -1,5 +1,5 @@
 from .common import *
-from .messaging import send_forward_and_register, send_text_and_register
+from .messaging import send_forward_and_register, send_segments_and_register, send_text_and_register
 
 class PluginContext:
     def __init__(self, manager, plugin_id, config):
@@ -46,6 +46,19 @@ class PluginContext:
             reply_to=reply_to,
             source=f"plugin:{self.plugin_id}",
             optimistic=True,
+        )
+        return sent["result"]
+
+    async def send_segments(self, chat_id, segments, text="", reply_to=None, timeout=30):
+        sent = await send_segments_and_register(
+            self.manager.napcat,
+            self.manager.store,
+            chat_id,
+            segments,
+            text,
+            reply_to=reply_to,
+            source=f"plugin:{self.plugin_id}",
+            timeout=timeout,
         )
         return sent["result"]
 

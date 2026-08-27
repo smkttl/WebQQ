@@ -1,0 +1,8 @@
+{
+  "id": "anti-revoke",
+  "name": "Anti Revoke",
+  "version": "1.0.0",
+  "description": "Reveals recalled group messages when a user replies with /prev or /next, then recalls the reproduction.",
+  "entry": "main.py",
+  "enabled_by_default": true
+}

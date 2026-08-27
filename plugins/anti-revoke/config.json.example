@@ -1,0 +1,4 @@
+{
+  "recall_delay_seconds": 110,
+  "lookup_limit": 200
+}

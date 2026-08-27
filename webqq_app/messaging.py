@@ -217,6 +217,60 @@ async def send_text_and_register(napcat, store, chat_id, text, reply_to=None, so
     return {"result": result, "message": simplified}
 
 
+async def send_segments_and_register(
+    napcat, store, chat_id, segments, text, reply_to=None, source="user", timeout=30
+):
+    upstream_chat_id = chat_id
+    chat_id = canonical_chat_id(chat_id)
+    parsed_chat = parse_chat_id(chat_id)
+    if not parsed_chat:
+        raise ValueError("invalid chat_id")
+    simplified = make_local_self_message(store, parsed_chat, chat_id, text, reply_to=reply_to, source=source)
+    store.register_pending_local_message(chat_id, simplified)
+    update_chat_after_local_send(store, chat_id, parsed_chat, text, now=simplified["time"])
+    await napcat._broadcast({"type": "new_message", "data": simplified})
+    dispatch_plugin_message_later(napcat, simplified, raw=None)
+    result = await napcat.send_segments(upstream_chat_id, segments, timeout=timeout)
+    if not result or result.get("status") != "ok":
+        err = result.get("wording", result.get("message", "send failed")) if result else "not connected"
+        simplified["pending"] = False
+        simplified["send_error"] = err
+        store._dirty.add(chat_id)
+        await napcat._broadcast({
+            "type": "message_update",
+            "data": {
+                "chat_id": chat_id,
+                "local_id": simplified.get("local_id"),
+                "message": simplified,
+                "patch": {"pending": False, "send_error": err},
+            },
+        })
+        if napcat.plugins:
+            asyncio.create_task(napcat.plugins.dispatch(
+                "message_send_failed",
+                {"message": simplified, "error": err},
+                raw=None,
+            ))
+        raise RuntimeError(err)
+    message_id = extract_message_id(result)
+    simplified["pending"] = False
+    if message_id is not None:
+        simplified["message_id"] = message_id
+        store._reindex_chat(chat_id)
+    store._dirty.add(chat_id)
+    await napcat._broadcast({
+        "type": "message_update",
+        "data": {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "local_id": simplified.get("local_id"),
+            "message": simplified,
+            "patch": {"pending": False},
+        },
+    })
+    return {"result": result, "message": simplified}
+
+
 async def send_forward_and_register(napcat, store, chat_id, nodes, source="user"):
     upstream_chat_id = chat_id
     chat_id = canonical_chat_id(chat_id)
