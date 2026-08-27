@@ -94,7 +94,7 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.segment_sent), 1)
         self.assertEqual(
             ctx.segment_sent[0]["text"],
-            "Sender: @[1] Message Reproduction (Timeout: 110s): The revoked message is: secret text",
+            "Message Reproduction (Timeout: 110s): Sender: @[1] Message: secret text",
         )
         self.assertEqual(ctx.segment_sent[0]["reply_to"], "cmd")
         self.assertEqual(len(plugin.state["pending"]), 1)
@@ -112,7 +112,7 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.segment_sent), 1)
         self.assertEqual(
             ctx.segment_sent[0]["text"],
-            "Sender: @[1] Message Reproduction (Timeout: 110s): The revoked message is: revoked next",
+            "Message Reproduction (Timeout: 110s): Sender: @[1] Message: revoked next",
         )
 
     async def test_next_excludes_the_command_message(self):
@@ -183,7 +183,7 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.segment_sent), 1)
         self.assertEqual(
             ctx.segment_sent[0]["text"],
-            "Sender: @[1] Message Reproduction (Timeout: 110s): The revoked message is: revoked next",
+            "Message Reproduction (Timeout: 110s): Sender: @[1] Message: revoked next",
         )
 
     async def test_private_and_self_messages_are_ignored(self):
@@ -239,13 +239,14 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
         await plugin.handle_event(event(ctx.messages[-1]), ctx)
 
         segments = ctx.segment_sent[0]["segments"]
-        self.assertEqual(segments[0], {"type": "text", "data": {"text": "Sender: "}})
+        self.assertEqual(
+            segments[0],
+            {"type": "text", "data": {"text": "Message Reproduction (Timeout: 110s): Sender: "}},
+        )
         self.assertEqual(segments[1], {"type": "at", "data": {"qq": "1"}})
         self.assertTrue(any(
             segment.get("type") == "text"
-            and segment.get("data", {}).get("text", "").startswith(
-            "Message Reproduction (Timeout: 110s): The revoked message is: "
-            )
+            and "Message: " in segment.get("data", {}).get("text", "")
             for segment in segments
         ))
         self.assertIn({"type": "face", "data": {"id": "478"}}, segments)
@@ -270,7 +271,25 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(segments[1], {"type": "at", "data": {"qq": "42"}})
         self.assertEqual(
             ctx.segment_sent[0]["text"],
-            "Sender: @[42] Message Reproduction (Timeout: 110s): The revoked message is: secret",
+            "Message Reproduction (Timeout: 110s): Sender: @[42] Message: secret",
+        )
+
+    async def test_reproduction_timeout_uses_configured_delay(self):
+        ctx = FakeContext(
+            [
+                message("a", "secret", 100, recalled=True),
+                message("b", "anchor", 101),
+                message("cmd", "[reply:b]/prev", 102),
+            ],
+            config={"recall_delay_seconds": 60},
+        )
+        plugin = self.plugin(ctx)
+
+        await plugin.handle_event(event(ctx.messages[-1]), ctx)
+
+        self.assertEqual(
+            ctx.segment_sent[0]["text"],
+            "Message Reproduction (Timeout: 60s): Sender: @[1] Message: secret",
         )
 
     async def test_unsupported_card_becomes_placeholder(self):

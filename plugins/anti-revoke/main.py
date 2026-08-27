@@ -14,8 +14,7 @@ REPLY_PREFIX_RE = re.compile(r"^\[reply:[^\]]+\]")
 FACE_TOKEN_RE = re.compile(r"\[face:(\d+)\]")
 AT_TOKEN_RE = re.compile(r"@\[(\d+|all)\]")
 
-REPRODUCTION_PREFIX = "Message Reproduction (Timeout: 110s): "
-REVOKED_TEXT = "The revoked message is: "
+MESSAGE_LABEL = "Message: "
 STALE_TEXT = "sorry, the message is too stale"
 NOT_REVOKED_TEXT = "The adjacent message was not revoked"
 NO_ADJACENT_TEXT = "No adjacent message found"
@@ -59,6 +58,10 @@ def _append_text(parts, text):
         parts.append({"type": "text", "data": {"text": text}})
 
 
+def _reproduction_prefix(delay_seconds):
+    return "Message Reproduction (Timeout: {}s): ".format(int(delay_seconds))
+
+
 def _replay_source(item):
     url = str(item.get("url") or "").strip()
     if url.startswith(("http://", "https://", "data:")):
@@ -71,22 +74,20 @@ def _replay_source(item):
     return ""
 
 
-def _build_reproduction_segments(target):
+def _build_reproduction_segments(target, delay_seconds):
     content = REPLY_PREFIX_RE.sub("", str(target.get("content") or ""), count=1)
     content = _strip_placeholders(content)
     segments = _tokenize_content(content)
-    prefix = REPRODUCTION_PREFIX + REVOKED_TEXT
-    if segments and segments[0].get("type") == "text":
-        segments[0]["data"]["text"] = prefix + segments[0]["data"]["text"]
-    else:
-        segments.insert(0, {"type": "text", "data": {"text": prefix}})
     sender_id = str(target.get("sender_id") or "").strip()
     if sender_id:
-        segments = [
-            {"type": "text", "data": {"text": "Sender: "}},
+        header = [
+            {"type": "text", "data": {"text": _reproduction_prefix(delay_seconds) + "Sender: "}},
             {"type": "at", "data": {"qq": sender_id}},
-            {"type": "text", "data": {"text": " "}},
-        ] + segments
+            {"type": "text", "data": {"text": " " + MESSAGE_LABEL}},
+        ]
+    else:
+        header = [{"type": "text", "data": {"text": _reproduction_prefix(delay_seconds) + MESSAGE_LABEL}}]
+    segments = header + segments
 
     for kind, segments_key, segment_type in (
         ("image", "images", "image"),
@@ -320,7 +321,13 @@ class AntiRevokePlugin:
             ctx.log(f"send failed: {error}")
 
     async def _reproduce(self, ctx, chat_id, command_message, target):
-        segments = _build_reproduction_segments(target)
+        try:
+            delay = float(ctx.config.get("recall_delay_seconds", 110))
+        except (TypeError, ValueError):
+            delay = 110
+        if delay <= 0:
+            delay = 110
+        segments = _build_reproduction_segments(target, delay)
         text = _segments_text(segments)
         reply_to = str(command_message.get("message_id") or "") or None
         try:
@@ -332,10 +339,4 @@ class AntiRevokePlugin:
         if message_id is None:
             ctx.log("reproduction sent but its message id is unavailable")
             return
-        try:
-            delay = float(ctx.config.get("recall_delay_seconds", 110))
-        except (TypeError, ValueError):
-            delay = 110
-        if delay <= 0:
-            delay = 110
         self._schedule_recall(chat_id, str(message_id), delay)
