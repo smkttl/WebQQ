@@ -16,8 +16,7 @@ AT_TOKEN_RE = re.compile(r"@\[(\d+|all)\]")
 
 MESSAGE_LABEL = "Message: "
 STALE_TEXT = "sorry, the message is too stale"
-NOT_REVOKED_TEXT = "The adjacent message was not revoked"
-NO_ADJACENT_TEXT = "No adjacent message found"
+NO_REVOKED_TEXT = "No revoked message found"
 NO_QUOTE_TEXT = "Please reply to a message with /prev or /next."
 
 PLACEHOLDER_TOKENS = {
@@ -303,14 +302,12 @@ class AntiRevokePlugin:
             await self._reply(ctx, chat_id, message, STALE_TEXT)
             return
         if direction == "prev":
-            target = real[anchor_index - 1] if anchor_index > 0 else None
+            candidates = reversed(real[:anchor_index])
         else:
-            target = real[anchor_index + 1] if anchor_index + 1 < len(real) else None
+            candidates = real[anchor_index + 1:]
+        target = next((item for item in candidates if item.get("recalled")), None)
         if target is None:
-            await self._reply(ctx, chat_id, message, NO_ADJACENT_TEXT)
-            return
-        if not target.get("recalled"):
-            await self._reply(ctx, chat_id, message, NOT_REVOKED_TEXT)
+            await self._reply(ctx, chat_id, message, NO_REVOKED_TEXT)
             return
         await self._reproduce(ctx, chat_id, message, target)
 

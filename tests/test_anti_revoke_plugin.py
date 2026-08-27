@@ -126,14 +126,32 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ctx.sent, [{
             "chat_id": "group_123",
-            "text": "No adjacent message found",
+            "text": "No revoked message found",
             "reply_to": "cmd",
         }])
         self.assertEqual(ctx.segment_sent, [])
 
-    async def test_not_recalled_target_reports_status(self):
+    async def test_next_skips_non_revoked_and_finds_revoked(self):
         ctx = FakeContext([
-            message("a", "not revoked", 100),
+            message("a", "anchor", 100),
+            message("x", "not revoked", 101),
+            message("y", "revoked after gap", 102, recalled=True),
+            message("cmd", "[reply:a]/next", 103),
+        ])
+        plugin = self.plugin(ctx)
+
+        await plugin.handle_event(event(ctx.messages[-1]), ctx)
+
+        self.assertEqual(len(ctx.segment_sent), 1)
+        self.assertEqual(
+            ctx.segment_sent[0]["text"],
+            "Message Reproduction (Timeout: 110s): Sender: @[1] Message: revoked after gap",
+        )
+
+    async def test_prev_skips_non_revoked_and_finds_revoked(self):
+        ctx = FakeContext([
+            message("x", "revoked before gap", 99, recalled=True),
+            message("m", "not revoked", 100),
             message("b", "anchor", 101),
             message("cmd", "[reply:b]/prev", 102),
         ])
@@ -141,13 +159,13 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
 
         await plugin.handle_event(event(ctx.messages[-1]), ctx)
 
-        self.assertEqual(ctx.sent, [{
-            "chat_id": "group_123",
-            "text": "The adjacent message was not revoked",
-            "reply_to": "cmd",
-        }])
+        self.assertEqual(len(ctx.segment_sent), 1)
+        self.assertEqual(
+            ctx.segment_sent[0]["text"],
+            "Message Reproduction (Timeout: 110s): Sender: @[1] Message: revoked before gap",
+        )
 
-    async def test_no_adjacent_message_reports_status(self):
+    async def test_no_revoked_message_reports_status(self):
         ctx = FakeContext([
             message("a", "anchor", 100),
             message("cmd", "[reply:a]/prev", 101),
@@ -156,7 +174,7 @@ class AntiRevokePluginTests(unittest.IsolatedAsyncioTestCase):
 
         await plugin.handle_event(event(ctx.messages[-1]), ctx)
 
-        self.assertEqual(ctx.sent[0]["text"], "No adjacent message found")
+        self.assertEqual(ctx.sent[0]["text"], "No revoked message found")
 
     async def test_missing_anchor_uses_exact_stale_message(self):
         ctx = FakeContext([
