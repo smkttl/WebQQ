@@ -187,6 +187,22 @@ class LlmPlugin:
             return []
         return [str(item) for item in prefixes if str(item)]
 
+    def _persona_prompts(self, chat_id):
+        prompts = []
+        common = str(self.ctx.config.get("persona_prompt") or "").strip()
+        if common:
+            prompts.append(common)
+        chat_id = str(chat_id or "")
+        if chat_id.startswith("group_"):
+            group = str(self.ctx.config.get("persona_prompt_group") or "").strip()
+            if group:
+                prompts.append(group)
+        elif chat_id.startswith("private_"):
+            private = str(self.ctx.config.get("persona_prompt_private") or "").strip()
+            if private:
+                prompts.append(private)
+        return prompts
+
     def _mentioned(self, message, event):
         if not bool(self.ctx.config.get("reply_to_mentions", True)):
             return False
@@ -223,7 +239,25 @@ class LlmPlugin:
                 await self._send(message["chat_id"], "LLM is not configured: missing api_key.")
             return
 
-        llm_messages = await self._build_messages(message, prompt)
+        simple_mode = bool(self.ctx.config.get("simple_mode", False))
+        llm_messages = await self._build_messages(message, prompt, simple=simple_mode)
+        if simple_mode:
+            try:
+                text = await self._call_llm(api_key, llm_messages)
+            except Exception as e:
+                self.ctx.log(f"llm request failed: {e}")
+                if self.ctx.config.get("send_errors_to_chat"):
+                    await self._send(message["chat_id"], f"LLM request failed: {e}")
+                return
+            lines = [line.strip() for line in str(text or "").splitlines()]
+            lines = [line for line in lines if line]
+            if not lines:
+                self.ctx.log("ignored empty LLM output")
+                return
+            for line in lines:
+                await self._send(message["chat_id"], line)
+            return
+
         oracle_rounds = 0
         max_oracle_rounds = self._int_config("max_oracle_rounds", 2, minimum=0)
         force_no_oracle = False
@@ -331,9 +365,14 @@ class LlmPlugin:
             self.ctx.log(f"repair produced invalid output: {repaired[:300]!r}")
         return actions
 
-    async def _build_messages(self, trigger_message, prompt):
+    async def _build_messages(self, trigger_message, prompt, simple=False):
+        if simple:
+            return await self._build_simple_messages(trigger_message, prompt)
+
         messages = []
-        for prompt_key in ("persona_prompt", "reply_prompt", "system_prompt"):
+        for persona_prompt in self._persona_prompts(trigger_message.get("chat_id") or ""):
+            messages.append({"role": "system", "content": persona_prompt})
+        for prompt_key in ("reply_prompt", "system_prompt"):
             system_prompt = str(self.ctx.config.get(prompt_key) or "").strip()
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
@@ -416,6 +455,79 @@ class LlmPlugin:
 
         messages.append({"role": "system", "content": self._current_time_note()})
         return self._trim_messages(messages)
+
+    async def _build_simple_messages(self, trigger_message, prompt):
+        sections = []
+        sections.extend(self._persona_prompts(trigger_message.get("chat_id") or ""))
+        system_prompt = str(self.ctx.config.get("system_prompt") or "").strip()
+        if system_prompt:
+            sections.append(system_prompt)
+        sections.append(
+            "Reply directly with plain chat text only. Do not output JSON, action arrays, "
+            "oracle questions, or markdown code fences. Use one line per message: each line "
+            "you output will be sent to the chat as a separate message. Match the chat "
+            "language and tone."
+        )
+        sections.append(self._current_time_note())
+
+        chat_id = trigger_message["chat_id"]
+        guidance = self._runtime_guidance(chat_id)
+        if guidance:
+            guidance_lines = [
+                f"{index + 1}. {item.get('text') or ''}"
+                for index, item in enumerate(guidance)
+            ]
+            sections.append("Runtime guidance:\n" + "\n".join(guidance_lines))
+
+        history_limit = self._int_config("history_limit", 30, minimum=1)
+        history = self.ctx.get_messages(chat_id, limit=history_limit)
+        trigger_id = str(trigger_message.get("message_id") or "")
+        appended_trigger = False
+        timeline = []
+
+        for item in history:
+            is_trigger = trigger_id and str(item.get("message_id") or "") == trigger_id
+            content = self._history_content(item, prompt if is_trigger else None)
+            if not content:
+                continue
+            if is_trigger:
+                appended_trigger = True
+            timeline.append({
+                "time": self._item_time(item),
+                "order": len(timeline),
+                "item": item,
+                "content": content,
+            })
+
+        if not appended_trigger:
+            content = self._history_content(trigger_message, prompt)
+            timeline.append({
+                "time": self._item_time(trigger_message),
+                "order": len(timeline),
+                "item": trigger_message,
+                "content": content,
+            })
+
+        history_lines = []
+        for entry in sorted(timeline, key=lambda entry: (entry["time"], entry["order"])):
+            item = entry["item"]
+            content = entry["content"]
+            message_id = item.get("message_id") or 0
+            is_self = bool(item.get("self")) or str(item.get("source") or "").startswith("plugin:")
+            if is_self:
+                history_lines.append(f"(message_id={message_id}) You: {content}")
+            else:
+                history_lines.append(f"(message_id={message_id}) {self._sender_label(item)}: {content}")
+        if history_lines:
+            sections.append("Recent chat history:\n" + "\n".join(history_lines))
+
+        prompt_text = "\n\n".join(sections)
+        image_parts = await self._trigger_image_parts(trigger_message)
+        if image_parts:
+            content = [{"type": "text", "text": prompt_text}] + image_parts
+        else:
+            content = prompt_text
+        return [{"role": "user", "content": content}]
 
     @staticmethod
     def _item_time(item):
