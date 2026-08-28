@@ -24,6 +24,38 @@ SUPPORTED_IMAGE_TYPES = {
     "image/png",
     "image/webp",
 }
+DEFAULT_RUNTIME_GUIDANCE_TTL_SECONDS = 7 * 24 * 60 * 60
+SIMPLE_OUTPUT_INSTRUCTION = (
+    "像群友一样续聊，只输出回复正文；每行一条消息，不要 JSON、Markdown 或解释，"
+    "回复不要带自己的标签。\n"
+    "群聊记录的行首是发言者；需要 @ 某人时可复制其 @[uid](昵称) 标签。"
+)
+FIXED_REFUSAL_NORMALIZED = {
+    "抱歉我无法回答这个问题",
+    "抱歉我无法回答你的问题",
+    "抱歉我暂时无法回答这个问题",
+    "抱歉我暂时无法回答你的问题",
+    "对不起我无法回答这个问题",
+    "对不起我无法回答你的问题",
+    "对不起我暂时无法回答这个问题",
+    "对不起我暂时无法回答你的问题",
+    "抱歉我不能回答这个问题",
+    "对不起我不能回答这个问题",
+    "我无法回答这个问题",
+    "我无法回答你的问题",
+    "我不能回答这个问题",
+    "作为ai我无法回答这个问题",
+    "作为ai我无法回答你的问题",
+    "作为人工智能我无法回答这个问题",
+    "作为人工智能我无法回答你的问题",
+    "我是ai助手我无法回答这个问题",
+    "我是ai无法回答这个问题",
+    "这个问题我无法回答",
+    "这个问题超出了我的能力范围",
+    "这个问题超出我的能力范围",
+    "抱歉我无法满足这个要求",
+    "对不起我无法满足这个要求",
+}
 
 
 class LlmRequestError(RuntimeError):
@@ -43,6 +75,8 @@ class LlmPlugin:
         self._active_oracles = 0
         self._active_lock = asyncio.Lock()
         self._oracle_lock = asyncio.Lock()
+        self._first_pass_fixed_refusals = 0
+        self._retry_fixed_refusals = 0
 
     def _create_task(self, coroutine):
         creator = getattr(self.ctx, "create_task", None)
@@ -97,11 +131,14 @@ class LlmPlugin:
             return
 
         guidance = self._runtime_guidance()
-        guidance.append({
+        guidance_entry = {
             "time": int(time.time()),
             "chat_id": chat_id,
             "text": text,
-        })
+        }
+        if not bool((message or {}).get("persistent")):
+            guidance_entry["expires_at"] = int(time.time()) + DEFAULT_RUNTIME_GUIDANCE_TTL_SECONDS
+        guidance.append(guidance_entry)
         limit = self._int_config("runtime_guidance_limit", 50, minimum=1)
         self.ctx.config["runtime_guidance"] = guidance[-limit:]
         self._save_config()
@@ -240,24 +277,11 @@ class LlmPlugin:
             return
 
         simple_mode = bool(self.ctx.config.get("simple_mode", False))
-        llm_messages = await self._build_messages(message, prompt, simple=simple_mode)
         if simple_mode:
-            try:
-                text = await self._call_llm(api_key, llm_messages)
-            except Exception as e:
-                self.ctx.log(f"llm request failed: {e}")
-                if self.ctx.config.get("send_errors_to_chat"):
-                    await self._send(message["chat_id"], f"LLM request failed: {e}")
-                return
-            lines = [line.strip() for line in str(text or "").splitlines()]
-            lines = [line for line in lines if line]
-            if not lines:
-                self.ctx.log("ignored empty LLM output")
-                return
-            for line in lines:
-                await self._send(message["chat_id"], line)
+            await self._simple_reply(message, prompt, api_key)
             return
 
+        llm_messages = await self._build_messages(message, prompt)
         oracle_rounds = 0
         max_oracle_rounds = self._int_config("max_oracle_rounds", 2, minimum=0)
         force_no_oracle = False
@@ -304,6 +328,60 @@ class LlmPlugin:
             for action in oracle_actions:
                 oracle_notes.append(await self._run_oracle_action(llm_messages, action))
             llm_messages.extend(oracle_notes)
+
+    async def _simple_reply(self, message, prompt, api_key):
+        lines = await self._simple_llm_lines(message, prompt, api_key)
+        if lines is None:
+            return
+        if self._fixed_refusal_lines(lines):
+            self._first_pass_fixed_refusals += 1
+            self.ctx.log("simple first-pass fixed refusal; retrying without refusal history")
+            lines = await self._simple_llm_lines(message, prompt, api_key)
+            if lines is None:
+                return
+            if self._fixed_refusal_lines(lines):
+                self._retry_fixed_refusals += 1
+                self.ctx.log("simple retry produced fixed refusal; reply suppressed")
+                return
+
+        quote = self._simple_reply_to(message)
+        for index, line in enumerate(lines):
+            kwargs = {"reply_to": quote} if index == 0 and quote else {}
+            await self._send(message["chat_id"], line, **kwargs)
+
+    async def _simple_llm_lines(self, message, prompt, api_key):
+        llm_messages = await self._build_messages(message, prompt, simple=True)
+        try:
+            text = await self._call_llm(api_key, llm_messages, simple=True)
+        except Exception as e:
+            self.ctx.log(f"llm request failed: {e}")
+            if self.ctx.config.get("send_errors_to_chat"):
+                await self._send(message["chat_id"], f"LLM request failed: {e}")
+            return None
+        lines = self._simple_output_lines(text)
+        if not lines:
+            self.ctx.log("ignored empty LLM output")
+            return None
+        return lines
+
+    @staticmethod
+    def _simple_output_lines(text):
+        lines = [line.strip() for line in str(text or "").splitlines()]
+        return [line for line in lines if line]
+
+    @classmethod
+    def _fixed_refusal_lines(cls, lines):
+        return any(cls._is_fixed_refusal(line) for line in lines)
+
+    def _simple_reply_to(self, message):
+        if not bool(self.ctx.config.get("simple_reply_to_trigger", True)):
+            return None
+        chat_type = str(message.get("type") or "")
+        chat_id = str(message.get("chat_id") or "")
+        is_private = chat_type == "private" or chat_id.startswith("private_")
+        if is_private:
+            return None
+        return self._positive_decimal(message.get("message_id"))
 
     async def _reply_to_portal_guidance(self, portal_message, guidance_text):
         chat_id = str((portal_message or {}).get("chat_id") or "").strip()
@@ -457,77 +535,160 @@ class LlmPlugin:
         return self._trim_messages(messages)
 
     async def _build_simple_messages(self, trigger_message, prompt):
-        sections = []
-        sections.extend(self._persona_prompts(trigger_message.get("chat_id") or ""))
-        system_prompt = str(self.ctx.config.get("system_prompt") or "").strip()
-        if system_prompt:
-            sections.append(system_prompt)
-        sections.append(
-            "Reply directly with plain chat text only. Do not output JSON, action arrays, "
-            "oracle questions, or markdown code fences. Use one line per message: each line "
-            "you output will be sent to the chat as a separate message. Match the chat "
-            "language and tone."
-        )
-        sections.append(self._current_time_note())
-
-        chat_id = trigger_message["chat_id"]
-        guidance = self._runtime_guidance(chat_id)
-        if guidance:
-            guidance_lines = [
-                f"{index + 1}. {item.get('text') or ''}"
-                for index, item in enumerate(guidance)
-            ]
-            sections.append("Runtime guidance:\n" + "\n".join(guidance_lines))
-
-        history_limit = self._int_config("history_limit", 30, minimum=1)
+        chat_id = str(trigger_message.get("chat_id") or "")
+        chat_type = str(trigger_message.get("type") or "")
+        history_limit = self._int_config("simple_history_limit", 15, minimum=1)
         history = self.ctx.get_messages(chat_id, limit=history_limit)
         trigger_id = str(trigger_message.get("message_id") or "")
-        appended_trigger = False
+        trigger = None
         timeline = []
 
         for item in history:
-            is_trigger = trigger_id and str(item.get("message_id") or "") == trigger_id
-            content = self._history_content(item, prompt if is_trigger else None)
-            if not content:
+            if trigger_id and str(item.get("message_id") or "") == trigger_id:
+                trigger = item
                 continue
-            if is_trigger:
-                appended_trigger = True
+            content = self._history_content(item)
+            if not content or self._is_fixed_refusal(content):
+                continue
             timeline.append({
                 "time": self._item_time(item),
                 "order": len(timeline),
                 "item": item,
                 "content": content,
+                "rendered": self._simple_sender_prefix(item) + content,
             })
 
-        if not appended_trigger:
-            content = self._history_content(trigger_message, prompt)
-            timeline.append({
-                "time": self._item_time(trigger_message),
-                "order": len(timeline),
-                "item": trigger_message,
-                "content": content,
-            })
+        if trigger is None:
+            trigger = trigger_message
+        trigger_content = self._history_content(trigger, prompt)
+        trigger_rendered = self._simple_sender_prefix(trigger) + trigger_content
+        trigger_section = "要回复的消息：\n" + trigger_rendered
 
-        history_lines = []
-        for entry in sorted(timeline, key=lambda entry: (entry["time"], entry["order"])):
-            item = entry["item"]
-            content = entry["content"]
-            message_id = item.get("message_id") or 0
-            is_self = bool(item.get("self")) or str(item.get("source") or "").startswith("plugin:")
-            if is_self:
-                history_lines.append(f"(message_id={message_id}) You: {content}")
-            else:
-                history_lines.append(f"(message_id={message_id}) {self._sender_label(item)}: {content}")
-        if history_lines:
-            sections.append("Recent chat history:\n" + "\n".join(history_lines))
+        max_history_chars = self._int_config("simple_history_max_chars", 800, minimum=1)
+        selected_history = []
+        used_chars = 0
+        for entry in reversed(timeline):
+            if len(selected_history) >= history_limit:
+                break
+            entry_chars = len(entry["rendered"])
+            if used_chars + entry_chars > max_history_chars:
+                break
+            selected_history.append(entry)
+            used_chars += entry_chars
+        selected_history.reverse()
 
-        prompt_text = "\n\n".join(sections)
+        sections = []
+        sections.extend(self._persona_prompts(chat_id))
+        system_prompt = str(self.ctx.config.get("system_prompt") or "").strip()
+        if system_prompt:
+            sections.append(system_prompt)
+        sections.append(SIMPLE_OUTPUT_INSTRUCTION)
+        sections.append(self._current_time_note(simple=True))
+        core = "\n\n".join(sections)
+
+        max_prompt_chars = self._int_config("max_prompt_chars", 12000, minimum=1000)
+        if len(core) + 2 + len(trigger_section) > max_prompt_chars:
+            self.ctx.log(
+                "simple prompt trigger exceeds max_prompt_chars: "
+                f"{len(core) + 2 + len(trigger_section)}"
+            )
+            return await self._simple_content_message(
+                f"{core}\n\n{trigger_section}",
+                trigger_message,
+            )
+
+        middle_limit = max_prompt_chars - len(core) - len(trigger_section) - 4
+        guidance = self._runtime_guidance(chat_id)
+        guidance_lines = [
+            f"{index + 1}. {item.get('text') or ''}"
+            for index, item in enumerate(guidance)
+        ]
+        guidance_block = self._trim_simple_block("实时指导：", guidance_lines, middle_limit, prefix="- ")
+        if guidance_block:
+            middle_limit -= len(guidance_block) + 2
+
+        history_header = "最近群聊：" if chat_type == "group" or chat_id.startswith("group_") else "最近消息："
+        history_block = self._trim_simple_block(
+            history_header,
+            [entry["rendered"] for entry in selected_history],
+            middle_limit,
+            prefix="",
+        )
+
+        parts = [core]
+        if guidance_block:
+            parts.append(guidance_block)
+        if history_block:
+            parts.append(history_block)
+        parts.append(trigger_section)
+        prompt_text = "\n\n".join(parts)
+        self.ctx.log(f"simple prompt chars: {len(prompt_text)}")
+        return await self._simple_content_message(prompt_text, trigger_message)
+
+    async def _simple_content_message(self, prompt_text, trigger_message):
         image_parts = await self._trigger_image_parts(trigger_message)
         if image_parts:
             content = [{"type": "text", "text": prompt_text}] + image_parts
         else:
             content = prompt_text
         return [{"role": "user", "content": content}]
+
+    @classmethod
+    def _trim_simple_block(cls, header, lines, limit, prefix="- "):
+        if not lines or len(header) + 1 > limit:
+            return ""
+        selected = []
+        used = 0
+        for line in reversed(lines):
+            item = prefix + line
+            if selected and used + len(item) + 1 > limit - len(header):
+                break
+            selected.append(item)
+            used += len(item) + 1
+        selected.reverse()
+        if not selected:
+            return ""
+        block = header + "\n" + "\n".join(selected)
+        return block if len(block) <= limit else ""
+
+    @staticmethod
+    def _simple_sender_prefix(message):
+        is_self = bool(message.get("self")) or str(message.get("source") or "").startswith("plugin:")
+        if is_self:
+            return "You: "
+        name = LlmPlugin._normalize_sender_name(message.get("sender_name"))
+        uid = LlmPlugin._positive_decimal(
+            message.get("sender_id") or message.get("user_id") or message.get("qid")
+        )
+        if uid and name:
+            safe_name = name.replace("(", "（").replace(")", "）")
+            return f"@[{uid}]({safe_name}): "
+        if uid:
+            return f"@[{uid}]: "
+        if name:
+            return f"{name}: "
+        return "User: "
+
+    @staticmethod
+    def _normalize_sender_name(value):
+        return " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+
+    @staticmethod
+    def _positive_decimal(value):
+        text = str(value or "").strip()
+        return text if re.fullmatch(r"[1-9][0-9]*", text) else None
+
+    @staticmethod
+    def _normalize_plain_text(text):
+        return re.sub(
+            r"[\s\u3000，。！？!?、；;:：（）()【】\[\]\-—…]+",
+            "",
+            str(text or ""),
+        ).lower()
+
+    @classmethod
+    def _is_fixed_refusal(cls, text):
+        return cls._normalize_plain_text(text) in FIXED_REFUSAL_NORMALIZED
 
     @staticmethod
     def _item_time(item):
@@ -758,8 +919,10 @@ class LlmPlugin:
         return datetime.fromtimestamp(timestamp, CST).strftime("%Y-%m-%d %H:%M:%S CST (UTC+8)")
 
     @staticmethod
-    def _current_time_note():
+    def _current_time_note(simple=False):
         current = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S CST (UTC+8)")
+        if simple:
+            return f"现在：{datetime.now(CST).strftime('%Y-%m-%d %H:%M')}（UTC+8）"
         return f"Current time: {current}"
 
     @classmethod
@@ -914,25 +1077,42 @@ class LlmPlugin:
             return []
         guidance = []
         chat_id = str(chat_id or "")
-        for item in raw:
+        now = time.time()
+        seen = set()
+        for item in reversed(raw):
             if isinstance(item, str):
                 text = item.strip()
                 if text and not chat_id:
-                    guidance.append({"time": 0, "chat_id": "", "text": text})
+                    key = self._normalize_plain_text(text)
+                    if key not in seen:
+                        seen.add(key)
+                        guidance.append({"time": 0, "chat_id": "", "text": text})
                 continue
             if not isinstance(item, dict):
                 continue
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
+            expires_at = item.get("expires_at")
+            if expires_at is not None:
+                try:
+                    if float(expires_at) <= now:
+                        continue
+                except (TypeError, ValueError):
+                    continue
             item_chat_id = str(item.get("chat_id") or "")
             if chat_id and item_chat_id != chat_id:
                 continue
+            key = self._normalize_plain_text(text)
+            if key in seen:
+                continue
+            seen.add(key)
             guidance.append({
                 "time": item.get("time") or 0,
                 "chat_id": item_chat_id,
                 "text": text,
             })
+        guidance.reverse()
         return guidance
 
     def _save_config(self):
@@ -952,9 +1132,9 @@ class LlmPlugin:
             self.ctx.log(f"cannot save runtime guidance: {e}")
             return False
 
-    async def _call_llm(self, api_key, messages):
+    async def _call_llm(self, api_key, messages, simple=False):
         try:
-            return await self._post_llm(api_key, messages)
+            return await self._post_llm(api_key, messages, simple=simple)
         except LlmRequestError as error:
             if error.status not in IMAGE_FALLBACK_STATUSES or not self._messages_have_images(messages):
                 raise
@@ -962,19 +1142,12 @@ class LlmPlugin:
                 f"model rejected multimodal input with HTTP {error.status}; retrying without images"
             )
             messages[:] = self._without_images(messages)
-            return await self._post_llm(api_key, messages)
+            return await self._post_llm(api_key, messages, simple=simple)
 
-    async def _post_llm(self, api_key, messages):
+    async def _post_llm(self, api_key, messages, simple=False):
         base_url = str(self.ctx.config.get("base_url") or "https://api.openai.com/v1").rstrip("/") + "/"
         url = urljoin(base_url, "chat/completions")
-        payload = {
-            "model": str(self.ctx.config.get("model") or "").strip(),
-            "messages": messages,
-            "temperature": self._float_config("temperature", 0.7),
-            "max_tokens": self._int_config("max_tokens", 800, minimum=1),
-        }
-        if not payload["model"]:
-            raise ValueError("model is missing")
+        payload = self._chat_payload(messages, simple=simple)
 
         timeout = aiohttp.ClientTimeout(total=self._float_config("timeout_seconds", 60, minimum=1))
         headers = {
@@ -987,6 +1160,20 @@ class LlmPlugin:
                 if resp.status >= 400:
                     raise LlmRequestError(resp.status, self._error_text(data, resp.status))
         return self._extract_response_text(data)
+
+    def _chat_payload(self, messages, simple=False):
+        payload = {
+            "model": str(self.ctx.config.get("model") or "").strip(),
+            "messages": messages,
+            "temperature": self._float_config("temperature", 0.7),
+        }
+        if not payload["model"]:
+            raise ValueError("model is missing")
+        if simple:
+            payload["max_tokens"] = self._int_config("simple_max_tokens", 96, minimum=1)
+        else:
+            payload["max_tokens"] = self._int_config("max_tokens", 800, minimum=1)
+        return payload
 
     async def _run_oracle_action(self, llm_messages, action):
         question = self._clean_reply_text(action.get("question") or "")
