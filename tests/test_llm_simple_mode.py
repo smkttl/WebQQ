@@ -354,6 +354,74 @@ class LlmSimpleModeReplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.ctx.sent, [("group_1", "hello", {})])
 
+    async def test_mention_only_output_sends_nothing(self):
+        self.plugin._call_llm = AsyncMock(return_value="@[857005487]")
+
+        await self.plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(self.ctx.sent, [])
+        self.assertTrue(any("empty" in item for item in self.ctx.logs))
+
+    async def test_named_mention_only_output_sends_nothing(self):
+        self.plugin._call_llm = AsyncMock(return_value="  @[857005487](colin1112)   ")
+
+        await self.plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(self.ctx.sent, [])
+        self.assertTrue(any("empty" in item for item in self.ctx.logs))
+
+    async def test_multiple_mention_only_line_sends_nothing(self):
+        self.plugin._call_llm = AsyncMock(return_value="@[1](A) @[2](B)")
+
+        await self.plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(self.ctx.sent, [])
+        self.assertTrue(any("empty" in item for item in self.ctx.logs))
+
+    async def test_multiline_mention_only_lines_are_skipped(self):
+        self.plugin._call_llm = AsyncMock(return_value="@[1]\n  @[2](B)  \nhello")
+
+        await self.plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(self.ctx.sent, [("group_1", "hello", {"reply_to": "42"})])
+
+    async def test_first_valid_line_after_mention_gets_quote(self):
+        self.plugin._call_llm = AsyncMock(return_value="@[857005487]\nhello")
+
+        await self.plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(self.ctx.sent, [("group_1", "hello", {"reply_to": "42"})])
+
+    async def test_mention_with_text_is_sent(self):
+        self.plugin._call_llm = AsyncMock(return_value="@[857005487] 不知道")
+
+        await self.plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(self.ctx.sent, [("group_1", "@[857005487] 不知道", {"reply_to": "42"})])
+
+    async def test_mention_label_with_text_is_sent(self):
+        self.plugin._call_llm = AsyncMock(return_value="@[857005487](colin1112): 炸完了")
+
+        await self.plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(self.ctx.sent, [("group_1", "@[857005487](colin1112): 炸完了", {"reply_to": "42"})])
+
+    async def test_full_mode_keeps_mention_only_action_text(self):
+        ctx = FakeContext({
+            "simple_mode": False,
+            "send_errors_to_chat": False,
+            "api_key": "test-key",
+            "model": "test-model",
+        }, [self.trigger])
+        plugin = LlmPlugin(ctx)
+        plugin._call_llm = AsyncMock(
+            return_value='[{"type":"message","reply_to":0,"text":"@[857005487]"}]'
+        )
+
+        await plugin._reply(self.trigger, "hi")
+
+        self.assertEqual(ctx.sent, [("group_1", "@[857005487]", {})])
+
     async def test_portal_guidance_remains_unquoted(self):
         portal_trigger = {
             "chat_id": "group_1",

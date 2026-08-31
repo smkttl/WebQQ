@@ -14,6 +14,7 @@ from webqq_app.common import image_url_allowed
 from webqq_app.mentions import MENTION_RE, format_mentions_for_agent
 
 REPLY_RE = re.compile(r"^\[reply:[^\]]+\]")
+PURE_QQ_MENTION_LINE_RE = re.compile(r"(?:@\[\d+\](?:\([^()\r\n]*\))?\s*)+")
 LEAKED_MESSAGE_ID_RE = re.compile(r"\s*[\(（]?\s*(?:message_id|消息\s*ID|消息id|消息编号)\s*[=:：]?\s*(\d+)\s*[\)）]?\s*", re.IGNORECASE)
 CST = timezone(timedelta(hours=8), name="CST")
 MAX_FORWARD_DEPTH = 4
@@ -367,7 +368,15 @@ class LlmPlugin:
     @staticmethod
     def _simple_output_lines(text):
         lines = [line.strip() for line in str(text or "").splitlines()]
-        return [line for line in lines if line]
+        return [
+            line
+            for line in lines
+            if line and not LlmPlugin._is_pure_mention_line(line)
+        ]
+
+    @classmethod
+    def _is_pure_mention_line(cls, line):
+        return bool(line and PURE_QQ_MENTION_LINE_RE.fullmatch(line.strip()))
 
     @classmethod
     def _fixed_refusal_lines(cls, lines):
