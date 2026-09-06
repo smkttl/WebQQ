@@ -475,6 +475,7 @@ class LlmPlugin:
             "role": "system",
             "content": "Prior assistant messages may be shown as canonical JSON action arrays. Treat them as examples of the correct output format.",
         })
+        messages.append({"role": "system", "content": self._current_time_note()})
 
         history_limit = self._int_config("history_limit", 30, minimum=1)
         history = self.ctx.get_messages(chat_id, limit=history_limit)
@@ -540,7 +541,6 @@ class LlmPlugin:
                     content = [{"type": "text", "text": content}] + image_parts
             messages.append({"role": role, "content": content})
 
-        messages.append({"role": "system", "content": self._current_time_note()})
         return self._trim_messages(messages)
 
     async def _build_simple_messages(self, trigger_message, prompt):
@@ -1173,7 +1173,7 @@ class LlmPlugin:
     def _chat_payload(self, messages, simple=False):
         payload = {
             "model": str(self.ctx.config.get("model") or "").strip(),
-            "messages": messages,
+            "messages": self._system_messages_first(messages),
             "temperature": self._float_config("temperature", 0.7),
         }
         if not payload["model"]:
@@ -1183,6 +1183,12 @@ class LlmPlugin:
         else:
             payload["max_tokens"] = self._int_config("max_tokens", 800, minimum=1)
         return payload
+
+    @staticmethod
+    def _system_messages_first(messages):
+        systems = [item for item in messages if item.get("role") == "system"]
+        others = [item for item in messages if item.get("role") != "system"]
+        return systems + others
 
     async def _run_oracle_action(self, llm_messages, action):
         question = self._clean_reply_text(action.get("question") or "")

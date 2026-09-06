@@ -78,6 +78,44 @@ class LlmSimpleModeMessageTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("canonical JSON action arrays", system_text)
 
+    async def test_build_messages_puts_all_system_messages_before_history(self):
+        trigger = message(2, content="hi")
+        plugin = LlmPlugin(FakeContext({}, [trigger]))
+
+        messages = await plugin._build_messages(trigger, "hi")
+        roles = [item["role"] for item in messages]
+        first_chat_message = next(
+            index for index, role in enumerate(roles) if role != "system"
+        )
+
+        self.assertNotIn("system", roles[first_chat_message + 1:])
+        self.assertIn(
+            "Current time",
+            "\n".join(
+                item["content"]
+                for item in messages[:first_chat_message]
+            ),
+        )
+
+    async def test_chat_payload_moves_late_system_messages_to_front(self):
+        plugin = LlmPlugin(FakeContext({"model": "test-model"}, []))
+        messages = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "system", "content": "Oracle round limit reached."},
+        ]
+
+        payload = plugin._chat_payload(messages)
+
+        self.assertEqual(
+            payload["messages"],
+            [
+                {"role": "system", "content": "Oracle round limit reached."},
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ],
+        )
+
     async def test_build_messages_simple_is_single_user_message(self):
         trigger = message(2, content="hi")
         plugin = LlmPlugin(FakeContext({
