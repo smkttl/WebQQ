@@ -110,9 +110,34 @@ class LlmSimpleModeMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["messages"],
             [
-                {"role": "system", "content": "Oracle round limit reached."},
+                {
+                    "role": "system",
+                    "content": "Oracle round limit reached.",
+                },
                 {"role": "user", "content": "question"},
                 {"role": "assistant", "content": "answer"},
+            ],
+        )
+
+    async def test_chat_payload_coalesces_system_messages_for_strict_models(self):
+        plugin = LlmPlugin(FakeContext({"model": "test-model"}, []))
+        messages = [
+            {"role": "system", "content": "persona"},
+            {"role": "system", "content": "output rules"},
+            {"role": "user", "content": "question"},
+            {"role": "system", "content": "oracle note"},
+        ]
+
+        payload = plugin._chat_payload(messages)
+
+        self.assertEqual(
+            payload["messages"],
+            [
+                {
+                    "role": "system",
+                    "content": "persona\n\noutput rules\n\noracle note",
+                },
+                {"role": "user", "content": "question"},
             ],
         )
 

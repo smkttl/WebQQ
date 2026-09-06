@@ -1186,9 +1186,19 @@ class LlmPlugin:
 
     @staticmethod
     def _system_messages_first(messages):
-        systems = [item for item in messages if item.get("role") == "system"]
+        systems = [
+            LlmPlugin._content_text(item.get("content"))
+            for item in messages
+            if item.get("role") == "system"
+        ]
+        systems = [text for text in systems if text]
         others = [item for item in messages if item.get("role") != "system"]
-        return systems + others
+        if not systems:
+            return others
+        return [{
+            "role": "system",
+            "content": "\n\n".join(systems),
+        }] + others
 
     async def _run_oracle_action(self, llm_messages, action):
         question = self._clean_reply_text(action.get("question") or "")
