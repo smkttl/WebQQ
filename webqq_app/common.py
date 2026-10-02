@@ -60,12 +60,33 @@ DEFAULT_CONFIG = {
 }
 
 
+MAX_PRIVATE_ID_LEN = 128
+_PRIVATE_ID_FORBIDDEN = frozenset("/\\[]()")
+
+
+def is_private_openid(value):
+    """Official QQ OpenIDs are opaque tokens safe to embed in chat ids."""
+    if not isinstance(value, str) or not value or len(value) > MAX_PRIVATE_ID_LEN:
+        return False
+    for ch in value:
+        if ch.isspace() or ch in _PRIVATE_ID_FORBIDDEN or ord(ch) < 0x21 or ord(ch) == 0x7F:
+            return False
+    return True
+
+
 def parse_chat_id(chat_id):
     if not isinstance(chat_id, str):
         return None
+    if chat_id.startswith("private_"):
+        suffix = chat_id[len("private_"):]
+        if suffix.isdigit():
+            return {"type": "private", "private_id": int(suffix)}
+        if is_private_openid(suffix):
+            return {"type": "private", "private_id": suffix}
+        return None
     parts = chat_id.split("_")
-    if len(parts) == 2 and parts[0] in ("group", "private") and parts[1].isdigit():
-        return {"type": parts[0], f"{parts[0]}_id": int(parts[1])}
+    if len(parts) == 2 and parts[0] == "group" and parts[1].isdigit():
+        return {"type": "group", "group_id": int(parts[1])}
     if len(parts) == 3 and parts[0] == "temp" and parts[1].isdigit() and parts[2].isdigit():
         return {"type": "temp", "group_id": int(parts[1]), "user_id": int(parts[2])}
     return None

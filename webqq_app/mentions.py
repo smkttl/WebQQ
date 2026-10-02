@@ -1,7 +1,9 @@
 import re
 
 
-MENTION_PATTERN = r"@\[(\d+)\](?:\(([^)\r\n]*)\))?"
+# Numeric QQ ids and opaque official-OpenID tokens; excludes brackets,
+# parentheses and control characters so tokens stay unambiguous.
+MENTION_PATTERN = r"@\[([^\[\]\(\)\s]+)\](?:\(([^)\r\n]*)\))?"
 MENTION_RE = re.compile(MENTION_PATTERN)
 
 

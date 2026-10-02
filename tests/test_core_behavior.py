@@ -46,6 +46,18 @@ class ChatIdTests(unittest.TestCase):
         for chat_id in ("", "group_x", "private_", "temp_1_x", "other_1", 123):
             self.assertIsNone(parse_chat_id(chat_id))
 
+    def test_parse_openid_private_chat_ids(self):
+        openid = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4"
+        self.assertEqual(
+            parse_chat_id(f"private_{openid}"),
+            {"type": "private", "private_id": openid},
+        )
+        self.assertEqual(canonical_chat_id(f"private_{openid}"), f"private_{openid}")
+
+    def test_reject_unsafe_private_openids(self):
+        for suffix in ("", " ", "a b", "../etc/passwd", "a/b", "a\\b", "a[b]", "a(b)", "x\ty", "x\ny"):
+            self.assertIsNone(parse_chat_id(f"private_{suffix}"), msg=suffix)
+
     def test_canonical_temp_chat_is_private(self):
         self.assertEqual(canonical_chat_id("temp_123_456"), "private_456")
         self.assertEqual(canonical_chat_id("group_123"), "group_123")
@@ -102,12 +114,33 @@ class NapCatParsingTests(unittest.TestCase):
         ]
         self.assertEqual(NapCatConnection._parse_message("@[10001](Alice) and @[10002]"), expected)
 
+    def test_openid_mentions_convert_to_segments(self):
+        openid = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4"
+        self.assertEqual(
+            NapCatConnection._parse_message(f"hi @[{openid}]"),
+            [
+                {"type": "text", "data": {"text": "hi "}},
+                {"type": "at", "data": {"qq": openid}},
+            ],
+        )
+        self.assertEqual(
+            NapCatConnection._parse_message(f"@[{openid}](Alice)"),
+            [{"type": "at", "data": {"qq": openid}}],
+        )
+
     def test_agent_mentions_include_known_names(self):
         self.assertEqual(
             format_mentions_for_agent("Hi @[10001] and @[10002](old)", {"10001": "Alice", 10002: "Bob"}),
             "Hi @[10001](Alice) and @[10002](Bob)",
         )
         self.assertEqual(format_mentions_for_agent("Hi @[10003]", {}), "Hi @[10003]")
+
+    def test_agent_mentions_work_with_openid_keys(self):
+        openid = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4"
+        self.assertEqual(
+            format_mentions_for_agent(f"Hi @[{openid}]", {openid: "Alice"}),
+            f"Hi @[{openid}](Alice)",
+        )
 
     def test_empty_forward_container_stays_empty(self):
         self.assertIsNone(NapCatConnection._extract_forward_response_payload({"messages": []}))
@@ -275,6 +308,54 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertTrue(any(segment.get("type") == "face" for segment in message))
 
+    async def test_private_openid_send_uses_exact_openid(self):
+        openid = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4"
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        await connection.send_message(f"private_{openid}", "hello")
+        await connection.send_message(f"private_{openid}", "Hi @[someone]")
+
+        self.assertEqual(calls[0][0], "send_private_msg")
+        self.assertEqual(calls[0][1]["user_id"], openid)
+        self.assertEqual(calls[0][1]["message"], "hello")
+        # Private chats do not render mentions as `at` segments.
+        self.assertEqual(calls[1][1]["user_id"], openid)
+        self.assertFalse(any(seg.get("type") == "at" for seg in calls[1][1]["message"]))
+        self.assertEqual(
+            "".join(
+                seg["data"]["text"] for seg in calls[1][1]["message"] if seg.get("type") == "text"
+            ),
+            "Hi @[someone]",
+        )
+
+    async def test_private_openid_segments_and_read_marker(self):
+        openid = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4"
+        calls = []
+        connection = NapCatConnection("", "", SimpleNamespace(private_send_context=lambda user_id: {}))
+        connection.ws = object()
+
+        async def request(action, params, timeout=10):
+            calls.append((action, params, timeout))
+            return {"status": "ok"}
+
+        connection._request = request
+        image_path = Path("/tmp/webqq openid.png")
+        image = [{"type": "image", "data": {"file": image_path.resolve().as_uri()}}]
+        await connection.send_image(f"private_{openid}", image_path)
+        await connection.mark_chat_read(f"private_{openid}")
+
+        self.assertEqual(calls[0][0], "send_private_msg")
+        self.assertEqual(calls[0][1]["user_id"], openid)
+        self.assertEqual(calls[0][1]["message"], image)
+        self.assertEqual(calls[1], ("mark_private_msg_as_read", {"user_id": openid}, 5))
+
     async def test_group_file_actions_match_4182_schemas(self):
         calls = []
         connection = NapCatConnection("", "", SimpleNamespace())
@@ -316,6 +397,32 @@ class NapCatActionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(chat["name"], "Work Alice")
             self.assertEqual(chat["nickname"], "Alice")
             self.assertEqual(chat["remark"], "Work Alice")
+
+    async def test_private_openid_message_persists_and_reloads(self):
+        openid = "A1B2C3D4E5F6A1B2C3D4E5F6A1B2C3D4"
+        with tempfile.TemporaryDirectory() as tmp:
+            store = MessageStore(maxlen=10, data_dir=tmp)
+            simplified = store.add({
+                "post_type": "message",
+                "message_type": "private",
+                "user_id": openid,
+                "sender": {"user_id": openid, "nickname": "Alice"},
+                "raw_message": "hello",
+                "message": [{"type": "text", "data": {"text": "hello"}}],
+                "message_id": 555,
+                "time": 1700000000,
+            })
+            self.assertIsNotNone(simplified)
+            self.assertEqual(simplified["chat_id"], f"private_{openid}")
+            self.assertEqual(simplified["user_id"], openid)
+            store.flush(f"private_{openid}")
+
+            reloaded = MessageStore(maxlen=10, data_dir=tmp)
+            reloaded.load_all()
+            self.assertIn(f"private_{openid}", reloaded._data)
+            message = reloaded._data[f"private_{openid}"][0]
+            self.assertEqual(message["chat_id"], f"private_{openid}")
+            self.assertEqual(message["user_id"], openid)
 
     async def test_group_messages_still_send_mentions(self):
         calls = []
