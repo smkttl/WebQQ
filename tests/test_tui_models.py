@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 from webqq_tui_app.client import collision_safe_path, safe_filename
 from webqq_tui_app.config import DEFAULT_SERVER_URL, TuiConfig, local_server_url, normalize_server_url
-from webqq_tui_app.emoji import explain_emoji, load_emoji_names
+from webqq_app.emoji import REACTION_EMOJI_IDS as SERVER_REACTION_EMOJI_IDS
+from webqq_tui_app.emoji import (
+    REACTION_EMOJI_IDS as TERMINAL_REACTION_EMOJI_IDS,
+    explain_emoji,
+    load_emoji_names,
+)
 from webqq_tui_app.models import (
     Chat,
     Message,
@@ -212,6 +217,9 @@ class TuiModelTests(unittest.TestCase):
     def test_known_emoji_has_explanation_and_unknown_id_is_preserved(self):
         self.assertEqual(explain_emoji("14"), "[face:14 微笑]")
         self.assertEqual(explain_emoji("999999999"), "[face:999999999]")
+        self.assertIn("14", SERVER_REACTION_EMOJI_IDS)
+        self.assertIn("478", SERVER_REACTION_EMOJI_IDS)
+        self.assertEqual(TERMINAL_REACTION_EMOJI_IDS, SERVER_REACTION_EMOJI_IDS)
         message = Message.from_json({"content": "hello [face:14] [face:999999999]"})
         self.assertEqual(display_content(message), "hello [face:14 微笑] [face:999999999]")
 
