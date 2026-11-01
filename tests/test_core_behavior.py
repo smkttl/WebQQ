@@ -15,6 +15,7 @@ from webqq_app.common import (
     PublicAddressResolver,
     canonical_chat_id,
     file_url_allowed,
+    handle_avatar,
     simplify_group_member,
     normalize_emoji_like_response,
     normalize_emoji_likes,
@@ -1284,6 +1285,22 @@ class BanTrackerTests(unittest.TestCase):
             response = asyncio.run(api.handle_auth_status(request))
         self.assertEqual(response.status, 401)
         self.assertTrue(tracker.is_banned("1.2.3.4"))
+
+
+class AvatarHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_avatar_rejects_invalid_token_without_internal_error(self):
+        request = SimpleNamespace(
+            app={"config": {"web_token": "secret"}},
+            headers={},
+            query={"type": "user", "id": "1"},
+            cookies={},
+            remote="",
+        )
+
+        response = await handle_avatar(request)
+
+        self.assertEqual(response.status, 401)
+        self.assertEqual(json.loads(response.text), {"error": "unauthorized"})
 
 
 class IframeCookieTests(unittest.TestCase):

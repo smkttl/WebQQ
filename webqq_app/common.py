@@ -527,6 +527,8 @@ async def fetch_and_cache_avatar(avatar_type, avatar_id, image_path, meta_path):
 
 
 async def handle_avatar(request):
+    from .auth import check_auth
+
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
     avatar_type = request.query.get("type", "")
