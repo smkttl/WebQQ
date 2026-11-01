@@ -309,12 +309,13 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RichMediaDialog.parse_command("online-folder /tmp/docs"), {"kind": "online_folder", "path": "/tmp/docs"})
         self.assertEqual(RichMediaDialog.parse_command("transfers"), {"kind": "transfers"})
         self.assertEqual(RichMediaDialog.parse_command("dice"), {"kind": "dice", "result": None})
-        self.assertEqual(RichMediaDialog.parse_command("dice 6"), {"kind": "dice", "result": "6"})
-        self.assertEqual(RichMediaDialog.parse_command("rps scissors"), {"kind": "rps", "result": "scissors"})
+        self.assertEqual(RichMediaDialog.parse_command("rps"), {"kind": "rps", "result": None})
         with self.assertRaises(ValueError):
-            RichMediaDialog.parse_command("dice 7")
+            RichMediaDialog.parse_command("dice 6")
+        with self.assertRaises(ValueError):
+            RichMediaDialog.parse_command("rps scissors")
 
-    async def test_f3_sends_forced_rps(self):
+    async def test_f3_rejects_forced_rps_and_sends_random_rps(self):
         client = FakeClient()
         app = WebQQTui(client)
         async with app.run_test(size=(32, 10)) as pilot:
@@ -326,7 +327,16 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             command.value = "rps scissors"
             await pilot.press("enter")
             await pilot.pause(0.1)
-            self.assertEqual(client.games, [("group_1", "rps", "scissors")])
+            self.assertIsInstance(app.screen, RichMediaDialog)
+            error = app.screen.query_one("#media_error", Static)
+            self.assertIn("Forced RPS results are not supported", static_plain(error))
+            self.assertEqual(client.games, [])
+
+            command.value = "rps"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertNotIsInstance(app.screen, RichMediaDialog)
+            self.assertEqual(client.games, [("group_1", "rps", None)])
 
     async def test_online_transfer_manager_fits_small_terminal_and_receives(self):
         client = FakeClient()
