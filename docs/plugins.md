@@ -2,6 +2,8 @@
 
 Plugins are trusted local Python modules. Install a plugin by copying its folder into `plugins/`, then use the WebQQ **Plugins** panel to refresh, enable, edit config, and restart it.
 
+The plugin context routes sends and history through the configured NapCat or SnowLuma backend. `ctx.napcat(action, params)` remains available as a compatibility alias for raw OneBot requests; it uses the selected backend.
+
 ## Folder Layout
 
 Each plugin lives in its own folder:

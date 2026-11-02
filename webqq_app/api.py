@@ -57,6 +57,35 @@ def _onebot_data(result):
     return result.get("data") if isinstance(result, dict) and result.get("status") == "ok" else None
 
 
+def _backend_capabilities(request):
+    connection = request.app.get("napcat")
+    provider = getattr(connection, "capabilities", None)
+    if callable(provider):
+        return provider()
+    return backend_capabilities(request.app.get("config", {}).get("backend", "napcat"))
+
+
+def _unsupported_response(request, capability):
+    connection = request.app["napcat"]
+    if hasattr(connection, "capability_error"):
+        reason = connection.capability_error(capability)
+    else:
+        reason = capability_error(
+            request.app.get("config", {}).get("backend", "napcat"),
+            capability,
+        )
+    return web.json_response(
+        {"ok": False, "capability": capability, "error": reason},
+        status=501,
+    )
+
+
+def _require_capability(request, capability):
+    if not _backend_capabilities(request).get(capability, True):
+        return _unsupported_response(request, capability)
+    return None
+
+
 def _parse_qzone_right(value):
     try:
         right = int(value)
@@ -415,6 +444,9 @@ async def handle_poke(request):
 async def handle_window_vibration(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
+    unsupported = _require_capability(request, "window_vibration")
+    if unsupported:
+        return unsupported
     body = await read_json_body(request)
     chat_id = body.get("chat_id")
     parsed_chat = parse_chat_id(chat_id)
@@ -606,6 +638,9 @@ def _normalize_online_files(data, peer_id):
 async def handle_online_files(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
+    unsupported = _require_capability(request, "online_file_transfer")
+    if unsupported:
+        return unsupported
     try:
         chat_id, peer_id = _private_online_chat(request.query.get("chat_id"))
         result = await request.app["napcat"].get_online_files(chat_id)
@@ -626,6 +661,9 @@ async def handle_online_files(request):
 async def handle_send_online_file(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
+    unsupported = _require_capability(request, "online_file_transfer")
+    if unsupported:
+        return unsupported
     chat_id = ""
     filename = "file"
     temp_path = None
@@ -678,6 +716,9 @@ async def handle_send_online_file(request):
 async def handle_send_online_folder(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
+    unsupported = _require_capability(request, "online_file_transfer")
+    if unsupported:
+        return unsupported
     temp_root = tempfile.mkdtemp(prefix="webqq-online-folder-")
     chat_id = ""
     folder_name = "folder"
@@ -736,6 +777,9 @@ async def handle_send_online_folder(request):
 async def handle_online_file_action(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
+    unsupported = _require_capability(request, "online_file_transfer")
+    if unsupported:
+        return unsupported
     body = await read_json_body(request)
     action = str(body.get("action") or "").strip().lower()
     message_id = str(body.get("message_id") or "").strip()
@@ -1073,6 +1117,9 @@ async def handle_collections(request):
 
 
 async def _create_collection_response(request, brief, raw_data):
+    unsupported = _require_capability(request, "collection_create")
+    if unsupported:
+        return unsupported
     if not brief or len(brief) > 200:
         return web.json_response({"ok": False, "error": "brief must be 1 to 200 characters"}, status=400)
     if not raw_data or len(raw_data) > 10000:
@@ -1195,15 +1242,27 @@ async def handle_media_capabilities(request):
         capabilities = await request.app["napcat"].media_capabilities()
     except Exception:
         capabilities = {"mini_app": False}
+    feature_capabilities = _backend_capabilities(request)
     return web.json_response({
-        "ok": True, "custom_faces": True, "custom_face_mutation": False,
-        "collections": True, **capabilities,
+        "ok": True,
+        "backend": request.app.get("config", {}).get("backend", "napcat"),
+        "custom_faces": True,
+        "custom_face_mutation": False,
+        "collections": True,
+        "collection_create": feature_capabilities.get("collection_create", True),
+        "online_file_transfer": feature_capabilities.get("online_file_transfer", True),
+        "voice_transcription": feature_capabilities.get("voice_transcription", True),
+        "window_vibration": feature_capabilities.get("window_vibration", True),
+        **capabilities,
     })
 
 
 async def handle_message_transcribe(request):
     if not check_auth(request):
         return web.json_response({"error": "unauthorized"}, status=401)
+    unsupported = _require_capability(request, "voice_transcription")
+    if unsupported:
+        return unsupported
     body = await read_json_body(request)
     message_id = str(body.get("message_id", "")).strip()
     chat_id = canonical_chat_id(str(body.get("chat_id", "")).strip())
@@ -2089,7 +2148,13 @@ async def handle_message_emoji_likes(request):
 async def handle_status(request):
     napcat = request.app["napcat"]
     source = str(request.app["config"].get("web_background_image") or "").strip()
+    selected_backend = request.app.get("config", {}).get("backend", getattr(napcat, "backend", "napcat"))
+    capabilities = _backend_capabilities(request)
     return web.json_response({
+        "backend": selected_backend,
+        "backend_name": backend_name(selected_backend),
+        "backend_connected": napcat.ws is not None,
+        "capabilities": capabilities,
         "napcat_connected": napcat.ws is not None,
         "chats_count": len(request.app["store"]._data),
         "self_user": dict(request.app["store"]._self_user),

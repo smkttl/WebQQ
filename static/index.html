@@ -305,6 +305,8 @@ function showModal(msg) {
 function showRichMediaPanel(initialView = 'send') {
   if (!currentChat) return;
   const privateChat = currentChat.startsWith('private_');
+  const onlineFilesAvailable = backendCapability('online_file_transfer');
+  const collectionCreateAvailable = backendCapability('collection_create');
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay rich-media-overlay';
   overlay.innerHTML = `
@@ -317,7 +319,7 @@ function showRichMediaPanel(initialView = 'send') {
         <button type="button" class="active" data-media-view="send">Send</button>
         <button type="button" data-media-view="faces">Faces</button>
         <button type="button" data-media-view="collections">Collections</button>
-        <button type="button" data-media-view="transfers"${privateChat ? '' : ' disabled'}>Transfers</button>
+        <button type="button" data-media-view="transfers"${privateChat && onlineFilesAvailable ? '' : ' disabled'} title="${privateChat ? (onlineFilesAvailable ? '' : backendCapabilityReason('online_file_transfer')) : ''}">Transfers</button>
       </div>
       <section class="rich-media-panel active" data-media-panel="send">
         <label>Type<select id="richMediaKind">
@@ -326,7 +328,7 @@ function showRichMediaPanel(initialView = 'send') {
           <option value="contact">Contact</option><option value="music">Music</option>
           <option value="miniapp">Mini-app card</option>
           <option value="dice">Dice</option><option value="rps">Rock paper scissors</option>
-          ${privateChat ? '<option value="online-file">Online file</option><option value="online-folder">Online folder</option>' : ''}
+          ${privateChat ? `<option value="online-file"${onlineFilesAvailable ? '' : ' disabled'}>Online file${onlineFilesAvailable ? '' : ' (unavailable)'}</option><option value="online-folder"${onlineFilesAvailable ? '' : ' disabled'}>Online folder${onlineFilesAvailable ? '' : ' (unavailable)'}</option>` : ''}
         </select></label>
         <div id="richMediaFields"></div>
         <button class="rich-media-send" type="submit">Send</button>
@@ -339,7 +341,7 @@ function showRichMediaPanel(initialView = 'send') {
         <div class="collection-create">
           <label>Title<input id="collectionBrief" maxlength="200"></label>
           <label>Text<textarea id="collectionRawData" maxlength="10000"></textarea></label>
-          <button type="button" id="collectionCreate">Create text collection</button>
+          <button type="button" id="collectionCreate"${collectionCreateAvailable ? '' : ' disabled'} title="${collectionCreateAvailable ? '' : backendCapabilityReason('collection_create')}">Create text collection</button>
         </div>
         <div class="media-tool-state" id="collectionsState">Open this tab to load QQ collections.</div>
         <div class="collection-list" id="collectionList"></div>
@@ -471,6 +473,10 @@ function showRichMediaPanel(initialView = 'send') {
   }
 
   async function loadTransfers(force = false) {
+    if (!onlineFilesAvailable) {
+      overlay.querySelector('#onlineTransfersState').textContent = backendCapabilityReason('online_file_transfer');
+      return;
+    }
     if (transfersLoaded && !force) return;
     transfersLoaded = true;
     const state = overlay.querySelector('#onlineTransfersState');
@@ -521,6 +527,10 @@ function showRichMediaPanel(initialView = 'send') {
   }
 
   overlay.querySelector('#collectionCreate').addEventListener('click', async event => {
+    if (!collectionCreateAvailable) {
+      error.textContent = backendCapabilityReason('collection_create');
+      return;
+    }
     const brief = overlay.querySelector('#collectionBrief').value.trim();
     const raw_data = overlay.querySelector('#collectionRawData').value.trim();
     event.currentTarget.disabled = true;
@@ -1425,17 +1435,59 @@ async function updateStatus() {
   try {
     const r = await api('/api/status');
     const d = await r.json();
+    appStatus = d;
     if (d.self_user) selfUser = d.self_user;
     updateContactBadge(d.pending_contact_requests);
     applyBackgroundState(Boolean(d.web_background_image), d.web_background_revision);
-    $('statusDot').className = 'dot ' + (d.napcat_connected ? 'ok' : 'err');
-    $('statusText').textContent = d.napcat_connected
-      ? `Connected · ${d.chats_count} chats`
-      : 'NapCat disconnected';
+    updateBackendControls();
+    const backendLabel = d.backend_name || 'NapCat';
+    $('statusDot').className = 'dot ' + (d.backend_connected ? 'ok' : 'err');
+    $('statusText').textContent = d.backend_connected
+      ? `${backendLabel} connected · ${d.chats_count} chats`
+      : `${backendLabel} disconnected`;
   } catch {
     $('statusDot').className = 'dot err';
     $('statusText').textContent = 'Server unreachable';
   }
+}
+
+let appStatus = {capabilities: {}};
+
+function backendCapability(name) {
+  const caps = appStatus && appStatus.capabilities;
+  return !caps || caps[name] !== false;
+}
+
+function backendCapabilityReason(name) {
+  if (name === 'online_file_transfer') return 'Private online file transfers require NapCat';
+  if (name === 'collection_create') return 'Collection creation requires NapCat';
+  return 'This feature is unavailable with this backend';
+}
+
+function updateBackendControls() {
+  const vibration = $('msgMenuVibration');
+  if (vibration) {
+    vibration.disabled = !backendCapability('window_vibration');
+    vibration.title = backendCapability('window_vibration')
+      ? '' : backendCapabilityReason('window_vibration');
+  }
+  const collectionCreate = $('collectionCreate');
+  if (collectionCreate) {
+    collectionCreate.disabled = !backendCapability('collection_create');
+    collectionCreate.title = backendCapability('collection_create')
+      ? '' : backendCapabilityReason('collection_create');
+  }
+  const saveCollection = $('msgMenuSaveCollection');
+  if (saveCollection) {
+    saveCollection.disabled = !backendCapability('collection_create');
+    saveCollection.title = backendCapability('collection_create')
+      ? '' : backendCapabilityReason('collection_create');
+  }
+  document.querySelectorAll('.voice-transcribe').forEach(control => {
+    control.disabled = !backendCapability('voice_transcription');
+    control.title = backendCapability('voice_transcription')
+      ? '' : backendCapabilityReason('voice_transcription');
+  });
 }
 
 async function loadChats() {
@@ -2321,6 +2373,10 @@ function appendVideos(bubble, videos) {
 }
 
 async function transcribeVoiceMessage(message, button) {
+  if (!backendCapability('voice_transcription')) {
+    showToast(backendCapabilityReason('voice_transcription'));
+    return;
+  }
   if (!message || !normalizeMessageId(message.message_id)) return;
   button.disabled = true;
   button.textContent = 'Transcribing...';
@@ -2638,6 +2694,7 @@ function showMessageMenu(message, x, y) {
   $('msgMenuVibration').style.display = canWindowVibrationMessage(message) ? 'block' : 'none';
   $('msgMenuTempChat').style.display = canStartTempChat(message) ? 'block' : 'none';
   $('msgMenuRevoke').style.display = canRevokeMessage(message) ? 'block' : 'none';
+  $('msgMenuSaveCollection').style.display = 'block';
   $('msgMenuSelect').style.display = canSelectMessage(message) ? 'block' : 'none';
   menu.classList.add('show');
   menu.style.left = '0px';
@@ -2678,6 +2735,10 @@ async function saveSelectedMessageToCollection() {
   const message = selectedMenuMessage;
   hideMessageMenu();
   if (!message || !currentChat || !normalizeMessageId(message.message_id)) return;
+  if (!backendCapability('collection_create')) {
+    showToast(backendCapabilityReason('collection_create'));
+    return;
+  }
   try {
     const response = await api('/api/collections/from-message', {
       method: 'POST',
@@ -2952,6 +3013,11 @@ async function pokeSelectedMessage() {
 }
 
 async function windowVibrationSelectedMessage() {
+  if (!backendCapability('window_vibration')) {
+    hideMessageMenu();
+    showToast(backendCapabilityReason('window_vibration'));
+    return;
+  }
   const message = selectedMenuMessage;
   if (!canWindowVibrationMessage(message)) {
     hideMessageMenu();

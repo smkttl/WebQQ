@@ -338,6 +338,45 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIsInstance(app.screen, RichMediaDialog)
             self.assertEqual(client.games, [("group_1", "rps", None)])
 
+    async def test_f3_rejects_backend_unavailable_commands_before_request(self):
+        client = FakeClient()
+        app = WebQQTui(client)
+        async with app.run_test(size=(40, 12)) as pilot:
+            await self.wait_loaded(pilot, app)
+            app._backend_capabilities = {
+                "online_file_transfer": False,
+                "collection_create": False,
+            }
+            await pilot.press("down", "enter")
+            await pilot.pause(0.1)
+            await pilot.press("f3")
+            await pilot.pause(0.1)
+            dialog = app.screen
+            self.assertIsInstance(dialog, RichMediaDialog)
+            hint = static_plain(dialog.query_one(".hint", Static))
+            self.assertIn("online transfers", hint)
+            self.assertIn("collection creation", hint)
+
+            command = dialog.query_one("#media_command", Input)
+            command.value = "transfers"
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertIs(app.screen, dialog)
+            self.assertIn(
+                "online transfers are unavailable",
+                static_plain(dialog.query_one("#media_error", Static)),
+            )
+
+            command.value = 'collection create {"brief":"B","raw_data":"R"}'
+            await pilot.press("enter")
+            await pilot.pause(0.1)
+            self.assertIs(app.screen, dialog)
+            self.assertIn(
+                "collection creation is unavailable",
+                static_plain(dialog.query_one("#media_error", Static)),
+            )
+            self.assertEqual(client.rich_media, [])
+
     async def test_online_transfer_manager_fits_small_terminal_and_receives(self):
         client = FakeClient()
         app = WebQQTui(client)

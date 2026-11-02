@@ -3,7 +3,9 @@ import hashlib
 from .mentions import MENTION_PATTERN
 from .qzone import delete_qzone_post, publish_qzone_post
 
-class NapCatConnection:
+class OneBotConnection:
+    backend = "napcat"
+
     def __init__(self, ws_url, token, store, plugins=None, config=None, request_store=None):
         self.ws_url = ws_url
         self.token = token
@@ -20,13 +22,26 @@ class NapCatConnection:
         self._contact_request_lock = asyncio.Lock()
         self._custom_faces = {}
 
+    @property
+    def backend_name(self):
+        return backend_name(self.backend)
+
+    def is_connected(self):
+        return self.ws is not None
+
+    def capabilities(self):
+        return backend_capabilities(self.backend)
+
+    def capability_error(self, capability):
+        return capability_error(self.backend, capability)
+
     async def start(self):
         self.session = aiohttp.ClientSession()
         while True:
             try:
                 await self._connect_and_listen()
             except Exception as e:
-                print(f"[napcat] error: {e}, reconnecting in 5s...")
+                print(f"[{self.backend}] error: {e}, reconnecting in 5s...")
                 self.ws = None
                 await asyncio.sleep(5)
 
@@ -36,7 +51,7 @@ class NapCatConnection:
             headers["Authorization"] = f"Bearer {self.token}"
         async with self.session.ws_connect(self.ws_url, headers=headers) as ws:
             self.ws = ws
-            print("[napcat] connected")
+            print(f"[{self.backend}] connected")
             asyncio.create_task(self._fetch_contacts())
             if self.request_store:
                 asyncio.create_task(self._fetch_contact_requests())
@@ -404,7 +419,11 @@ class NapCatConnection:
                 raise KeyError("request not found")
             if record.get("status") not in ("pending", "failed"):
                 raise ValueError("request has already been handled")
-            if record.get("source") == "doubt_backfill" and not approve:
+            if (
+                self.backend == "napcat"
+                and record.get("source") == "doubt_backfill"
+                and not approve
+            ):
                 raise ValueError("NapCat 4.18.2 cannot reject doubtful friend requests")
             processing = self.request_store.update(
                 request_id, status="processing", decision="approve" if approve else "reject",
@@ -420,6 +439,8 @@ class NapCatConnection:
                 if approve and remark and action == "set_friend_add_request":
                     params["remark"] = str(remark)
             else:
+                if self.backend == "snowluma":
+                    params["sub_type"] = str(record.get("sub_type") or "add")
                 if not approve and reason:
                     params["reason"] = str(reason)
                 action = "set_group_add_request"
@@ -1141,3 +1162,157 @@ class NapCatConnection:
     def unsubscribe(self, ws):
         if ws in self._subscribers:
             self._subscribers.remove(ws)
+
+
+class NapCatConnection(OneBotConnection):
+    backend = "napcat"
+
+
+class SnowLumaConnection(OneBotConnection):
+    backend = "snowluma"
+
+    async def _fetch_contact_requests(self):
+        try:
+            response = await self._request("get_group_system_msg", {"count": 100}, timeout=30)
+            data = response.get("data") if response and response.get("status") == "ok" else []
+            items = data if isinstance(data, list) else []
+            for item in items:
+                if not isinstance(item, dict) or item.get("checked"):
+                    continue
+                flag = str(item.get("flag") or item.get("request_id") or "")
+                if not flag:
+                    continue
+                sub_type = "invite" if item.get("invitor_uin") else "add"
+                event = dict(item)
+                event.update({
+                    "request_type": "group",
+                    "sub_type": sub_type,
+                    "flag": flag,
+                    "user_id": item.get("requester_uin") or item.get("user_id"),
+                    "user_name": item.get("requester_nick") or item.get("user_name"),
+                    "comment": item.get("message") or item.get("comment"),
+                })
+                record, created = self.request_store.upsert(event, source="backfill")
+                if created:
+                    await self._broadcast_contact_request(record)
+        except Exception as error:
+            print(f"[{self.backend}] group request backfill failed: {error}")
+
+        try:
+            response = await self._request("get_doubt_friends_add_request", {"count": 50}, timeout=30)
+            data = response.get("data") if response and response.get("status") == "ok" else []
+            for item in data if isinstance(data, list) else []:
+                if not isinstance(item, dict) or item.get("checked"):
+                    continue
+                flag = str(item.get("uid") or "")
+                if not flag:
+                    continue
+                event = dict(item)
+                event.update({
+                    "request_type": "friend",
+                    "sub_type": "add",
+                    "flag": flag,
+                    "user_id": item.get("user_id") or item.get("uin"),
+                    "user_name": item.get("nick") or item.get("nickname"),
+                    "comment": item.get("msg") or item.get("message") or item.get("reason"),
+                })
+                record, created = self.request_store.upsert(event, source="doubt_backfill")
+                if created:
+                    await self._broadcast_contact_request(record)
+        except Exception as error:
+            print(f"[{self.backend}] friend request backfill unavailable: {error}")
+
+    async def mark_chat_read(self, chat_id):
+        parsed = parse_chat_id(chat_id)
+        if not parsed:
+            return None
+        if parsed["type"] == "temp":
+            parsed = {"type": "private", "private_id": parsed["user_id"]}
+        canonical = f"group_{parsed['group_id']}" if parsed["type"] == "group" else f"private_{parsed['private_id']}"
+        messages = self.store.get_messages(canonical, limit=1)
+        message_id = next(
+            (
+                item.get("message_id")
+                for item in reversed(messages)
+                if item.get("message_id") is not None
+                and is_int_string(str(item.get("message_id")))
+            ),
+            None,
+        )
+        if message_id is None:
+            return {"status": "ok", "data": None}
+        if parsed["type"] == "group":
+            return await self._request(
+                "mark_group_msg_as_read",
+                {"group_id": str(parsed["group_id"]), "message_id": int(message_id)},
+                timeout=5,
+            )
+        return await self._request(
+            "mark_private_msg_as_read",
+            {"user_id": str(parsed["private_id"]), "message_id": int(message_id)},
+            timeout=5,
+        )
+
+    async def move_group_file(self, group_id, file_id, parent_id, target_id):
+        return await self._request("move_group_file", {
+            "group_id": str(group_id),
+            "file_id": str(file_id),
+            "parent_directory": str(parent_id or "/"),
+            "target_directory": str(target_id or "/"),
+        }, timeout=30)
+
+    async def group_content(self, group_id, kind, **params):
+        if kind == "ignored":
+            response = await self._request("get_group_ignored_notifies", {}, timeout=30)
+            if response and response.get("status") == "ok":
+                data = response.get("data")
+                if isinstance(data, list):
+                    response = dict(response)
+                    response["data"] = {
+                        "notifies": [
+                            item for item in data
+                            if isinstance(item, dict)
+                            and str(item.get("group_id", "")) == str(group_id)
+                        ],
+                    }
+            return response
+        return await super().group_content(group_id, kind, **params)
+
+    async def send_window_vibration(self, chat_id):
+        parsed = parse_chat_id(chat_id)
+        if not parsed or parsed["type"] != "private":
+            raise ValueError("window vibration is only available in private chats")
+        return await self.send_segments(chat_id, [{"type": "shake", "data": {}}])
+
+    async def fetch_ptt_text(self, message_id):
+        return await self._request(
+            "fetch_ptt_text", {"message_id": str(message_id)}, timeout=30,
+        )
+
+    async def send_online_file(self, chat_id, path, name=""):
+        raise RuntimeError(self.capability_error("online_file_transfer"))
+
+    async def send_online_folder(self, chat_id, path, name=""):
+        raise RuntimeError(self.capability_error("online_file_transfer"))
+
+    async def get_online_files(self, chat_id):
+        raise RuntimeError(self.capability_error("online_file_transfer"))
+
+    async def online_file_action(self, chat_id, action, message_id, element_id=""):
+        raise RuntimeError(self.capability_error("online_file_transfer"))
+
+    async def create_collection(self, brief, raw_data):
+        raise RuntimeError(self.capability_error("collection_create"))
+
+
+def create_backend(config, store, plugins=None, request_store=None):
+    normalized = normalize_config(config)
+    connection_type = SnowLumaConnection if normalized["backend"] == "snowluma" else NapCatConnection
+    return connection_type(
+        normalized["ws_url"],
+        normalized["ws_token"],
+        store,
+        plugins=plugins,
+        config=normalized,
+        request_store=request_store,
+    )

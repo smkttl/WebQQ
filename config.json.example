@@ -1,6 +1,7 @@
 {
+  "backend": "napcat",
   "ws_url": "ws://localhost:{port}/?message_post_format=array",
-  "napcat_token": "",
+  "ws_token": "",
   "window_vibration_action": "",
   "web_port": 8080,
   "web_token": "",

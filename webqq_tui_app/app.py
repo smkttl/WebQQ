@@ -439,12 +439,27 @@ class RichMediaDialog(ModalScreen):
     RichMediaDialog .hint { height: 2; color: $text-muted; }
     """
 
+    def __init__(self, capabilities: Optional[Mapping[str, bool]] = None):
+        super().__init__()
+        self.capabilities = dict(capabilities or {})
+
+    def capability(self, name: str) -> bool:
+        return bool(self.capabilities.get(name, True))
+
     def compose(self) -> ComposeResult:
+        unavailable = []
+        if not self.capability("online_file_transfer"):
+            unavailable.append("online transfers")
+        if not self.capability("collection_create"):
+            unavailable.append("collection creation")
+        hint = "collection create {JSON} | collection save | Esc return"
+        if unavailable:
+            hint += " | Unavailable: " + ", ".join(unavailable)
         with Container():
             yield Static("Send rich media", classes="dialog-title")
             yield Input(placeholder="dice | rps | video PATH", id="media_command")
             yield Static("", id="media_error")
-            yield Static("collection create {JSON} | collection save | Esc return", classes="hint")
+            yield Static(hint, classes="hint")
 
     def on_mount(self) -> None:
         self.query_one("#media_command", Input).focus()
@@ -533,6 +548,11 @@ class RichMediaDialog(ModalScreen):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         try:
             command = self.parse_command(event.value.strip())
+            kind = str(command.get("kind") or "")
+            if kind in {"online", "online_folder", "transfers"} and not self.capability("online_file_transfer"):
+                raise ValueError("online transfers are unavailable with this backend")
+            if kind in {"collection_create", "collection_save"} and not self.capability("collection_create"):
+                raise ValueError("collection creation is unavailable with this backend")
         except ValueError as exc:
             self.query_one("#media_error", Static).update(str(exc))
             return
@@ -1544,6 +1564,7 @@ class WebQQTui(App):
         self._chat_cursor_id = ""
         self._live_status = "Live connecting"
         self._napcat_status = "NapCat unknown"
+        self._backend_capabilities: Dict[str, bool] = {}
         self._account_status = ""
         self._self_user_id = ""
         self._chat_count = 0
@@ -1753,11 +1774,17 @@ class WebQQTui(App):
     async def _refresh_status(self, silent: bool = False) -> None:
         try:
             status = await self.client.status()
-            connected = bool(status.get("napcat_connected"))
+            backend_label = str(status.get("backend_name") or "NapCat")
+            connected = bool(status.get("backend_connected", status.get("napcat_connected")))
+            capabilities = status.get("capabilities")
+            self._backend_capabilities = dict(capabilities) if isinstance(capabilities, dict) else {}
             self_user = status.get("self_user") if isinstance(status.get("self_user"), dict) else {}
             name = str(self_user.get("name") or self_user.get("user_id") or "")
             self._self_user_id = str(self_user.get("user_id") or "")
-            self._napcat_status = "NapCat connected" if connected else "NapCat disconnected"
+            self._napcat_status = (
+                "{} connected".format(backend_label) if connected
+                else "{} disconnected".format(backend_label)
+            )
             self._account_status = name
             self._chat_count = int(status.get("chats_count", len(self.chats)) or 0)
             self._pending_contact_requests = int(status.get("pending_contact_requests") or 0)
@@ -1767,6 +1794,9 @@ class WebQQTui(App):
             self._rebuild_base_status()
             if not silent:
                 raise exc
+
+    def _backend_capability(self, name: str) -> bool:
+        return bool(self._backend_capabilities.get(name, True))
 
     async def _refresh_chats(self, silent: bool = False) -> None:
         if self._chat_refreshing:
@@ -2487,6 +2517,9 @@ class WebQQTui(App):
     def action_window_vibration(self) -> None:
         if isinstance(self.focused, (Composer, Input)):
             return
+        if not self._backend_capability("window_vibration"):
+            self._set_notice("Window vibration is unavailable with this backend")
+            return
         message = self._selected_message()
         chat_id = self.current_chat.chat_id if self.current_chat else ""
         if (
@@ -2606,7 +2639,10 @@ class WebQQTui(App):
         if not self.current_chat:
             self._set_notice("Select a chat first")
             return
-        self.push_screen(RichMediaDialog(), self._rich_media_selected)
+        self.push_screen(
+            RichMediaDialog(self._backend_capabilities),
+            self._rich_media_selected,
+        )
 
     def _rich_media_selected(self, command: Optional[Mapping[str, Any]]) -> None:
         if command and self.current_chat:
@@ -2618,6 +2654,8 @@ class WebQQTui(App):
             elif kind == "transfers":
                 if self.current_chat.chat_type != "private":
                     self._set_notice("Online transfers are only available in private chats")
+                elif not self._backend_capability("online_file_transfer"):
+                    self._set_notice("Online transfers are unavailable with this backend")
                 else:
                     self.push_screen(OnlineTransferManager(self.client, self.current_chat.chat_id))
             else:
@@ -2644,8 +2682,12 @@ class WebQQTui(App):
             elif kind == "voice":
                 await self.client.send_voice(chat_id, Path(str(command["path"])))
             elif kind == "online":
+                if not self._backend_capability("online_file_transfer"):
+                    raise ValueError("online transfers are unavailable with this backend")
                 await self.client.send_online_file(chat_id, Path(str(command["path"])))
             elif kind == "online_folder":
+                if not self._backend_capability("online_file_transfer"):
+                    raise ValueError("online transfers are unavailable with this backend")
                 await self.client.send_online_folder(chat_id, Path(str(command["path"])))
             elif kind in {"dice", "rps"}:
                 await self.client.send_game(chat_id, kind, command.get("result"))
@@ -2656,11 +2698,15 @@ class WebQQTui(App):
             elif kind == "mini_app":
                 await self.client.send_mini_app(chat_id, command["mini_app"])
             elif kind == "collection_create":
+                if not self._backend_capability("collection_create"):
+                    raise ValueError("collection creation is unavailable with this backend")
                 collection = command["collection"]
                 await self.client.create_collection(
                     str(collection["brief"]), str(collection["raw_data"]),
                 )
             elif kind == "collection_save":
+                if not self._backend_capability("collection_create"):
+                    raise ValueError("collection creation is unavailable with this backend")
                 message = self._selected_message()
                 if not message or not message.message_id:
                     raise ValueError("select a server-confirmed message first")
@@ -2673,6 +2719,9 @@ class WebQQTui(App):
 
     def action_transcribe(self) -> None:
         if isinstance(self.focused, (Composer, Input)):
+            return
+        if not self._backend_capability("voice_transcription"):
+            self._set_notice("Voice transcription is unavailable with this backend")
             return
         message = self._selected_message()
         if not message or not message.message_id or not any(item.kind == "voice" for item in message.attachments):

@@ -1458,6 +1458,15 @@ class WebBackgroundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("var(--web-background-image)", css)
         self.assertIn("backgroundButton", html)
 
+    def test_web_assets_disable_backend_unavailable_controls_visibly(self):
+        html = Path("static/index.html").read_text(encoding="utf-8")
+        self.assertIn("backendCapability('online_file_transfer')", html)
+        self.assertIn("Online file${onlineFilesAvailable ? '' : ' (unavailable)'}", html)
+        self.assertIn("vibration.disabled = !backendCapability('window_vibration')", html)
+        self.assertIn("saveCollection.disabled = !backendCapability('collection_create')", html)
+        self.assertIn("$('msgMenuSaveCollection').style.display = 'block'", html)
+        self.assertIn("collectionCreate.disabled = !backendCapability('collection_create')", html)
+
     def test_web_assets_keep_iframe_authentication_without_cookies(self):
         html = Path("static/index.html").read_text(encoding="utf-8")
         self.assertIn("sessionStorage.getItem(authSessionKey)", html)

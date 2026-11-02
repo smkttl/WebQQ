@@ -6,7 +6,7 @@ from .auth import BanTracker, ban_middleware
 from .api import *
 from .store import MessageStore
 from .plugins import PluginManager
-from .napcat import NapCatConnection
+from .napcat import create_backend
 from .request_store import ContactRequestStore
 
 
@@ -42,10 +42,7 @@ async def main():
     store.load_all()
     request_store = ContactRequestStore()
     plugins = PluginManager(PLUGIN_DIR, config, store)
-    napcat = NapCatConnection(
-        config["ws_url"], config.get("napcat_token", ""), store, plugins=plugins,
-        config=config, request_store=request_store,
-    )
+    napcat = create_backend(config, store, plugins=plugins, request_store=request_store)
     plugins.set_napcat(napcat)
     plugins.load_enabled()
 

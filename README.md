@@ -1,6 +1,6 @@
 # WebQQ
 
-A lightweight web-based QQ client that connects to a local [NapCat](https://github.com/NapNeko/NapCatQQ) server, records recent messages, and provides a browser interface for reading and sending messages.
+A lightweight web-based QQ client that connects to a local [NapCat](https://github.com/NapNeko/NapCatQQ) or [SnowLuma](https://github.com/SnowLuma/SnowLuma) OneBot v11 server, records recent messages, and provides browser and terminal interfaces for reading and sending messages.
 
 ## Features
 
@@ -8,7 +8,7 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 - Last 1000 messages per chat (group / private) persisted to disk
 - Browser-based UI with dark theme
 - Token-based web login
-- Automatic NapCat reconnection
+- Configurable NapCat or SnowLuma backend with automatic reconnection
 - Chat list with friend/group name resolution
 - Marks private/group chats as read when opened
 - Folder-copy plugin system with per-plugin config and web UI controls
@@ -24,20 +24,33 @@ A lightweight web-based QQ client that connects to a local [NapCat](https://gith
 ## Requirements
 
 - Python 3.8+
-- A running NapCat instance on localhost
+- A running NapCat or SnowLuma instance with a OneBot v11 WebSocket server
 
 ## Quick Start
 
-1. Install NapCat and add a **WebSocket Server** (not client) listener. Pick any port (`napcat_port`) and copy the generated token.
+1. Install NapCat or SnowLuma and add a **WebSocket Server** (not client) listener. Pick any port and copy the generated token.
 2. `pip install -r requirements.txt`
 3. `cp config.json.example config.json`
 4. Edit `config.json`:
-   - Set `napcat_token` to the token from step 1
-   - Set `ws_url` to `ws://localhost:{napcat_port}/?message_post_format=array`
+   - Set `backend` to `napcat` or `snowluma`
+   - Set `ws_token` to the token from step 1
+   - Set `ws_url` to the backend WebSocket URL
    - Set `web_token` to your desired browser login password
 5. `python3 webqq.py`
 
 Then open `http://localhost:8080` (or your configured `web_port`) in a browser.
+
+For NapCat, use a URL such as `ws://localhost:49341/?message_post_format=array`. For SnowLuma, configure a Universal WebSocket server with array message format and self-message reporting, then use its URL such as `ws://localhost:3001/`:
+
+```json
+{
+  "backend": "snowluma",
+  "ws_url": "ws://localhost:3001/",
+  "ws_token": "your-token"
+}
+```
+
+SnowLuma compatibility is best-effort. Private online file transfers and collection creation are unavailable there; the API reports these as unsupported and the WebUI/TUI disable their controls.
 
 ## Terminal Client
 
@@ -59,8 +72,10 @@ Configuration is stored in `config.json` (gitignored). A template is provided in
 
 | Key              | Default                                                | Description                                       |
 | ---------------- | ------------------------------------------------------ | ------------------------------------------------- |
-| `ws_url`         | `ws://localhost:{port}/?message_post_format=array`     | NapCat WebSocket URL                              |
-| `napcat_token`   | *(empty)*                                              | Token for authenticating with the NapCat WebSocket server                    |
+| `backend`        | `napcat`                                               | Backend adapter: `napcat` or `snowluma`            |
+| `ws_url`         | `ws://localhost:49341/?message_post_format=array`      | Backend OneBot WebSocket URL                      |
+| `ws_token`       | *(empty)*                                              | Bearer token for the backend WebSocket server     |
+| `napcat_token`   | *(empty)*                                              | Legacy alias for `ws_token`; `ws_token` takes precedence |
 | `window_vibration_action` | *(empty)*                                      | Optional NapCat action supplied by a plugin for private window vibration; NapCat 4.18.2 leaves this unsupported |
 | `web_port`       | `8080`                                                 | Port for the web UI server                        |
 | `web_token`      | *(empty)*                                              | Password for browser login. Empty = no auth required |
@@ -110,13 +125,14 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 | GET    | `/api/plugins`                     | List plugin status       |
 | WS     | `/ws`                              | Real-time message feed   |
 
-## NapCat Behavior
+## Backend Behavior
 
 - Recalled messages remain visible and replyable, with a recalled tag and a system notice.
 - Friend requests are approved automatically.
 - Group invitations for the logged-in account are approved automatically.
 - Group add requests from other users joining groups you manage are ignored.
-- Opening a private or group chat marks that chat as read in NapCat.
+- Opening a private or group chat marks that chat as read. SnowLuma requires the latest stored message ID for this action.
+- The selected backend is shown in the WebUI and TUI status line.
 
 ## TODO
 

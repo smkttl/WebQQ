@@ -37,7 +37,9 @@ REVOKE_WINDOW_SECONDS = 2 * 60
 REACTION_FETCH_EMOJI_IDS = ("14", "1", "4", "5", "8", "9", "21", "23", "24", "66")
 
 DEFAULT_CONFIG = {
+    "backend": "napcat",
     "ws_url": "ws://localhost:49341/?message_post_format=array",
+    "ws_token": "",
     "napcat_token": "",
     "window_vibration_action": "",
     "web_port": 8080,
@@ -49,6 +51,31 @@ DEFAULT_CONFIG = {
     "fail2ban_window_seconds": 300,
     "fail2ban_ban_seconds": 1800,
     "plugins": {"enabled": {}},
+}
+
+BACKEND_NAMES = {
+    "napcat": "NapCat",
+    "snowluma": "SnowLuma",
+}
+
+BACKEND_CAPABILITIES = {
+    "napcat": {
+        "online_file_transfer": True,
+        "voice_transcription": True,
+        "window_vibration": True,
+        "collection_create": True,
+    },
+    "snowluma": {
+        "online_file_transfer": False,
+        "voice_transcription": True,
+        "window_vibration": True,
+        "collection_create": False,
+    },
+}
+
+CAPABILITY_REASONS = {
+    "online_file_transfer": "Private online file transfers are unavailable with SnowLuma",
+    "collection_create": "Collection creation is unavailable with SnowLuma",
 }
 
 
@@ -128,7 +155,38 @@ def load_config():
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
         print(f"[config] created {CONFIG_PATH} with defaults")
-    return cfg
+    return normalize_config(cfg)
+
+
+def normalize_config(cfg):
+    """Normalize backend selection while retaining legacy NapCat keys."""
+    normalized = dict(cfg or {})
+    backend = str(normalized.get("backend") or "napcat").strip().lower()
+    if backend not in BACKEND_NAMES:
+        raise ValueError(
+            "invalid backend {!r}; expected one of: napcat, snowluma".format(backend)
+        )
+    normalized["backend"] = backend
+    token = normalized.get("ws_token")
+    if token is None or token == "":
+        token = normalized.get("napcat_token", "")
+    normalized["ws_token"] = str(token or "")
+    return normalized
+
+
+def backend_capabilities(backend):
+    return dict(BACKEND_CAPABILITIES.get(str(backend), BACKEND_CAPABILITIES["napcat"]))
+
+
+def backend_name(backend):
+    return BACKEND_NAMES.get(str(backend), "NapCat")
+
+
+def capability_error(backend, capability):
+    return CAPABILITY_REASONS.get(
+        capability,
+        "This feature is unavailable with {}".format(backend_name(backend)),
+    )
 
 
 def save_config(cfg):
