@@ -210,6 +210,17 @@ def is_int_string(value):
     return bool(value) and value.lstrip("-").isdigit()
 
 
+def normalize_message_id(value):
+    """Return a nonzero signed OneBot ID, without accepting floats or local IDs."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("invalid message_id")
+    text = str(value).strip()
+    digits = text[1:] if text.startswith("-") else text
+    if not digits or not digits.isascii() or not digits.isdigit() or int(text) == 0:
+        raise ValueError("invalid message_id")
+    return str(int(text))
+
+
 def reaction_count(reaction):
     try:
         return int(reaction.get("count", 0))

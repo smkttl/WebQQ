@@ -172,7 +172,8 @@ class MessageStore:
         return True
 
     def _sort_and_trim_chat(self, chat_id):
-        items = sorted(self._data.get(chat_id, []), key=lambda item: (item.get("time", 0), str(item.get("message_id", ""))))
+        # Signed message IDs are hashes, not chronological sequence numbers.
+        items = sorted(self._data.get(chat_id, []), key=lambda item: item.get("time", 0))
         self._data[chat_id] = deque(items[-self.maxlen:], maxlen=self.maxlen)
 
     def _refresh_chat_meta(self, chat_id):
@@ -328,12 +329,23 @@ class MessageStore:
                         pass
         self._dirty -= saved
 
+    def _message_is_self(self, msg):
+        if msg.get("post_type") == "message_sent" or msg.get("message_sent_type") == "self":
+            return True
+        self_id = msg.get("self_id") or self._self_user.get("user_id")
+        if not self_id or str(self_id) == "self":
+            self_id = msg.get("self_user_id")
+        sender_id = msg.get("user_id")
+        if sender_id is None:
+            sender_id = (msg.get("sender") or {}).get("user_id")
+        return self_id is not None and sender_id is not None and str(sender_id) == str(self_id)
+
     def chat_key(self, msg):
         mt = msg.get("message_type")
         if mt == "group":
             return f"group_{msg['group_id']}"
         if mt == "private":
-            user_id = msg.get("target_id") if msg.get("post_type") == "message_sent" and msg.get("target_id") else msg.get("user_id")
+            user_id = msg.get("target_id") if self._message_is_self(msg) and msg.get("target_id") else msg.get("user_id")
             if msg.get("sub_type") == "group" and msg.get("group_id"):
                 self.remember_temp_context(user_id, msg.get("group_id"), msg.get("group_name", ""))
             else:
@@ -370,20 +382,26 @@ class MessageStore:
 
     def add_history_messages(self, messages):
         added = []
+        batches = defaultdict(list)
+        seen = {self._dedup_key(msg) for items in self._data.values() for msg in items}
         for msg in messages:
             key = self.chat_key(msg)
             if not key:
                 continue
             simplified = self._simplify(msg)
-            message_id = simplified.get("message_id")
-            if message_id is not None and self.find_chat_by_message_id(message_id):
+            dedup_key = self._dedup_key(simplified)
+            if dedup_key in seen:
                 continue
-            self._data[key].appendleft(simplified)
+            seen.add(dedup_key)
+            batches[key].append(simplified)
             added.append(simplified)
-            if key not in self._chat_meta:
-                self.ensure_chat(key, simplified.get("chat_name") or key, simplified.get("type", ""))
+        for key, batch in batches.items():
+            # Merge before trimming: deque.appendleft can discard recent messages.
+            merged = sorted(list(self._data.get(key, [])) + batch, key=lambda item: item.get("time", 0))
+            self._data[key] = deque(merged[-self.maxlen:], maxlen=self.maxlen)
             self._dirty.add(key)
             self._reindex_chat(key)
+            self._refresh_chat_meta(key)
         return added
 
     def register_pending_local_message(self, chat_id, simplified):
@@ -839,6 +857,11 @@ class MessageStore:
             nick = sender.get("card") or sender.get("nickname") or ""
             if nick:
                 self._nicknames[str(sender["user_id"])] = nick
+        chat_id = self.chat_key(msg)
+        parsed_chat = parse_chat_id(chat_id)
+        peer_id = parsed_chat["private_id"] if parsed_chat and parsed_chat["type"] == "private" else None
+        if mt == "private" and self._message_is_self(msg) and peer_id is not None:
+            chat_name = self._nicknames.get(str(peer_id)) or self._chat_meta.get(chat_id, {}).get("name") or str(peer_id)
         content, mentions, images, forwards, files, videos, records, extra_segments = self._extract_text(msg)
         return {
             "message_id": msg.get("message_id"),
@@ -856,20 +879,15 @@ class MessageStore:
             "records": records,
             "extra_segments": extra_segments,
             "reactions": normalize_emoji_likes(msg.get("reactions") or msg.get("likes") or msg.get("like") or []),
-            "chat_id": self.chat_key(msg),
+            "chat_id": chat_id,
             "type": chat_type,
             "group_id": msg.get("group_id"),
             "temp_group_id": temp_group_id,
             "temp_group_name": temp_group_name,
-            "user_id": msg.get("user_id"),
+            "user_id": peer_id if mt == "private" else msg.get("user_id"),
+            "target_id": msg.get("target_id"),
             "chat_name": chat_name,
-            "self": (
-                msg.get("post_type") == "message_sent"
-                or msg.get("message_sent_type") == "self"
-                or
-                (msg.get("sub_type") == "friend" and msg.get("target_id") == msg.get("self_user_id"))
-                or (msg.get("self_user_id") is not None and msg.get("user_id") == msg.get("self_user_id"))
-            ),
+            "self": self._message_is_self(msg),
         }
 
     def _extract_text(self, msg):

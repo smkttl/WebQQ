@@ -21,6 +21,14 @@ class OneBotConnection:
         self._plugin_tasks = set()
         self._contact_request_lock = asyncio.Lock()
         self._custom_faces = {}
+        self._connection_tasks = None
+
+    def _start_connection_task(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        if self._connection_tasks is not None:
+            self._connection_tasks.add(task)
+            task.add_done_callback(self._connection_tasks.discard)
+        return task
 
     @property
     def backend_name(self):
@@ -36,13 +44,12 @@ class OneBotConnection:
         return capability_error(self.backend, capability)
 
     async def start(self):
-        self.session = aiohttp.ClientSession()
-        while True:
-            try:
-                await self._connect_and_listen()
-            except Exception as e:
-                print(f"[{self.backend}] error: {e}, reconnecting in 5s...")
-                self.ws = None
+        async with aiohttp.ClientSession() as self.session:
+            while True:
+                try:
+                    await self._connect_and_listen()
+                except Exception as e:
+                    print(f"[{self.backend}] error: {e}, reconnecting in 5s...")
                 await asyncio.sleep(5)
 
     async def _connect_and_listen(self):
@@ -52,19 +59,53 @@ class OneBotConnection:
         async with self.session.ws_connect(self.ws_url, headers=headers) as ws:
             self.ws = ws
             print(f"[{self.backend}] connected")
-            asyncio.create_task(self._fetch_contacts())
+            self._connection_tasks = set()
+            # Never block the reader on event processing: an event may itself
+            # await an API response delivered over this same socket.
+            events = asyncio.Queue()
+            self._start_connection_task(self._process_events(events))
+            self._start_connection_task(self._fetch_contacts())
             if self.request_store:
-                asyncio.create_task(self._fetch_contact_requests())
-            async for raw_msg in ws:
-                if raw_msg.type == aiohttp.WSMsgType.TEXT:
-                    try:
-                        data = json.loads(raw_msg.data)
-                    except Exception:
-                        continue
-                    await self._handle(data)
-                elif raw_msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                    break
-            self.ws = None
+                self._start_connection_task(self._fetch_contact_requests())
+            try:
+                async for raw_msg in ws:
+                    if raw_msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            data = json.loads(raw_msg.data)
+                        except (ValueError, TypeError):
+                            continue
+                        if not isinstance(data, dict):
+                            continue
+                        if data.get("echo") is not None:
+                            await self._handle(data)
+                        else:
+                            events.put_nowait(data)
+                    elif raw_msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+            finally:
+                self.ws = None
+                tasks = list(self._connection_tasks)
+                for task in tasks:
+                    task.cancel()
+                for future in list(self._pending.values()):
+                    if not future.done():
+                        future.set_result(None)
+                self._pending.clear()
+                for queue in self._stream_pending.values():
+                    queue.put_nowait({"data": {"type": "error"}})
+                self._stream_pending.clear()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                self._connection_tasks = None
+
+    async def _process_events(self, events):
+        while True:
+            data = await events.get()
+            try:
+                await self._handle(data)
+            except Exception as error:
+                print(f"[{self.backend}] event processing failed: {error}")
+            finally:
+                events.task_done()
 
     async def _fetch_contacts(self):
         try:
@@ -99,7 +140,7 @@ class OneBotConnection:
                     if gid:
                         name = g.get("group_name", "") or str(gid)
                         self.store.ensure_chat(f"group_{gid}", name, "group")
-                        asyncio.create_task(self._fetch_group_members(gid))
+                        self._start_connection_task(self._fetch_group_members(gid))
         except Exception:
             pass
 
@@ -174,33 +215,38 @@ class OneBotConnection:
             print(f"[napcat] friend request backfill unavailable: {error}")
 
     async def _request(self, action, params, timeout=10):
-        if not self.ws:
+        ws = self.ws
+        if not ws:
             return None
         echo = f"{action}-{uuid.uuid4().hex[:10]}"
         fut = asyncio.get_event_loop().create_future()
         self._pending[echo] = fut
-        await self.ws.send_json({"action": action, "params": params, "echo": echo})
         try:
+            await ws.send_json({"action": action, "params": params, "echo": echo})
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
-            self._pending.pop(echo, None)
             return None
+        finally:
+            self._pending.pop(echo, None)
+            if not fut.done():
+                fut.cancel()
 
     async def _stream_file(self, file_ref, timeout=120):
-        if not self.ws or not file_ref:
+        ws = self.ws
+        if not ws or not file_ref:
             return None
         echo = f"download_file_stream-{uuid.uuid4().hex[:10]}"
         queue = asyncio.Queue()
         self._stream_pending[echo] = queue
-        await self.ws.send_json({
-            "action": "download_file_stream",
-            "params": {"file": file_ref, "chunk_size": 256 * 1024},
-            "echo": echo,
-        })
         chunks = {}
         info = {}
         received = 0
         try:
+            await ws.send_json({
+                "action": "download_file_stream",
+                "params": {"file": file_ref, "chunk_size": 256 * 1024},
+                "echo": echo,
+            })
             while True:
                 try:
                     data = await asyncio.wait_for(queue.get(), timeout=timeout)
@@ -257,6 +303,9 @@ class OneBotConnection:
                 fut.set_result(data)
             return
         post_type = data.get("post_type")
+        if post_type in ("message", "message_sent") and data.get("self_id"):
+            if str(self.store._self_user.get("user_id")) != str(data["self_id"]):
+                self.store.set_self_user(data["self_id"])
         if post_type == "message":
             await self._resolve_forward_segments(data)
             simplified = self.store.add(data)
@@ -1093,8 +1142,8 @@ class OneBotConnection:
             "parse_mult_msg": True,
             "disable_get_url": False,
         }
-        if before_message_id:
-            params["message_seq"] = str(before_message_id)
+        if before_message_id is not None:
+            params[self.history_cursor_parameter] = normalize_message_id(before_message_id)
         if parsed["type"] == "group":
             action = "get_group_msg_history"
             params["group_id"] = str(parsed["group_id"])
@@ -1107,6 +1156,8 @@ class OneBotConnection:
         data = resp.get("data") or {}
         messages = data.get("messages") if isinstance(data, dict) else []
         return messages if isinstance(messages, list) else []
+
+    history_cursor_parameter = "message_seq"
 
     async def mark_chat_read(self, chat_id):
         parsed = parse_chat_id(chat_id)
@@ -1170,6 +1221,44 @@ class NapCatConnection(OneBotConnection):
 
 class SnowLumaConnection(OneBotConnection):
     backend = "snowluma"
+    history_cursor_parameter = "message_id"
+
+    async def fetch_history(self, chat_id, before_message_id=None, count=50):
+        # History responses omit post_type/self_id. Establish identity before
+        # normalizing them, even if the initial contact refresh is still running.
+        self_id = self.store._self_user.get("user_id")
+        if not self_id or str(self_id) == "self":
+            login = await self._request("get_login_info", {})
+            info = login.get("data") if login and login.get("status") == "ok" else None
+            if not isinstance(info, dict) or not info.get("user_id"):
+                return []
+            self.store.set_self_user(info["user_id"], info.get("nickname") or "")
+            self_id = info["user_id"]
+        messages = await super().fetch_history(chat_id, before_message_id, count)
+        parsed = parse_chat_id(canonical_chat_id(chat_id))
+        if not parsed:
+            return []
+        result = []
+        for original in messages:
+            if not isinstance(original, dict):
+                continue
+            message = {**original, "self_id": self_id}
+            outgoing = self.store._message_is_self(message)
+            message["post_type"] = "message_sent" if outgoing else "message"
+            if parsed["type"] == "private":
+                peer = parsed["private_id"]
+                if message.get("message_type") != "private":
+                    continue
+                if outgoing:
+                    if message.get("target_id") and str(message["target_id"]) != str(peer):
+                        continue
+                    message["target_id"] = peer
+                elif str(message.get("user_id")) != str(peer):
+                    continue
+            elif str(message.get("group_id")) != str(parsed["group_id"]):
+                continue
+            result.append(message)
+        return result
 
     async def _fetch_contact_requests(self):
         try:

@@ -371,8 +371,9 @@ async def handle_send(request):
     if not parsed_chat:
         return web.json_response({"ok": False, "error": "invalid chat_id"}, status=400)
     if reply_to is not None:
-        reply_to = str(reply_to).strip()
-        if not reply_to.isdigit():
+        try:
+            reply_to = normalize_message_id(reply_to)
+        except ValueError:
             return web.json_response({"ok": False, "error": "invalid reply_to"}, status=400)
     napcat = request.app["napcat"]
     store = request.app["store"]
@@ -2282,8 +2283,9 @@ async def handle_plugin_portal_message(request):
     if not isinstance(text, str):
         return web.json_response({"ok": False, "error": "text is required"}, status=400)
     if reply_to is not None:
-        reply_to = str(reply_to).strip()
-        if not reply_to.isdigit():
+        try:
+            reply_to = normalize_message_id(reply_to)
+        except ValueError:
             return web.json_response({"ok": False, "error": "invalid reply_to"}, status=400)
     message = {
         "chat_id": chat_id,

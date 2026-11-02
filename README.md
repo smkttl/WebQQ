@@ -90,6 +90,39 @@ Configuration is stored in `config.json` (gitignored). A template is provided in
 
 Messages are stored under `data/` as one JSON file per chat (`data/group_12345.json`, `data/private_67890.json`). Each file holds up to 1000 messages. The `data/` directory is gitignored.
 
+### Repairing older SnowLuma messages
+
+The repair command fixes saved sender-direction flags and recovers outgoing
+private messages previously filed under your own account. It verifies the logged-in
+SnowLuma account and uses read-only `get_msg` lookups where a recipient is missing.
+Messages whose recipient cannot be verified remain in place and appear in the report.
+System messages and local outgoing placeholders are preserved.
+
+Preview changes while WebQQ is running:
+
+```bash
+python3 -m webqq_app.repair_messages --report /tmp/webqq-repair-preview.json
+```
+
+Stop all WebQQ instances before applying; the command refuses to apply while
+`WebQQ.service` is active and also detects files changed since its snapshot:
+
+```bash
+sudo systemctl stop WebQQ.service
+python3 -m webqq_app.repair_messages --apply --report /tmp/webqq-repair-applied.json
+sudo systemctl start WebQQ.service
+```
+
+Every affected file is backed up under `data/repair-backups/<timestamp>-<id>/`
+before writes begin. `manifest.json` lists original/new hashes, previously absent
+destination files, and the transaction result. Applying a repair does not trim
+saved records; normal WebQQ retention still applies when the service reloads.
+An ordinary write failure rolls back completed writes. After a process interruption,
+inspect the manifest before starting WebQQ. To roll back manually, stop WebQQ,
+restore files marked `existed: true` from the backup, and remove newly created
+files marked `existed: false`. Keep the backup until the repaired conversations
+have been checked.
+
 ## Plugins
 
 Install plugins by copying a folder into `plugins/`, then open **Plugins** in the web UI to refresh, enable/disable, edit config, or restart a plugin. The bundled `plugins/echo/` plugin is a minimal example using `{"prefix": "/echo", "respond_to_self": false, "echo_empty_payload": false, "self_response_delay_seconds": 0.35}`.
@@ -133,6 +166,10 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 - Group add requests from other users joining groups you manage are ignored.
 - Opening a private or group chat marks that chat as read. SnowLuma requires the latest stored message ID for this action.
 - The selected backend is shown in the WebUI and TUI status line.
+- Reply and combined-forward reference IDs accept signed, nonzero OneBot message IDs.
+- SnowLuma history uses message-ID cursors and preserves outgoing private recipients.
+- Local-file uploads require paths accessible to the backend. Sharing upload files
+  with a Docker-hosted SnowLuma instance remains a separate deployment task.
 
 ## TODO
 

@@ -47,12 +47,14 @@ def normalize_forward_nodes(nodes):
     for index, node in enumerate(nodes, 1):
         if not isinstance(node, dict):
             raise ValueError(f"forward node {index} must be an object")
-        message_id = str(node.get("message_id") or "").strip()
+        message_id = node.get("message_id")
         has_custom_fields = any(key in node for key in ("sender_id", "sender_name", "content"))
-        if message_id:
+        if "message_id" in node:
             if has_custom_fields:
                 raise ValueError(f"forward node {index} cannot mix a message reference with custom content")
-            if not message_id.isdigit() or int(message_id) <= 0:
+            try:
+                message_id = normalize_message_id(message_id)
+            except ValueError:
                 raise ValueError(f"forward node {index} has an invalid message_id")
             normalized.append({"message_id": message_id})
             continue
