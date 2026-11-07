@@ -233,8 +233,8 @@ let allChats = [];
 let contactsOverlay = null;
 let contactPendingCount = 0;
 const loadedGroupMembersByChat = new Map();
-const faceManifestUrl = 'https://koishi.js.org/QFace/assets/qq_emoji/_index.json';
-const faceAssetBaseUrl = 'https://koishi.js.org/QFace/';
+const faceAssetBaseUrl = new URL('qface/', document.baseURI).href;
+const faceManifestUrl = new URL('assets/qq_emoji/_index.json', faceAssetBaseUrl).href;
 const revokeWindowSeconds = 120;
 const longMessageCharacterLimit = 800;
 const longMessageLineLimit = 10;
@@ -1393,11 +1393,17 @@ async function init() {
 
 async function loadFaceManifest() {
   try {
-    const r = await fetch(faceManifestUrl, {mode: 'cors'});
+    const r = await fetch(faceManifestUrl);
     if (!r.ok) return;
     const d = await r.json();
     faceManifest = normalizeFaceManifest(d);
   } catch {}
+}
+
+function mirroredFaceAsset(path) {
+  // Never let manifest content cause a browser request to an external origin.
+  if (typeof path !== 'string' || path.length > 512 || !/^assets\/qq_emoji\/[A-Za-z0-9_\-\u{a0}-\u{10ffff}]+\/(png|apng)\/[A-Za-z0-9_\-\u{a0}-\u{10ffff}]+\.png$/u.test(path)) return '';
+  return new URL(path, faceAssetBaseUrl).href;
 }
 
 function normalizeFaceManifest(data) {
@@ -1418,15 +1424,12 @@ function normalizeFaceManifest(data) {
       };
       if (rawId && rawId !== id && !/^\d+$/.test(rawId)) info.unicode = rawId;
       if (qcid && qcid !== id) info.qcid = qcid;
-      if (png && png.path) info.png = new URL(png.path, faceAssetBaseUrl).href;
-      if (apng && apng.path) info.gif = new URL(apng.path, faceAssetBaseUrl).href;
+      if (png && png.path) info.png = mirroredFaceAsset(png.path);
+      if (apng && apng.path) info.gif = mirroredFaceAsset(apng.path);
       faces[id] = info;
       reaction_ids.push(id);
     }
     return {version: 1, source: 'koishi.js.org/QFace/assets/qq_emoji/_index.json', faces, reaction_ids};
-  }
-  if (data && typeof data === 'object' && data.faces) {
-    return data;
   }
   return {version: 1, source: '', faces: {}, reaction_ids: []};
 }
@@ -1909,7 +1912,7 @@ function reactionFaceEntries() {
 
 function splitReplyTokens(text) {
   const replies = [];
-  const content = String(text || '').replace(/\[reply:(\d+)\]/g, (match, id) => {
+  const content = String(text || '').replace(/\[reply:(-?\d+)\]/g, (match, id) => {
     replies.push(normalizeMessageId(id));
     return '';
   }).trim();
@@ -1919,7 +1922,7 @@ function splitReplyTokens(text) {
 function messagePreview(m) {
   if (!m) return '';
   let text = String(m.content || '')
-    .replace(/\[reply:\d+\]/g, '')
+    .replace(/\[reply:-?\d+\]/g, '')
     .replace(/\[image\]/g, '')
     .replace(/\[forward\]/g, '')
     .replace(/\[file\]/g, '')

@@ -160,6 +160,11 @@ See [Plugin Guide](docs/plugins.md) for the folder format, event schema, and plu
 
 ## Backend Behavior
 
+- Built-in QQ faces load through WebQQ's `/qface/` mirror; browsers do not
+  contact Koishi. The server caches requested files under `data/qface-cache/`,
+  refreshing the manifest after 24 hours and images after seven days. Cached
+  files remain available when Koishi is unreachable; uncached failures use
+  the existing text fallback. Custom QQ stickers use their existing handling.
 - Recalled messages remain visible and replyable, with a recalled tag and a system notice.
 - Friend requests are approved automatically.
 - Group invitations for the logged-in account are approved automatically.

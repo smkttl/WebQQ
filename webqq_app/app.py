@@ -8,6 +8,7 @@ from .store import MessageStore
 from .plugins import PluginManager
 from .napcat import create_backend
 from .request_store import ContactRequestStore
+from .qface import setup_face_mirror
 
 
 def configured_web_port(config):
@@ -59,6 +60,7 @@ async def main():
         ban_seconds=config.get("fail2ban_ban_seconds", DEFAULT_CONFIG["fail2ban_ban_seconds"]),
     )
     app.on_shutdown.append(flush_on_shutdown)
+    setup_face_mirror(app)
 
     app.router.add_post("/api/login", handle_login)
     app.router.add_get("/api/auth-status", handle_auth_status)
