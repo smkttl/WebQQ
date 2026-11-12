@@ -1732,7 +1732,11 @@ async function loadMessages(chatId, before = null, token = chatLoadToken) {
   }
   try {
     let url = `/api/messages?chat_id=${encodeURIComponent(chatId)}&limit=50`;
-    if (before) url += `&before=${before}`;
+    if (before) {
+      url += `&before=${before}`;
+      const anchor = loadedMessages[0];
+      if (anchor && anchor.message_id != null) url += `&before_message_id=${encodeURIComponent(anchor.message_id)}`;
+    }
     const r = await api(url);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
@@ -2709,11 +2713,14 @@ function showMessageMenu(message, x, y) {
   menu.style.top = `${top}px`;
 }
 
+function validServerMessageId(id) {
+  return /^-?\d+$/.test(id) && !/^-?0+$/.test(id);
+}
+
 function canSelectMessage(message) {
   const id = normalizeMessageId(message && message.message_id);
   return !!message
-    && /^\d+$/.test(id)
-    && Number(id) > 0
+    && validServerMessageId(id)
     && !message.system
     && !message.recalled
     && !message.pending
@@ -2818,7 +2825,7 @@ function syncMessageSelectionUI() {
 
 function canRevokeMessage(message) {
   const id = normalizeMessageId(message && message.message_id);
-  if (!(message && !message.recalled && /^\d+$/.test(id))) return false;
+  if (!(message && !message.recalled && validServerMessageId(id))) return false;
   if (message.self) {
     const time = Number(message.time || 0);
     return time > 0 && ((Date.now() / 1000) - time) <= revokeWindowSeconds;

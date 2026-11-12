@@ -2105,7 +2105,7 @@ class WebQQTui(App):
         selected = self._selected_message()
         selected_id = selected.stable_id if selected else ""
         try:
-            older = await self.client.messages(chat_id, limit=50, before=before)
+            older = await self.client.messages(chat_id, limit=50, before=before, before_message_id=self.messages[0].message_id)
             if token != self._load_token or not self.current_chat or self.current_chat.chat_id != chat_id:
                 return
             self.no_more_messages = len(older) < 50

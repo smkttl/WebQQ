@@ -55,7 +55,7 @@ class FakeClient:
             Chat("private_2", "Alice", "private", 10, "hello"),
         ]
 
-    async def messages(self, chat_id, limit=50, before=None):
+    async def messages(self, chat_id, limit=50, before=None, before_message_id=None):
         if before is not None:
             return []
         return [Message.from_json({
@@ -253,7 +253,7 @@ class SlowHistoryClient(FakeClient):
         self.older_started = asyncio.Event()
         self.older_release = asyncio.Event()
 
-    async def messages(self, chat_id, limit=50, before=None):
+    async def messages(self, chat_id, limit=50, before=None, before_message_id=None):
         if before is not None:
             self.older_started.set()
             await self.older_release.wait()
@@ -273,7 +273,7 @@ class PagedHistoryClient(FakeClient):
         super().__init__()
         self.history_before = []
 
-    async def messages(self, chat_id, limit=50, before=None):
+    async def messages(self, chat_id, limit=50, before=None, before_message_id=None):
         if before is None:
             values = range(101, 151)
         elif before > 51:
@@ -997,7 +997,7 @@ class WebQQTuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_open_chat_hydrates_unavailable_forward_without_opening_it(self):
         class ForwardClient(FakeClient):
-            async def messages(self, chat_id, limit=50, before=None):
+            async def messages(self, chat_id, limit=50, before=None, before_message_id=None):
                 return [Message.from_json({
                     "chat_id": chat_id,
                     "message_id": 2,

@@ -383,13 +383,13 @@ class MessageStore:
     def add_history_messages(self, messages):
         added = []
         batches = defaultdict(list)
-        seen = {self._dedup_key(msg) for items in self._data.values() for msg in items}
+        seen = {(cid, self._dedup_key(msg)) for cid, items in self._data.items() for msg in items}
         for msg in messages:
             key = self.chat_key(msg)
             if not key:
                 continue
             simplified = self._simplify(msg)
-            dedup_key = self._dedup_key(simplified)
+            dedup_key = (key, self._dedup_key(simplified))
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
@@ -578,10 +578,8 @@ class MessageStore:
     def mark_recalled(self, message_id, chat_id=None, operator_id=None, recalled_at=None):
         chat_id = canonical_chat_id(chat_id)
         key = str(message_id)
-        indexed_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
-        known_chat_id = chat_id if chat_id in self._data else indexed_chat_id
-        if chat_id and indexed_chat_id and chat_id != indexed_chat_id:
-            known_chat_id = indexed_chat_id
+        found = self.find_message(message_id, chat_id=chat_id)
+        known_chat_id = found["chat_id"] if found else None
         if not known_chat_id:
             return None
         for msg in self._data.get(known_chat_id, []):
@@ -667,7 +665,7 @@ class MessageStore:
 
     def remember_local_reaction(self, message_id, emoji_id, chat_id=None):
         chat_id = canonical_chat_id(chat_id)
-        key = (str(message_id), str(emoji_id))
+        key = (chat_id, str(message_id), str(emoji_id))
         self._pending_local_reactions[key] = dict(self._self_user)
         if chat_id and chat_id in self._data:
             self._message_chat_index.setdefault(str(message_id), chat_id)
@@ -676,7 +674,8 @@ class MessageStore:
         chat_id = canonical_chat_id(chat_id)
         key = str(message_id)
         emoji_id = str(emoji_id)
-        known_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        found = self.find_message(message_id, chat_id=chat_id)
+        known_chat_id = found["chat_id"] if found else None
         if not known_chat_id and chat_id in self._data:
             known_chat_id = chat_id
         if not known_chat_id:
@@ -728,9 +727,10 @@ class MessageStore:
         self._self_user = {"user_id": uid, "name": display}
         self._nicknames[uid] = display
 
-    def apply_reactions(self, message_id, reactions, chat_id=None, notice_user=None):
+    def apply_reactions(self, message_id, reactions, chat_id=None, notice_user=None, operation=None):
         key = str(message_id)
-        known_chat_id = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
+        found = self.find_message(message_id, chat_id=chat_id)
+        known_chat_id = found["chat_id"] if found else None
         if not known_chat_id and chat_id in self._data:
             known_chat_id = chat_id
         if not known_chat_id:
@@ -738,7 +738,26 @@ class MessageStore:
         normalized = reactions if isinstance(reactions, list) else []
         for msg in reversed(self._data.get(known_chat_id, [])):
             if str(msg.get("message_id")) == key:
-                merged = self._merge_reactions(key, normalized, msg.get("reactions") or [], notice_user=notice_user)
+                if operation and notice_user:
+                    previous = {str(r["emoji_id"]): dict(r) for r in msg.get("reactions", [])}
+                    for reaction in normalized:
+                        eid = str(reaction["emoji_id"])
+                        old = previous.get(eid, {"emoji_id": eid, "count": 0, "users": []})
+                        users = list(old.get("users") or [])
+                        uid = str(notice_user.get("user_id"))
+                        present = any(str(u.get("user_id")) == uid for u in users)
+                        if operation == "remove":
+                            users = [u for u in users if str(u.get("user_id")) != uid]
+                            count = max(0, reaction_count(old) - int(present))
+                        else:
+                            count = reaction_count(old) + int(not present)
+                            if not present:
+                                users.append(notice_user)
+                        self._pending_local_reactions.pop((chat_id, key, eid), None)
+                        previous[eid] = {"emoji_id": eid, "count": count, "users": users}
+                    merged = [r for r in previous.values() if reaction_count(r) > 0]
+                else:
+                    merged = self._merge_reactions(key, normalized, msg.get("reactions") or [], notice_user=notice_user, chat_id=known_chat_id)
                 msg["reactions"] = merged
                 self._message_chat_index[key] = known_chat_id
                 self._dirty.add(known_chat_id)
@@ -746,13 +765,13 @@ class MessageStore:
         self._message_chat_index.pop(key, None)
         return None
 
-    def _merge_reactions(self, message_id, reactions, previous_reactions, notice_user=None):
+    def _merge_reactions(self, message_id, reactions, previous_reactions, notice_user=None, chat_id=None):
         previous = {
             str(item.get("emoji_id")): item
             for item in previous_reactions
             if isinstance(item, dict) and item.get("emoji_id") is not None
         }
-        updates = self._merge_reaction_users(message_id, reactions, previous, notice_user=notice_user)
+        updates = self._merge_reaction_users(message_id, reactions, previous, notice_user=notice_user, chat_id=chat_id)
         merged = dict(previous)
         for reaction in updates:
             emoji_id = str(reaction.get("emoji_id"))
@@ -762,7 +781,7 @@ class MessageStore:
                 merged.pop(emoji_id, None)
         return list(merged.values())
 
-    def _merge_reaction_users(self, message_id, reactions, previous, notice_user=None):
+    def _merge_reaction_users(self, message_id, reactions, previous, notice_user=None, chat_id=None):
         merged = []
         for reaction in reactions:
             if not isinstance(reaction, dict):
@@ -777,7 +796,7 @@ class MessageStore:
             users = self._dedupe_reaction_users(users)
             if notice_user and not any(str(u.get("user_id")) == str(notice_user["user_id"]) for u in users if isinstance(u, dict)):
                 users = users + [notice_user]
-            pending_key = (str(message_id), emoji_id)
+            pending_key = (chat_id, str(message_id), emoji_id)
             pending_user = self._pending_local_reactions.pop(pending_key, None)
             if pending_user and not any(str(u.get("user_id")) == str(pending_user["user_id"]) for u in users if isinstance(u, dict)):
                 users = users + [pending_user]
@@ -820,15 +839,13 @@ class MessageStore:
     def find_message(self, message_id, chat_id=None):
         chat_id = canonical_chat_id(chat_id)
         key = str(message_id)
-        chat_ids = [chat_id] if chat_id in self._data else []
-        indexed = self._message_chat_index.get(key) or self.find_chat_by_message_id(key)
-        if indexed and indexed not in chat_ids:
-            chat_ids.append(indexed)
-        for cid in chat_ids or list(self._data.keys()):
-            for msg in self._data.get(cid, []):
-                if str(msg.get("message_id")) == key:
-                    return {"chat_id": cid, "message": msg}
-        return None
+        matches = [
+            {"chat_id": cid, "message": msg}
+            for cid, messages in self._data.items()
+            if not chat_id or cid == chat_id
+            for msg in messages if str(msg.get("message_id")) == key
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def _simplify(self, msg):
         sender = msg.get("sender") or {}
@@ -1153,10 +1170,15 @@ class MessageStore:
             "extra_segments": extra_segments,
         }
 
-    def get_messages(self, chat_id, limit=50, before=None):
+    def get_messages(self, chat_id, limit=50, before=None, before_message_id=None):
         chat_id = canonical_chat_id(chat_id)
         msgs = list(self._data.get(chat_id, []))
-        if before:
+        if before_message_id is not None:
+            index = next((i for i, m in enumerate(msgs) if str(m.get("message_id")) == str(before_message_id)), None)
+            if index is None:
+                raise ValueError("pagination anchor is not in local history")
+            msgs = msgs[:index]
+        elif before:
             msgs = [m for m in msgs if m["time"] < before]
         return msgs[-limit:]
 

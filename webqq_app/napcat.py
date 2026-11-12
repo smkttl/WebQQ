@@ -337,9 +337,12 @@ class OneBotConnection:
                 chat_id = f"group_{data['group_id']}" if data.get("group_id") else None
                 notice_user = extract_notice_user(data, chat_id=chat_id, store=self.store)
                 reactions = normalize_emoji_likes(data.get("likes") or data.get("like") or [], message_id=message_id)
-                applied = self.store.apply_reactions(message_id, reactions, chat_id=chat_id, notice_user=notice_user)
+                applied = self.store.apply_reactions(message_id, reactions, chat_id=chat_id, notice_user=notice_user, operation=("add" if data["is_add"] else "remove") if isinstance(data.get("is_add"), bool) else data.get("sub_type") if data.get("sub_type") in ("add", "remove") else None)
                 if applied:
-                    reactions = applied["reactions"]
+                    affected = {str(r["emoji_id"]) for r in reactions}
+                    reactions = list(applied["reactions"])
+                    remaining = {str(r["emoji_id"]) for r in reactions}
+                    reactions.extend({"emoji_id": eid, "count": 0, "users": []} for eid in affected - remaining)
                 payload = {
                     "message_id": str(message_id),
                     "reactions": reactions,

@@ -315,14 +315,20 @@ async def handle_messages(request):
         before = float(before_raw) if before_raw else None
     except (TypeError, ValueError):
         return web.json_response({"error": "before must be a timestamp"}, status=400)
-    messages = store.get_messages(chat_id, limit=limit, before=before)
+    anchor = request.query.get("before_message_id")
+    try:
+        messages = store.get_messages(chat_id, limit=limit, before=before, before_message_id=anchor)
+    except ValueError as error:
+        return web.json_response({"error": str(error)}, status=400)
     if len(messages) < limit and request.app["napcat"].ws is not None:
         before_message_id = store.oldest_message_id(chat_id, before=before)
+        if before_message_id is not None and not is_int_string(str(before_message_id)):
+            before_message_id = None
         try:
             history = await request.app["napcat"].fetch_history(chat_id, before_message_id=before_message_id, count=limit)
             added = store.add_history_messages(history)
             if added:
-                messages = store.get_messages(chat_id, limit=limit, before=before)
+                messages = store.get_messages(chat_id, limit=limit, before=before, before_message_id=anchor)
         except Exception:
             pass
     return web.json_response({"messages": messages})

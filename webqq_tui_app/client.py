@@ -77,10 +77,12 @@ class WebQQClient:
         values = payload.get("chats")
         return [Chat.from_json(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
 
-    async def messages(self, chat_id: str, limit: int = 50, before: Optional[float] = None) -> List[Message]:
+    async def messages(self, chat_id: str, limit: int = 50, before: Optional[float] = None, before_message_id: Optional[str] = None) -> List[Message]:
         params: Dict[str, str] = {"chat_id": chat_id, "limit": str(limit)}
         if before is not None:
             params["before"] = str(before)
+        if before_message_id is not None:
+            params["before_message_id"] = before_message_id
         payload = await self._request_json("GET", "/api/messages", params=params)
         values = payload.get("messages")
         return [Message.from_json(item) for item in values if isinstance(item, dict)] if isinstance(values, list) else []
