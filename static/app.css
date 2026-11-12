@@ -1121,7 +1121,6 @@ button.group-manager-row:hover { background: var(--surface-subtle); }
   .brand-copy span { display: none; }
   .chat-title-id { max-width: 210px; }
   .msg { max-width: 94%; }
-  .msg-avatar { display: none; }
   .portal-select { max-width: 74px; }
   .send-bar .attach-button,
   .send-bar .image-button { display: none; }
